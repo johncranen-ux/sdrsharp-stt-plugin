@@ -185,6 +185,7 @@ namespace SDRSharp.SttPlugin
                 ms.Write(part, 0, part.Length);
             }
 
+            AddField("temperature", "0");
             if (!string.IsNullOrEmpty(language)) AddField("language", language);
             if (!string.IsNullOrEmpty(prompt))   AddField("initial_prompt", prompt);
 

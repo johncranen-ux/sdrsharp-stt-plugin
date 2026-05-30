@@ -397,6 +397,41 @@ def _find_ais_hints(text: str, n: int = 5) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Hallucination filter
+# ---------------------------------------------------------------------------
+
+_HALLUCINATION_EXACT = {
+    "you", "hmm", "hm", "ah", "uh", "um",
+    "thank you", "thanks",
+    "thank you for watching", "thanks for watching",
+    "please subscribe", "subscribe",
+    "bye", "goodbye",
+}
+
+_HALLUCINATION_PATTERNS = [
+    re.compile(r'^\s*[.\s]+\s*$'),                   # only dots / whitespace
+    re.compile(r'^\s*[\W\s]+\s*$'),                  # only punctuation
+    re.compile(r'^(\w[\w\s]*?)\s*(\1\s*){3,}$', re.IGNORECASE),  # phrase repeated 4+ times
+]
+
+
+def _is_hallucination(text: str) -> bool:
+    t = text.strip()
+    if not t or len(t) < 2:
+        return True
+    t_lower = t.lower().rstrip('.,!?').strip()
+    if t_lower in _HALLUCINATION_EXACT:
+        return True
+    for pat in _HALLUCINATION_PATTERNS:
+        if pat.match(t):
+            return True
+    words = t_lower.split()
+    if len(words) >= 4 and len(set(words)) == 1:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Post-processing corrections
 # ---------------------------------------------------------------------------
 
@@ -610,51 +645,55 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data     = json.loads(resp_body)
                 raw_text = data.get("text", "").strip()
 
-                if len(raw_text) >= 8:
-                    if mode == "airband":
-                        corrected = _apply_sttt_corrections(raw_text)
-                        channel_label = f"[{channel} MHz]" if channel else "[airband]"
-                        print(f"[{ts}] {channel_label} {corrected}", flush=True)
-                        data["text"] = corrected
-                        resp_body = json.dumps(data).encode("utf-8")
+                if _is_hallucination(raw_text):
+                    print(f"[{ts}] [filtered] '{raw_text[:60]}'", flush=True)
+                    data["text"] = ""
+                    resp_body = json.dumps(data).encode("utf-8")
 
-                    elif channel in ("160.650", "160,650"):
-                        # Maas Approach CH 01: full Claude extraction + AIS enrichment
-                        result = extract_vessel(raw_text)
-                        result = enrich_with_ais(result)
+                elif mode == "airband":
+                    corrected = _apply_sttt_corrections(raw_text)
+                    channel_label = f"[{channel} MHz]" if channel else "[airband]"
+                    print(f"[{ts}] {channel_label} {corrected}", flush=True)
+                    data["text"] = corrected
+                    resp_body = json.dumps(data).encode("utf-8")
 
-                        # Maas response correlation
-                        if _is_maas_response(raw_text) and result.get("vessel"):
-                            fuzzy_entry, fuzzy_idx = _find_fuzzy_match_in_buffer(result.get("vessel"))
-                            if fuzzy_entry:
-                                old_v = fuzzy_entry["vessel"]
-                                new_v = result.get("vessel")
-                                print(f"  [correlation] '{old_v}' -> '{new_v}'", flush=True)
-                                _update_buffer_entry(fuzzy_idx, new_v, result)
+                elif channel in ("160.650", "160,650"):
+                    # Maas Approach CH 01: full Claude extraction + AIS enrichment
+                    result = extract_vessel(raw_text)
+                    result = enrich_with_ais(result)
 
-                        display_text = format_for_plugin(result)
-                        _append_vessel_to_log(result, raw_text)
-                        _add_to_buffer(result, raw_text)
+                    # Maas response correlation
+                    if _is_maas_response(raw_text) and result.get("vessel"):
+                        fuzzy_entry, fuzzy_idx = _find_fuzzy_match_in_buffer(result.get("vessel"))
+                        if fuzzy_entry:
+                            old_v = fuzzy_entry["vessel"]
+                            new_v = result.get("vessel")
+                            print(f"  [correlation] '{old_v}' -> '{new_v}'", flush=True)
+                            _update_buffer_entry(fuzzy_idx, new_v, result)
 
-                        vessel   = result.get("vessel") or "?"
-                        vtype    = result.get("vessel_type") or "-"
-                        mmsi     = result.get("mmsi") or "-"
-                        callsign = result.get("callsign") or "-"
-                        method   = f"/{result['match_method']}" if result.get("match_method") else ""
-                        ais_size = f"  ais={_cache_size()}" if _cache_size() else ""
-                        print(f"[{ts}] CH01: vessel={vessel}  type={vtype}  mmsi={mmsi}  cs={callsign}{method}{ais_size}", flush=True)
-                        print(f"        {result.get('text', raw_text)}", flush=True)
+                    display_text = format_for_plugin(result)
+                    _append_vessel_to_log(result, raw_text)
+                    _add_to_buffer(result, raw_text)
 
-                        data["text"] = display_text
-                        resp_body = json.dumps(data).encode("utf-8")
+                    vessel   = result.get("vessel") or "?"
+                    vtype    = result.get("vessel_type") or "-"
+                    mmsi     = result.get("mmsi") or "-"
+                    callsign = result.get("callsign") or "-"
+                    method   = f"/{result['match_method']}" if result.get("match_method") else ""
+                    ais_size = f"  ais={_cache_size()}" if _cache_size() else ""
+                    print(f"[{ts}] CH01: vessel={vessel}  type={vtype}  mmsi={mmsi}  cs={callsign}{method}{ais_size}", flush=True)
+                    print(f"        {result.get('text', raw_text)}", flush=True)
 
-                    else:
-                        # Other maritime channels: corrections only, no AI
-                        corrected = _apply_sttt_corrections(raw_text)
-                        channel_label = f"[{channel} MHz]" if channel else "[maritime]"
-                        print(f"[{ts}] {channel_label} {corrected}", flush=True)
-                        data["text"] = corrected
-                        resp_body = json.dumps(data).encode("utf-8")
+                    data["text"] = display_text
+                    resp_body = json.dumps(data).encode("utf-8")
+
+                else:
+                    # Other maritime channels: corrections only, no AI
+                    corrected = _apply_sttt_corrections(raw_text)
+                    channel_label = f"[{channel} MHz]" if channel else "[maritime]"
+                    print(f"[{ts}] {channel_label} {corrected}", flush=True)
+                    data["text"] = corrected
+                    resp_body = json.dumps(data).encode("utf-8")
 
             except Exception as exc:
                 print(f"[{ts}] post-process error: {exc}", flush=True)

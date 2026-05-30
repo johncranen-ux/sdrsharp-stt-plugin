@@ -15,7 +15,12 @@ namespace SDRSharp.SttPlugin
         public static string  ServerUrl { get; set; } = "http://localhost:9000";
         public static string  Mode      { get; set; } = "maritime";
         public static string  Language  { get; set; } = "en";
-        public static string  Prompt    { get; set; } = "";
+        public static string  Prompt    { get; set; } =
+            "Maas Approach, Rotterdam VTS, Pilot Rotterdam, Botlek Traffic. " +
+            "This is Motortanker Margrethe Maersk, callsign OWYP, draught twelve point five metres. " +
+            "Roger, copy, over, out, stand by, wilco, say again. " +
+            "VHF channel one six, channel zero one. " +
+            "Port, starboard, ahead, astern, knots, nautical miles, bearing.";
         public static int     VadLevel  { get; set; } = 10;
         public static int     SilenceMs { get; set; } = 600;
         public static bool    Enabled   { get; set; } = false;
