@@ -1,0 +1,43 @@
+@echo off
+setlocal
+
+:: ============================================================
+:: SDRSharp STT Plugin — Server Startup Script
+:: Copy this file to start-all.bat and fill in your API keys.
+:: start-all.bat is git-ignored so keys are never committed.
+:: ============================================================
+
+:: -- API Keys (edit these) -----------------------------------
+set ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
+set AISSTREAM_API_KEY=YOUR_AISSTREAM_KEY_HERE
+
+:: -- Ports (defaults match whisper proxy settings) -----------
+:: Whisper-server listens on 8080 inside WSL (accessible as localhost:8080 from Windows)
+:: Proxy listens on 9000 and forwards to 8080
+set WHISPER_BACKEND_PORT=8080
+set PROXY_PORT=9000
+
+:: -- Paths ---------------------------------------------------
+set SCRIPT_DIR=%~dp0
+set PROXY_SCRIPT=%SCRIPT_DIR%whisper-proxy.py
+
+:: -- Start whisper-server in WSL2 Ubuntu-22.04 ---------------
+echo [1/2] Starting whisper-server in WSL2 Ubuntu-22.04 (large-v3-turbo, port 8080)...
+start "Whisper Server (WSL)" cmd /k wsl -d Ubuntu-22.04 -- bash -l -c "~/start-whisper-server.sh"
+
+:: -- Wait for whisper-server to be ready ---------------------
+echo     Waiting 20 seconds for model to load into GPU VRAM...
+timeout /t 20 /nobreak >nul
+
+:: -- Start the Python proxy ----------------------------------
+echo [2/2] Starting Whisper proxy (port 9000)...
+start "Whisper Proxy" cmd /k py "%PROXY_SCRIPT%"
+
+echo.
+echo Both services started.
+echo   Whisper server : localhost:8080  (inside WSL2 Ubuntu-22.04)
+echo   Proxy          : localhost:9000  (Windows, forwards to :8080)
+echo.
+echo SDRSharp plugin should connect to: http://localhost:9000
+echo.
+pause

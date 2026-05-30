@@ -1,0 +1,41 @@
+# Build outputs
+bin/
+obj/
+Debug/
+Release/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+packages/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+env/
+
+# Logs and temp
+*.log
+*.tmp
+debug_chunk.wav
+ais_cache.json
+identified_vessels.html
+
+# Secrets — never commit API keys
+start-all.bat
+
+# Claude Code local settings
+.claude/
+
+# Reference project (not part of this codebase)
+WhisperPlugin/
