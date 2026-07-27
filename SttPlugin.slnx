@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj" />
+  <Project Path="SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj" />
 </Solution>

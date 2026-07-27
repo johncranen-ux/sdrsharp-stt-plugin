@@ -27,7 +27,14 @@ namespace SDRSharp.SttPlugin
             _diagTimer.Elapsed += (_, _) =>
             {
                 if (!IsDisposed)
-                    UpdateStatusLabel(_audioProcessor.ConsumerState);
+                {
+                    var status =
+                        $"{_audioProcessor.ConsumerState}   " +
+                        $"rms={_audioProcessor.LastRms:F3} floor={_audioProcessor.NoiseFloor:F3} " +
+                        $"q={_audioProcessor.QueueCount} drop={_audioProcessor.DroppedFrames} " +
+                        $"sendq={_audioProcessor.SendQueueCount} senddrop={_audioProcessor.DroppedChunks}";
+                    UpdateStatusLabel(status);
+                }
             };
             _diagTimer.Start();
         }
@@ -40,6 +47,8 @@ namespace SDRSharp.SttPlugin
             nudVadLevel.Value  = PluginSettings.VadLevel;
             nudSilenceMs.Value = PluginSettings.SilenceMs;
             chkEnable.Checked  = PluginSettings.Enabled;
+            chkCaptureChunks.Checked     = PluginSettings.CaptureChunks;
+            chkCaptureContinuous.Checked = PluginSettings.CaptureContinuous;
 
             int modeIdx = cmbMode.Items.IndexOf(
                 System.Globalization.CultureInfo.CurrentCulture.TextInfo
@@ -54,6 +63,8 @@ namespace SDRSharp.SttPlugin
             _audioProcessor.VadLevel  = PluginSettings.VadLevel;
             _audioProcessor.SilenceMs = PluginSettings.SilenceMs;
             _audioProcessor.Enabled   = PluginSettings.Enabled;
+            _audioProcessor.CaptureChunks     = PluginSettings.CaptureChunks;
+            _audioProcessor.CaptureContinuous = PluginSettings.CaptureContinuous;
         }
 
         public void SaveSettings()
@@ -65,6 +76,8 @@ namespace SDRSharp.SttPlugin
             PluginSettings.VadLevel  = _audioProcessor.VadLevel;
             PluginSettings.SilenceMs = _audioProcessor.SilenceMs;
             PluginSettings.Enabled   = _audioProcessor.Enabled;
+            PluginSettings.CaptureChunks     = _audioProcessor.CaptureChunks;
+            PluginSettings.CaptureContinuous = _audioProcessor.CaptureContinuous;
             PluginSettings.Save();
         }
 
@@ -150,6 +163,16 @@ namespace SDRSharp.SttPlugin
         {
             _audioProcessor.DebugSaveNext = true;
             lblStatus.Text = "Next chunk will be saved as debug_chunk.wav";
+        }
+
+        private void chkCaptureChunks_CheckedChanged(object sender, EventArgs e)
+        {
+            _audioProcessor.CaptureChunks = chkCaptureChunks.Checked;
+        }
+
+        private void chkCaptureContinuous_CheckedChanged(object sender, EventArgs e)
+        {
+            _audioProcessor.CaptureContinuous = chkCaptureContinuous.Checked;
         }
 
         // ── Status / transcript updates ───────────────────────────────────

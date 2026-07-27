@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
@@ -42,7 +43,8 @@ namespace SDRSharp.SttPlugin
 
         public WhisperClient() { }
 
-        public async Task SendAsync(float[] samples, double sampleRate, string? channel = null)
+        // Returns the transcribed text on success, or "" on any failure/timeout/empty result.
+        public async Task<string> SendAsync(float[] samples, double sampleRate, string? channel = null)
         {
             var serverUrl = _serverUrl;
             var language  = _language;
@@ -52,7 +54,7 @@ namespace SDRSharp.SttPlugin
             if (string.IsNullOrWhiteSpace(serverUrl))
             {
                 RaiseStatus("No server URL configured.");
-                return;
+                return "";
             }
 
             RaiseStatus("Sending…");
@@ -67,15 +69,15 @@ namespace SDRSharp.SttPlugin
                                  out var host, out var port, out var path))
                 {
                     RaiseStatus("Invalid server URL.");
-                    return;
+                    return "";
                 }
 
                 using var tcp = new TcpClient();
                 var connectTask = tcp.ConnectAsync(host, port);
-                if (await Task.WhenAny(connectTask, Task.Delay(5_000)).ConfigureAwait(false) != connectTask)
+                if (await Task.WhenAny(connectTask, Task.Delay(TimeSpan.FromSeconds(5.0))).ConfigureAwait(false) != connectTask)
                 {
                     RaiseStatus("Connection timed out.");
-                    return;
+                    return "";
                 }
                 await connectTask.ConfigureAwait(false);
 
@@ -95,12 +97,17 @@ namespace SDRSharp.SttPlugin
                     channelHeader +
                     "Connection: close\r\n\r\n";
 
-                var headerBytes = Encoding.ASCII.GetBytes(requestLine);
-                await stream.WriteAsync(headerBytes, 0, headerBytes.Length).ConfigureAwait(false);
-                await stream.WriteAsync(body, 0, body.Length).ConfigureAwait(false);
-                await stream.FlushAsync().ConfigureAwait(false);
+                // Covers the whole request/response exchange, not just the read: NetworkStream
+                // .WriteAsync does not honor TcpClient.SendTimeout (that only applies to the
+                // synchronous Write path), so an unbounded write here could hang indefinitely
+                // with no timeout at all if the connection stalls.
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60.0));
 
-                using var cts    = new CancellationTokenSource(TimeSpan.FromSeconds(60.0));
+                var headerBytes = Encoding.ASCII.GetBytes(requestLine);
+                await stream.WriteAsync(headerBytes, 0, headerBytes.Length, cts.Token).ConfigureAwait(false);
+                await stream.WriteAsync(body, 0, body.Length, cts.Token).ConfigureAwait(false);
+                await stream.FlushAsync(cts.Token).ConfigureAwait(false);
+
                 using var reader = new StreamReader(stream, Encoding.UTF8);
 
                 var statusLine = await reader.ReadLineAsync().WaitAsync(cts.Token).ConfigureAwait(false) ?? "";
@@ -120,32 +127,38 @@ namespace SDRSharp.SttPlugin
                     var text = ExtractText(responseBody);
                     if (!string.IsNullOrWhiteSpace(text))
                         RaiseStatus(text);
+                    return text;
                 }
                 else
                 {
                     var preview = responseBody.Length > 100 ? responseBody[..100] + "…" : responseBody;
                     RaiseStatus($"HTTP {statusCode}: {preview}");
+                    return "";
                 }
             }
             catch (OperationCanceledException)
             {
                 RaiseStatus("Request timed out (60 s).");
+                return "";
             }
             catch (SocketException ex)
             {
                 RaiseStatus($"Network error: {ex.Message}");
+                return "";
             }
             catch (IOException ex)
             {
                 RaiseStatus($"IO error: {ex.Message}");
+                return "";
             }
             catch (Exception ex)
             {
                 RaiseStatus($"Error: {ex.Message}");
+                return "";
             }
         }
 
-        private static bool TryParseUrl(string url, out string host, out int port, out string path)
+        internal static bool TryParseUrl(string url, out string host, out int port, out string path)
         {
             host = ""; port = 80; path = "/";
             if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return false;
@@ -186,8 +199,15 @@ namespace SDRSharp.SttPlugin
             }
 
             AddField("temperature", "0");
+            AddField("response_format", "json");
             if (!string.IsNullOrEmpty(language)) AddField("language", language);
-            if (!string.IsNullOrEmpty(prompt))   AddField("initial_prompt", prompt);
+            if (!string.IsNullOrEmpty(prompt))
+            {
+                // whisper.cpp's /inference reads "prompt", not "initial_prompt" (which is
+                // a whisper.cpp CLI-only flag name and silently ignored by the server).
+                AddField("prompt", prompt);
+                AddField("carry_initial_prompt", "true");
+            }
 
             var fileHeader = Encoding.ASCII.GetBytes(
                 $"--{boundary}\r\n" +
@@ -202,19 +222,62 @@ namespace SDRSharp.SttPlugin
             return ms.ToArray();
         }
 
-        private static string ExtractText(string json)
+        // Hand-rolled rather than System.Text.Json: that assembly ships with a version tied
+        // to the target framework, and SDR# hosts plugins on .NET 8 regardless of what this
+        // project targets — a plugin compiled against System.Text.Json 9.x fails to load it
+        // at runtime ("Could not load file or assembly 'System.Text.Json, Version=9.0.0.0'").
+        // Correctly handles the JSON string-escape sequences the old substring version broke on.
+        internal static string ExtractText(string json)
         {
             try
             {
                 int tIdx = json.IndexOf("\"text\"", StringComparison.Ordinal);
-                if (tIdx >= 0)
+                if (tIdx < 0) return "";
+
+                int colon = json.IndexOf(':', tIdx + 6);
+                if (colon < 0) return "";
+
+                int i = colon + 1;
+                while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+                if (i >= json.Length || json[i] != '"') return "";
+                i++; // skip opening quote
+
+                var sb = new StringBuilder();
+                while (i < json.Length && json[i] != '"')
                 {
-                    int colon = json.IndexOf(':', tIdx);
-                    int qo    = json.IndexOf('"', colon + 1);
-                    int qc    = json.IndexOf('"', qo + 1);
-                    if (qo >= 0 && qc > qo)
-                        return json.Substring(qo + 1, qc - qo - 1).Trim();
+                    char c = json[i];
+                    if (c == '\\' && i + 1 < json.Length)
+                    {
+                        char next = json[i + 1];
+                        switch (next)
+                        {
+                            case '"':  sb.Append('"');  i += 2; break;
+                            case '\\': sb.Append('\\'); i += 2; break;
+                            case '/':  sb.Append('/');  i += 2; break;
+                            case 'b':  sb.Append('\b'); i += 2; break;
+                            case 'f':  sb.Append('\f'); i += 2; break;
+                            case 'n':  sb.Append('\n'); i += 2; break;
+                            case 'r':  sb.Append('\r'); i += 2; break;
+                            case 't':  sb.Append('\t'); i += 2; break;
+                            case 'u' when i + 5 < json.Length &&
+                                          ushort.TryParse(json.AsSpan(i + 2, 4), NumberStyles.HexNumber,
+                                                           CultureInfo.InvariantCulture, out var code):
+                                sb.Append((char)code);
+                                i += 6;
+                                break;
+                            default:
+                                sb.Append(next);
+                                i += 2;
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                        i++;
+                    }
                 }
+                return sb.ToString().Trim();
             }
             catch { }
             return "";

@@ -19,6 +19,8 @@ namespace SDRSharp.SttPlugin
         private Label         lblPrompt;
         private TextBox       txtPrompt;
         private CheckBox      chkEnable;
+        private CheckBox      chkCaptureChunks;
+        private CheckBox      chkCaptureContinuous;
         private Label         lblStatus;
         private Label         lblTranscriptHeader;
         private Button        btnClearTranscript;
@@ -45,6 +47,8 @@ namespace SDRSharp.SttPlugin
             lblPrompt           = new Label();
             txtPrompt           = new TextBox();
             chkEnable           = new CheckBox();
+            chkCaptureChunks    = new CheckBox();
+            chkCaptureContinuous= new CheckBox();
             lblStatus           = new Label();
             lblTranscriptHeader = new Label();
             btnClearTranscript  = new Button();
@@ -97,15 +101,15 @@ namespace SDRSharp.SttPlugin
             nudVadLevel.Size         = new System.Drawing.Size(55, 23);
             nudVadLevel.TabIndex     = 2;
             nudVadLevel.ValueChanged += new System.EventHandler(nudVadLevel_ValueChanged);
-            toolTip.SetToolTip(nudVadLevel, "RMS threshold 0-100 (0=disabled). Frames below this are silence.");
+            toolTip.SetToolTip(nudVadLevel, "Minimum RMS floor 0-100 (0=disabled). The VAD also adapts to ambient noise above this floor; frames below it are always silence.");
 
             // ── lblSilenceMs ──────────────────────────────────────────────
             lblSilenceMs.AutoSize = true;
-            lblSilenceMs.Location = new System.Drawing.Point(72, 92);
+            lblSilenceMs.Location = new System.Drawing.Point(130, 92);
             lblSilenceMs.Text     = "End silence (ms):";
 
             // ── nudSilenceMs ──────────────────────────────────────────────
-            nudSilenceMs.Location     = new System.Drawing.Point(72, 108);
+            nudSilenceMs.Location     = new System.Drawing.Point(130, 108);
             nudSilenceMs.Minimum      = 100;
             nudSilenceMs.Maximum      = 3000;
             nudSilenceMs.Increment    = 100;
@@ -113,7 +117,7 @@ namespace SDRSharp.SttPlugin
             nudSilenceMs.Size         = new System.Drawing.Size(60, 23);
             nudSilenceMs.TabIndex     = 3;
             nudSilenceMs.ValueChanged += new System.EventHandler(nudSilenceMs_ValueChanged);
-            toolTip.SetToolTip(nudSilenceMs, "Milliseconds of trailing silence before a speech chunk is sent.");
+            toolTip.SetToolTip(nudSilenceMs, "Milliseconds of trailing silence before a speech chunk closes. Only a short tail is kept in the audio actually sent.");
 
             // ── lblLanguage ───────────────────────────────────────────────
             lblLanguage.AutoSize = true;
@@ -149,43 +153,62 @@ namespace SDRSharp.SttPlugin
             chkEnable.CheckedChanged += new System.EventHandler(chkEnable_CheckedChanged);
 
             // ── btnSaveSettings ───────────────────────────────────────────
-            btnSaveSettings.Location  = new System.Drawing.Point(158, 178);
-            btnSaveSettings.Size      = new System.Drawing.Size(65, 22);
+            btnSaveSettings.Location  = new System.Drawing.Point(150, 178);
+            btnSaveSettings.Size      = new System.Drawing.Size(60, 22);
             btnSaveSettings.Text      = "Save";
             btnSaveSettings.TabIndex  = 7;
             btnSaveSettings.Click    += new System.EventHandler(btnSaveSettings_Click);
             toolTip.SetToolTip(btnSaveSettings, "Save current settings to disk");
 
             // ── btnDebugSave ──────────────────────────────────────────────
-            btnDebugSave.Location  = new System.Drawing.Point(228, 178);
-            btnDebugSave.Size      = new System.Drawing.Size(66, 22);
+            btnDebugSave.Location  = new System.Drawing.Point(214, 178);
+            btnDebugSave.Size      = new System.Drawing.Size(80, 22);
             btnDebugSave.Text      = "Debug WAV";
             btnDebugSave.TabIndex  = 8;
             btnDebugSave.Click    += new System.EventHandler(btnDebugSave_Click);
             toolTip.SetToolTip(btnDebugSave, "Save next audio chunk to debug_chunk.wav for inspection");
 
+            // ── chkCaptureChunks ─────────────────────────────────────────
+            chkCaptureChunks.AutoSize        = true;
+            chkCaptureChunks.Location        = new System.Drawing.Point(6, 202);
+            chkCaptureChunks.Text            = "Capture chunks";
+            chkCaptureChunks.TabIndex        = 10;
+            chkCaptureChunks.CheckedChanged += new System.EventHandler(chkCaptureChunks_CheckedChanged);
+            toolTip.SetToolTip(chkCaptureChunks, "Save every sent chunk (raw + resampled WAV + JSONL) under captures\\ for offline benchmarking.");
+
+            // ── chkCaptureContinuous ─────────────────────────────────────
+            chkCaptureContinuous.AutoSize        = true;
+            chkCaptureContinuous.Location        = new System.Drawing.Point(150, 202);
+            chkCaptureContinuous.Text            = "Capture raw stream";
+            chkCaptureContinuous.TabIndex        = 11;
+            chkCaptureContinuous.CheckedChanged += new System.EventHandler(chkCaptureContinuous_CheckedChanged);
+            toolTip.SetToolTip(chkCaptureContinuous, "Continuously record the undecimated post-filter audio to captures\\raw-continuous\\ for offline VAD replay.");
+
             // ── lblStatus ────────────────────────────────────────────────
+            // Two lines tall: the diagnostic line (rms/floor/queue/drop counters) is
+            // longer than fits on one line at this width, and a Label clips rather than
+            // scrolls, so a too-short height silently hides the wrapped second line.
             lblStatus.AutoSize  = false;
-            lblStatus.Location  = new System.Drawing.Point(6, 206);
-            lblStatus.Size      = new System.Drawing.Size(288, 16);
+            lblStatus.Location  = new System.Drawing.Point(6, 226);
+            lblStatus.Size      = new System.Drawing.Size(288, 32);
             lblStatus.Text      = "Idle";
             lblStatus.ForeColor = System.Drawing.SystemColors.GrayText;
             lblStatus.Font      = new System.Drawing.Font("Segoe UI", 7.5f);
 
             // ── lblTranscriptHeader ───────────────────────────────────────
             lblTranscriptHeader.AutoSize = true;
-            lblTranscriptHeader.Location = new System.Drawing.Point(6, 226);
+            lblTranscriptHeader.Location = new System.Drawing.Point(6, 262);
             lblTranscriptHeader.Text     = "Transcript:";
 
             // ── btnClearTranscript ────────────────────────────────────────
-            btnClearTranscript.Location  = new System.Drawing.Point(246, 222);
+            btnClearTranscript.Location  = new System.Drawing.Point(246, 258);
             btnClearTranscript.Size      = new System.Drawing.Size(48, 20);
             btnClearTranscript.Text      = "Clear";
             btnClearTranscript.TabIndex  = 9;
             btnClearTranscript.Click    += new System.EventHandler(btnClearTranscript_Click);
 
             // ── txtTranscript ─────────────────────────────────────────────
-            txtTranscript.Location   = new System.Drawing.Point(6, 244);
+            txtTranscript.Location   = new System.Drawing.Point(6, 280);
             txtTranscript.Size       = new System.Drawing.Size(288, 270);
             txtTranscript.Multiline  = true;
             txtTranscript.ReadOnly   = true;
@@ -212,13 +235,15 @@ namespace SDRSharp.SttPlugin
             Controls.Add(chkEnable);
             Controls.Add(btnSaveSettings);
             Controls.Add(btnDebugSave);
+            Controls.Add(chkCaptureChunks);
+            Controls.Add(chkCaptureContinuous);
             Controls.Add(lblStatus);
             Controls.Add(lblTranscriptHeader);
             Controls.Add(btnClearTranscript);
             Controls.Add(txtTranscript);
             Name        = "ControlPanel";
-            Size        = new System.Drawing.Size(300, 520);
-            MinimumSize = new System.Drawing.Size(300, 520);
+            Size        = new System.Drawing.Size(300, 556);
+            MinimumSize = new System.Drawing.Size(300, 556);
             TabIndex    = 0;
 
             ((System.ComponentModel.ISupportInitialize)nudVadLevel).EndInit();

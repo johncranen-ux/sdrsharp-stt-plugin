@@ -23,6 +23,7 @@ __pycache__/
 .env
 venv/
 env/
+.pytest_cache/
 
 # Logs and temp
 *.log
@@ -30,6 +31,11 @@ env/
 debug_chunk.wav
 ais_cache.json
 identified_vessels.html
+
+# bench.py output (generated locally, references.txt/captures are user data)
+bench-results*.json
+bench-report*.html
+captures/
 
 # Secrets — never commit API keys
 start-all.bat

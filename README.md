@@ -1,0 +1,72 @@
+# SDR# Speech-to-Text Plugin
+
+Transcribes VHF radio traffic (Rotterdam maritime, later aviation) received in SDR#, using
+a local whisper.cpp server on an AMD GPU via ROCm. See `CLAUDE.md` for the full project
+brief and business requirements.
+
+## Architecture
+
+Three tiers:
+
+1. **whisper.cpp server** (WSL2 Ubuntu-22.04, port 8080) — `~/whisper.cpp/build-rocm/bin/whisper-server`,
+   GPU-accelerated via ROCm. Start with `~/start-whisper-server.sh` or `server/start-all.bat`.
+2. **Python proxy** (`server/whisper-proxy.py`, port 9000 → 8080) — owns all whisper.cpp
+   decoder parameters (see below), rewrites the plugin's request to inject them, applies
+   hallucination filtering and maritime-term corrections, and (on channel 160.650 / Maas
+   Approach) extracts vessel names via Claude and enriches them against a live AIS feed.
+3. **C# SDR# plugin** (`SDRSharp.SttPlugin/`) — captures post-filter audio, runs VAD
+   (pre-roll buffer, squelch-aware, adaptive noise floor), applies an anti-aliased
+   resample + DC-block + highpass + normalize chain, and sends chunks to the proxy.
+
+## Current configuration (chosen on real data, 2026-07-27)
+
+| Setting | Value | Why |
+|---|---|---|
+| Model | `ggml-large-v3.bin` | Benchmarked against `large-v3-turbo` on 49 real, hand-transcribed Rotterdam VHF clips: 38.9% pooled WER vs 40.8%. Costs ~33% more decode time (mean 3.55s vs 2.66s) and 1.5GB more VRAM — trivial on a 24GB card, and both models decode well under real-time (aggregate RTF 0.57x vs 0.43x), so no throughput risk. |
+| Beam search | `beam_size=5`, `best_of=5` | ~1 point better than greedy once the prompt is fixed. |
+| Maritime prompt | Fluent example transmissions (see `DEFAULT_MARITIME_PROMPT` in `whisper-proxy.py`) | The single largest lever found: ~9-10 points of WER improvement over no prompt. A keyword-list-style prompt was tried first and rejected — it primes Whisper to echo the list back verbatim on noisy/silent audio. |
+| Server-side Silero VAD | **Off** (`WHISPER_VAD=false`) | Measured no WER benefit over VAD-off at the same decoder settings (48.5%/41.8% vs 40.8% pooled), and whisper.cpp's VAD+beam combination has its own flakiness (intermittent HTTP 500s, and one full server wedge observed). The plugin's own client-side VAD already does this job. |
+| Suppress non-speech tokens | On | Reduces hallucinated fillers. |
+
+All of the above are env-overridable in `whisper-proxy.py` (`WHISPER_BEAM_SIZE`,
+`WHISPER_VAD`, `WHISPER_PROMPT`, etc.) without touching code.
+
+Full per-clip results: `server/bench-report.html` (turbo, full config matrix) and
+`server/bench-report-large-v3.html` (large-v3, winning config).
+
+## Known limitations
+
+- **~39% word error rate even in the best configuration.** This is genuinely hard audio —
+  accented non-native English, real radio noise, dense maritime jargon, proper nouns not
+  in Whisper's vocabulary. Not something further parameter tuning fixes.
+- **Nautical-term and vessel-name errors** ("ladder" → "letter", "buoy" → "boy", the same
+  vessel name transcribed differently across nearby clips) are a distinct, known category
+  — planned for a later phase per `CLAUDE.md`'s "Additional Features" section (local LLM
+  term correction; vessel-name AIS matching already partially built but currently blocked
+  by an unrelated SSL/network issue on the dev machine, see below).
+- **Vessel-name extraction and AIS enrichment are currently non-functional.** SSL
+  certificate verification fails for both the Claude API and the AIS websocket feed on
+  this machine — confirmed not a simple cert-bundle issue (even `httpx`'s own bundled
+  `certifi` fails), most likely a corporate/antivirus TLS-inspection proxy. Needs
+  network/IT investigation outside this repo. Transcription itself is unaffected; the
+  proxy degrades gracefully to plain transcribed text.
+- **whisper.cpp itself has intermittent stability issues** independent of this codebase:
+  occasional `HTTP 500 "failed to process audio"` on valid audio, and it has been observed
+  to wedge entirely (stops responding to `/inference`, still answers plain `GET /`). The
+  proxy retries once on 5xx as a mitigation; a full wedge needs a manual restart of
+  `whisper-server`.
+
+## Testing
+
+- C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`
+- Python: `py -m pytest server/tests`
+- End-to-end accuracy: `py server/bench.py --captures <dir> --references <file> --matrix full`
+  (see `server/bench.py`'s docstring; `server/references.txt` documents the ground-truth
+  format, including conventions for uncertain/inaudible audio)
+
+## Deployment
+
+Build `SDRSharp.SttPlugin` in Release, copy the DLL/PDB to
+`D:\SDR\SDRSharp\Plugins\SttPlugin\` (SDR# must be closed — it locks the DLL while
+running). Start the server stack via `server/start-all.bat` (copy from
+`start-all.bat.template` and fill in API keys, which are gitignored).

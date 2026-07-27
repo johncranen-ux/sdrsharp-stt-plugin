@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using SDRSharp.Radio;
+using SDRSharp.SttPlugin.Capture;
+using SDRSharp.SttPlugin.Dsp;
 
 namespace SDRSharp.SttPlugin
 {
@@ -18,19 +20,37 @@ namespace SDRSharp.SttPlugin
         private readonly BlockingCollection<float[]> _queue =
             new BlockingCollection<float[]>(new ConcurrentQueue<float[]>(), 1500);
 
+        // Decouples the network send (which can take seconds) from the VAD consumer, so a
+        // slow/stalled server can no longer stall frame processing and cause the raw-audio
+        // queue above to drop samples. Small capacity: chunks arrive at most every few
+        // seconds, so a backlog here means the server has fallen far behind.
+        private readonly BlockingCollection<PendingChunk> _sendQueue =
+            new BlockingCollection<PendingChunk>(new ConcurrentQueue<PendingChunk>(), 10);
+
+        private readonly record struct PendingChunk(float[] Samples, float ActiveRatio, float AvgRms);
+
         private int _droppedFrames;
+        private int _droppedChunks;
 
         private readonly WhisperClient _whisperClient;
         private readonly SDRSharp.Common.ISharpControl? _control;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private readonly ChunkRecorder _chunkRecorder;
+        private readonly ContinuousRecorder _continuousRecorder;
 
         private bool _enabled;
 
         // Interlocked double trick: volatile is not valid for double in C#.
         private long _sampleRateBits = BitConverter.DoubleToInt64Bits(48_000);
         private volatile bool _debugSaveNext;
-        private volatile int  _vadLevel  = 10;   // 0 = disabled; 1-100 maps to RMS 0.001-0.100
-        private volatile int  _silenceMs = 600;  // ms of trailing silence before sending
+        // 0 = disabled (fixed 5s chunks); 1-100 maps to the VAD's absolute RMS floor
+        // (0.001-0.100), below which the adaptive noise-floor gate never opens regardless
+        // of ambient level.
+        private volatile int  _vadLevel  = 10;
+        private volatile int  _silenceMs = 600;  // ms of trailing silence before closing a segment
+
+        private readonly VadConfig _vadConfig = new VadConfig();
+        private readonly VoiceActivityDetector _vad;
 
         private int          _frameCount;
         private int          _enabledFrameCount;
@@ -41,8 +61,11 @@ namespace SDRSharp.SttPlugin
         public int    EnabledFrameCount  => _enabledFrameCount;
         public int    QueueCount         => _queue.Count;
         public int    DroppedFrames      => _droppedFrames;
+        public int    SendQueueCount     => _sendQueue.Count;
+        public int    DroppedChunks      => _droppedChunks;
         public string ConsumerState      => _consumerState;
         public float  LastRms            { get; private set; }
+        public float  NoiseFloor         => _vad.NoiseFloor;
 
         public bool Enabled
         {
@@ -68,11 +91,37 @@ namespace SDRSharp.SttPlugin
             set => _silenceMs = Math.Max(100, Math.Min(3000, value));
         }
 
+        // Diagnostic capture, off by default: writes every sent chunk (raw + resampled WAV
+        // + JSONL sidecar) so server/bench.py can replay VAD/DSP decisions offline.
+        public bool CaptureChunks
+        {
+            get => _chunkRecorder.Enabled;
+            set => _chunkRecorder.Enabled = value;
+        }
+
+        // Continuous undecimated raw stream, for replaying VAD changes against real audio.
+        public bool CaptureContinuous
+        {
+            get => _continuousRecorder.IsRunning;
+            set
+            {
+                if (value) _continuousRecorder.Start(SampleRate);
+                else       _continuousRecorder.Stop();
+            }
+        }
+
         public AudioProcessor(WhisperClient whisperClient, SDRSharp.Common.ISharpControl? control = null)
         {
-            _whisperClient = whisperClient;
-            _control       = control;
+            _whisperClient       = whisperClient;
+            _control             = control;
+            _chunkRecorder       = new ChunkRecorder(_pluginDir);
+            _continuousRecorder  = new ContinuousRecorder(_pluginDir);
+            _vadConfig.SampleRate = SampleRate;
+            _vadConfig.SilenceMs  = _silenceMs;
+            _vadConfig.AbsoluteRmsFloor = _vadLevel / 1000f;
+            _vad = new VoiceActivityDetector(_vadConfig);
             _ = Task.Run(ConsumeAsync);
+            _ = Task.Run(SendLoopAsync);
         }
 
         // Called by SDR# on the real-time audio thread for every post-filter buffer.
@@ -85,7 +134,9 @@ namespace SDRSharp.SttPlugin
 
             var samples = new float[length / 2];
             for (int i = 0; i < samples.Length; i++)
-                samples[i] = buffer[i * 2];  // left channel only → mono
+                samples[i] = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;  // mix L+R → mono
+
+            _continuousRecorder.Enqueue(samples);
 
             if (!_queue.TryAdd(samples))
             {
@@ -97,92 +148,69 @@ namespace SDRSharp.SttPlugin
 
         private void ConsumeAsync()
         {
-            const int MAX_SPEECH_SEC = 30;
-
             _consumerState = "running";
-            var speechBuf     = new List<float>((int)(48_000 * MAX_SPEECH_SEC));
-            var pendingFrames = new List<float>(4096);
-            var token         = _cts.Token;
-            bool inSpeech     = false;
-            int  silentFrames = 0;
+
+            // Fallback path only used while VAD is disabled (VadLevel == 0): fixed 5-second
+            // windows with no speech detection at all.
+            var fixedWindowBuf = new List<float>((int)(48_000 * 5));
+            var pendingFrames  = new List<float>(4096);
+            var token          = _cts.Token;
+            int lastVadLevel   = _vadLevel;
 
             try
             {
                 while (!token.IsCancellationRequested)
                 {
-                    _consumerState = inSpeech
-                        ? $"speech ({speechBuf.Count / (int)SampleRate}s)"
-                        : "silent";
+                    _consumerState = _vad.InSpeech ? "speech" : "silent";
 
                     float[] raw;
                     try { raw = _queue.Take(token); }
                     catch (OperationCanceledException) { break; }
 
-                    int vadLevel      = _vadLevel;
-                    int frameSize     = Math.Max(1, (int)(SampleRate * 0.02));
-                    int silenceFrames = Math.Max(1, _silenceMs / 20);
+                    int vadLevel = _vadLevel;
 
-                    // VAD disabled: fixed 5-second window
+                    // Toggling VAD on/off mid-session leaves stale partial state in whichever
+                    // path was active; discard it rather than mixing modes.
+                    if ((vadLevel == 0) != (lastVadLevel == 0))
+                    {
+                        _vad.Reset();
+                        fixedWindowBuf.Clear();
+                        pendingFrames.Clear();
+                    }
+                    lastVadLevel = vadLevel;
+
                     if (vadLevel == 0)
                     {
-                        speechBuf.AddRange(raw);
+                        fixedWindowBuf.AddRange(raw);
                         int target = (int)(SampleRate * 5);
-                        while (speechBuf.Count >= target)
+                        while (fixedWindowBuf.Count >= target)
                         {
-                            SendChunk(speechBuf.GetRange(0, target).ToArray());
-                            speechBuf.RemoveRange(0, target);
+                            var fixedChunk = fixedWindowBuf.GetRange(0, target).ToArray();
+                            fixedWindowBuf.RemoveRange(0, target);
+                            EnqueueForSend(new PendingChunk(fixedChunk, 1f, Rms(fixedChunk)));
                         }
                         continue;
                     }
 
-                    float threshold = vadLevel / 1000f;
+                    _vadConfig.SampleRate       = SampleRate;
+                    _vadConfig.SilenceMs        = _silenceMs;
+                    _vadConfig.AbsoluteRmsFloor = vadLevel / 1000f;
+
+                    bool? squelchOpen = ReadSquelchOpen();
+
                     pendingFrames.AddRange(raw);
+                    int frameSize = _vad.FrameSize;
 
                     while (pendingFrames.Count >= frameSize)
                     {
-                        float rms   = Rms(pendingFrames, 0, frameSize);
-                        LastRms     = rms;
-                        bool active = rms >= threshold;
-
-                        var frame = pendingFrames.GetRange(0, frameSize);
+                        var frame = pendingFrames.GetRange(0, frameSize).ToArray();
                         pendingFrames.RemoveRange(0, frameSize);
 
-                        if (!inSpeech)
-                        {
-                            if (active)
-                            {
-                                inSpeech     = true;
-                                silentFrames = 0;
-                                speechBuf.AddRange(frame);
-                            }
-                        }
-                        else
-                        {
-                            speechBuf.AddRange(frame);
+                        var chunk = _vad.ProcessFrame(frame, squelchOpen);
+                        LastRms = _vad.LastRms;
 
-                            if (active)
-                                silentFrames = 0;
-                            else
-                                silentFrames++;
-
-                            bool endOfSpeech = silentFrames >= silenceFrames;
-                            bool tooLong     = speechBuf.Count >= (int)(SampleRate * MAX_SPEECH_SEC);
-
-                            if (endOfSpeech || tooLong)
-                            {
-                                SendChunk(speechBuf.ToArray());
-                                speechBuf.Clear();
-                                if (endOfSpeech)
-                                {
-                                    inSpeech     = false;
-                                    silentFrames = 0;
-                                }
-                                else
-                                {
-                                    silentFrames = 0;
-                                }
-                            }
-                        }
+                        if (chunk != null)
+                            EnqueueForSend(new PendingChunk(chunk.Samples, chunk.ActiveRatio, chunk.AvgRms));
                     }
                 }
             }
@@ -200,11 +228,75 @@ namespace SDRSharp.SttPlugin
             }
         }
 
-        private const double WhisperRate = 16_000.0;
-
-        private void SendChunk(float[] chunk)
+        private void EnqueueForSend(PendingChunk pending)
         {
-            var resampled = WavBuilder.Resample(chunk, SampleRate, WhisperRate);
+            if (!_sendQueue.TryAdd(pending))
+            {
+                _sendQueue.TryTake(out _);
+                _sendQueue.TryAdd(pending);
+                _droppedChunks++;
+            }
+        }
+
+        private void SendLoopAsync()
+        {
+            var token = _cts.Token;
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    PendingChunk pending;
+                    try { pending = _sendQueue.Take(token); }
+                    catch (OperationCanceledException) { break; }
+
+                    SendChunk(pending.Samples, pending.ActiveRatio, pending.AvgRms);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                _consumerState = $"send loop crashed: {ex.GetType().Name}: {ex.Message}";
+                try
+                {
+                    System.IO.File.WriteAllText(
+                        System.IO.Path.Combine(_pluginDir, "send_loop_crash.log"),
+                        $"{DateTime.Now:o}\n{ex}\n");
+                }
+                catch { }
+            }
+        }
+
+        // Null when SDR#'s squelch is unavailable or the user hasn't enabled it, in which
+        // case the VAD falls back to its adaptive RMS gate.
+        private bool? ReadSquelchOpen()
+        {
+            try
+            {
+                if (_control == null || !_control.SquelchEnabled) return null;
+                return _control.IsSquelchOpen;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private const double WhisperRate = 16_000.0;
+        private const double HighPassCutoffHz = 150.0;
+
+        private void SendChunk(float[] chunk, float activeRatio, float chunkRms)
+        {
+            // Fresh filter state per chunk: chunks are independent VAD segments, not a
+            // continuous stream, and each carries leading padding to absorb the settle time.
+            var dcBlocker  = new DcBlocker();
+            var highPass   = new HighPassBiquad(SampleRate, HighPassCutoffHz);
+            var conditioned = new float[chunk.Length];
+            for (int i = 0; i < chunk.Length; i++)
+                conditioned[i] = highPass.Process(dcBlocker.Process(chunk[i]));
+
+            var decimated = Decimator.Resample(conditioned, SampleRate, WhisperRate);
+            var normalized = Normalizer.Normalize(decimated);
+            var resampled = normalized.Samples;
 
             if (_debugSaveNext)
             {
@@ -227,41 +319,51 @@ namespace SDRSharp.SttPlugin
             }
             catch { }
 
+            string? detectorType = null;
+            try { detectorType = _control?.DetectorType.ToString(); }
+            catch { }
+
             _consumerState = "sending";
+            string returnedText = "";
             try
             {
-                var task = _whisperClient.SendAsync(resampled, WhisperRate, channel);
-                if (!task.Wait(TimeSpan.FromSeconds(30.0)))
-                {
-                    _consumerState = "send timeout";
-                    return;
-                }
-                if (task.IsFaulted)
-                {
-                    _consumerState = $"send error: {task.Exception?.InnerException?.Message}";
-                    return;
-                }
+                // Runs on the dedicated send-loop thread, not the VAD consumer, so blocking
+                // here no longer risks stalling frame processing. WhisperClient's own 60s
+                // response timeout is the single source of truth (previously this method
+                // imposed a shorter 30s cap that raced with it, orphaning the socket work).
+                returnedText   = _whisperClient.SendAsync(resampled, WhisperRate, channel)
+                                                .GetAwaiter().GetResult();
+                _consumerState = "sent";
             }
             catch (Exception ex)
             {
                 _consumerState = $"send error: {ex.Message}";
-                return;
             }
-            _consumerState = "sent";
+
+            if (_chunkRecorder.Enabled)
+            {
+                _chunkRecorder.Record(new ChunkCaptureInfo
+                {
+                    RawSamples     = chunk,
+                    RawSampleRate  = SampleRate,
+                    SentSamples    = resampled,
+                    SentSampleRate = WhisperRate,
+                    Channel        = channel,
+                    DetectorType   = detectorType,
+                    Rms            = chunkRms,
+                    ActiveRatio    = activeRatio,
+                    NormalizeGain  = normalized.Gain,
+                    ReturnedText   = returnedText,
+                });
+            }
         }
 
-        private static float Rms(float[] samples, int offset, int length)
+        private static float Rms(float[] samples)
         {
+            if (samples.Length == 0) return 0f;
             double sum = 0;
-            for (int i = offset; i < offset + length; i++) sum += samples[i] * samples[i];
-            return (float)Math.Sqrt(sum / length);
-        }
-
-        private static float Rms(List<float> samples, int offset, int length)
-        {
-            double sum = 0;
-            for (int i = offset; i < offset + length; i++) sum += samples[i] * samples[i];
-            return (float)Math.Sqrt(sum / length);
+            foreach (var s in samples) sum += s * (double)s;
+            return (float)Math.Sqrt(sum / samples.Length);
         }
 
         public void Dispose()
@@ -269,8 +371,11 @@ namespace SDRSharp.SttPlugin
             _enabled = false;
             _cts.Cancel();
             _queue.CompleteAdding();
+            _sendQueue.CompleteAdding();
             _cts.Dispose();
             _queue.Dispose();
+            _sendQueue.Dispose();
+            _continuousRecorder.Dispose();
         }
     }
 }

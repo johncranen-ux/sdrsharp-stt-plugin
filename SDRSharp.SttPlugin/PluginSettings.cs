@@ -15,15 +15,19 @@ namespace SDRSharp.SttPlugin
         public static string  ServerUrl { get; set; } = "http://localhost:9000";
         public static string  Mode      { get; set; } = "maritime";
         public static string  Language  { get; set; } = "en";
+        // Whisper's initial prompt biases decoding style/vocabulary from fluent example
+        // text, not from a keyword list — a dense list of terms tends to get echoed back
+        // verbatim on noisy or silent audio instead of improving real transcriptions.
         public static string  Prompt    { get; set; } =
-            "Maas Approach, Rotterdam VTS, Pilot Rotterdam, Botlek Traffic. " +
-            "This is Motortanker Margrethe Maersk, callsign OWYP, draught twelve point five metres. " +
-            "Roger, copy, over, out, stand by, wilco, say again. " +
-            "VHF channel one six, channel zero one. " +
-            "Port, starboard, ahead, astern, knots, nautical miles, bearing.";
+            "Maas Approach, this is Motortanker Neptune, callsign PABC, requesting permission " +
+            "to enter the Botlek, over. " +
+            "Motortanker Neptune, Maas Approach, roger, proceed to VHF channel six one, out. " +
+            "Rotterdam VTS, be advised we are standing by on channel one six, over.";
         public static int     VadLevel  { get; set; } = 10;
         public static int     SilenceMs { get; set; } = 600;
         public static bool    Enabled   { get; set; } = false;
+        public static bool    CaptureChunks     { get; set; } = false;
+        public static bool    CaptureContinuous { get; set; } = false;
 
         public static void Load()
         {
@@ -42,6 +46,8 @@ namespace SDRSharp.SttPlugin
                 VadLevel  = GetInt(root,  "VadLevel",  VadLevel);
                 SilenceMs = GetInt(root,  "SilenceMs", SilenceMs);
                 Enabled   = GetBool(root, "Enabled",   Enabled);
+                CaptureChunks     = GetBool(root, "CaptureChunks",     CaptureChunks);
+                CaptureContinuous = GetBool(root, "CaptureContinuous", CaptureContinuous);
             }
             catch { }
         }
@@ -61,6 +67,8 @@ namespace SDRSharp.SttPlugin
                 SetValue(doc, root, "VadLevel",  VadLevel.ToString());
                 SetValue(doc, root, "SilenceMs", SilenceMs.ToString());
                 SetValue(doc, root, "Enabled",   Enabled.ToString());
+                SetValue(doc, root, "CaptureChunks",     CaptureChunks.ToString());
+                SetValue(doc, root, "CaptureContinuous", CaptureContinuous.ToString());
 
                 doc.Save(SettingsFile);
             }

@@ -20,6 +20,18 @@ import http.server
 import http.client
 import json
 import os
+
+# This Python install's default OpenSSL cert path (C:\Program Files\Common Files\SSL\cert.pem)
+# doesn't exist on Windows, so outbound HTTPS/WSS (Claude API, aisstream.io) fail SSL
+# verification unless pointed at certifi's bundle explicitly. Must run before anthropic/
+# websockets create their first SSL context, so it's set here before those imports.
+if not os.environ.get("SSL_CERT_FILE"):
+    try:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except ImportError:
+        pass
+
 import atexit
 import datetime
 import re
@@ -178,6 +190,9 @@ def _init_vessels_log() -> None:
         print(f"[Vessels Log] init error: {exc}", flush=True)
 
 
+_log_lock = threading.Lock()
+
+
 def _append_vessel_to_log(result: dict, raw_text: str) -> None:
     try:
         vessel   = result.get("vessel") or "-"
@@ -202,11 +217,12 @@ def _append_vessel_to_log(result: dict, raw_text: str) -> None:
             <td><em>{preview}</em></td>
         </tr>
 """
-        with open(VESSELS_LOG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        content = content.replace('        <tbody id="vessels">', '        <tbody id="vessels">\n' + row)
-        with open(VESSELS_LOG_FILE, "w", encoding="utf-8") as f:
-            f.write(content)
+        with _log_lock:
+            with open(VESSELS_LOG_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            content = content.replace('        <tbody id="vessels">', '        <tbody id="vessels">\n' + row)
+            with open(VESSELS_LOG_FILE, "w", encoding="utf-8") as f:
+                f.write(content)
     except Exception as exc:
         print(f"[Vessels Log] append error: {exc}", flush=True)
 
@@ -465,7 +481,10 @@ def _get_claude() -> anthropic.Anthropic:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
-        _claude = anthropic.Anthropic(api_key=api_key)
+        # Bounded worst case: this call sits in the middle of the live transcription path
+        # (blocks the CH01 response until it returns), so cap it well below the client's
+        # own patience rather than trusting the SDK's much longer default.
+        _claude = anthropic.Anthropic(api_key=api_key, timeout=15.0, max_retries=1)
     return _claude
 
 
@@ -560,6 +579,114 @@ def format_for_plugin(result: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Whisper decoder parameters
+#
+# Owned here rather than by the C# client: tuning beam size, VAD, or hallucination
+# suppression is then a proxy restart, not a plugin rebuild/redeploy/SDR# restart.
+# All are env-overridable for A/B testing with server/bench.py without editing code.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MARITIME_PROMPT = (
+    "Maas Approach, this is Motortanker Neptune, callsign PABC, requesting permission "
+    "to enter the Botlek, over. "
+    "Motortanker Neptune, Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over."
+)
+
+
+def _env_bool(name: str, default: str) -> str:
+    # whisper.cpp's form-field parser expects the literal strings "true"/"false".
+    return "true" if os.environ.get(name, default).strip().lower() in ("1", "true", "yes") else "false"
+
+
+def _build_whisper_params(client_language: str, client_prompt: str) -> dict:
+    return {
+        "temperature": os.environ.get("WHISPER_TEMPERATURE", "0"),
+        "beam_size": os.environ.get("WHISPER_BEAM_SIZE", "5"),
+        "best_of": os.environ.get("WHISPER_BEST_OF", "5"),
+        "suppress_nst": _env_bool("WHISPER_SUPPRESS_NST", "true"),
+        "response_format": "json",
+        "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
+        "prompt": client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT),
+        "carry_initial_prompt": "true",
+        # Off by default: server/bench.py on 49 real captures showed VAD-on configs
+        # (48.5%/41.8% pooled WER) doing no better than, or worse than, the equivalent
+        # VAD-off config (beam5_prompt, 40.8%) -- combined with the VAD+beam flakiness
+        # bugs found in whisper.cpp itself (intermittent 500s, a full server wedge), the
+        # data doesn't support leaving this on. The plugin's own client-side VAD (pre-roll,
+        # adaptive threshold, squelch-aware) already does this job.
+        "vad": _env_bool("WHISPER_VAD", "false"),
+        "vad_threshold": os.environ.get("WHISPER_VAD_THRESHOLD", "0.5"),
+        "vad_min_speech_duration_ms": os.environ.get("WHISPER_VAD_MIN_SPEECH_MS", "250"),
+        "vad_min_silence_duration_ms": os.environ.get("WHISPER_VAD_MIN_SILENCE_MS", "100"),
+        "vad_speech_pad_ms": os.environ.get("WHISPER_VAD_SPEECH_PAD_MS", "100"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multipart parse / rebuild
+#
+# The incoming request carries the client's params (temperature, language, prompt) plus
+# the audio file. We keep only the file (and read language/prompt as optional client
+# overrides) and rebuild the body with the server-owned params above.
+# ---------------------------------------------------------------------------
+
+def _parse_multipart(content_type_header: str, body: bytes):
+    """Returns (fields: dict[str,str], file_info: dict | None).
+    file_info has keys: field, filename, content_type, data.
+    Raises ValueError if the body isn't a well-formed multipart/form-data message.
+    """
+    if "boundary=" not in content_type_header:
+        raise ValueError("no boundary in Content-Type")
+
+    from email.parser import BytesParser
+
+    header_bytes = f"Content-Type: {content_type_header}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    msg = BytesParser().parsebytes(header_bytes + body)
+    if not msg.is_multipart():
+        raise ValueError("body is not multipart")
+
+    fields: dict[str, str] = {}
+    file_info = None
+    for part in msg.get_payload():
+        name = part.get_param("name", header="content-disposition")
+        if name is None:
+            continue
+        filename = part.get_filename()
+        if filename:
+            file_info = {
+                "field": name,
+                "filename": filename,
+                "content_type": part.get_content_type() or "audio/wav",
+                "data": part.get_payload(decode=True) or b"",
+            }
+        else:
+            payload = part.get_payload(decode=True) or b""
+            fields[name] = payload.decode("utf-8", errors="replace").strip()
+
+    return fields, file_info
+
+
+def _build_multipart(fields: dict, file_info: dict) -> tuple[str, bytes]:
+    boundary = "----WhisperProxy" + os.urandom(12).hex()
+    parts = []
+    for name, value in fields.items():
+        if value is None:
+            continue
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+        )
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_info["field"]}"; '
+        f'filename="{file_info["filename"]}"\r\nContent-Type: {file_info["content_type"]}\r\n\r\n'.encode("utf-8")
+        + file_info["data"]
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return boundary, b"".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # HTTP proxy
 # ---------------------------------------------------------------------------
 
@@ -612,28 +739,64 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Translate OpenAI-style path to whisper.cpp path
         backend_path = PATH_MAP.get(self.path, self.path)
 
-        # Forward to whisper.cpp backend
-        try:
-            conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=90)
-            forward_headers = {
-                k: v for k, v in self.headers.items()
-                if k.lower() not in ("host", "content-length")
-            }
-            forward_headers["Content-Length"] = str(len(body))
-            conn.request("POST", backend_path, body=body, headers=forward_headers)
-            resp      = conn.getresponse()
-            resp_body = resp.read()
-            conn.close()
-        except Exception as exc:
+        forward_headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower() not in ("host", "content-length", "content-type")
+        }
+        content_type = self.headers.get("Content-Type", "")
+
+        # Rewrite the multipart body: drop the client's decoder params, keep only the
+        # audio file (plus optional language/prompt overrides), inject the server-owned
+        # WHISPER_PARAMS. Falls back to forwarding the original body unchanged if the
+        # request isn't parseable multipart, so a malformed request still gets a response
+        # instead of silently vanishing.
+        if backend_path == "/inference":
+            try:
+                client_fields, file_info = _parse_multipart(content_type, body)
+                if file_info is None:
+                    raise ValueError("no file part in request")
+                params = _build_whisper_params(
+                    client_language=client_fields.get("language", ""),
+                    client_prompt=client_fields.get("prompt", ""),
+                )
+                boundary, body = _build_multipart(params, file_info)
+                content_type = f"multipart/form-data; boundary={boundary}"
+            except Exception as exc:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] multipart rewrite failed, forwarding original body: {exc}", flush=True)
+
+        forward_headers["Content-Type"] = content_type
+        forward_headers["Content-Length"] = str(len(body))
+
+        # Forward to whisper.cpp backend. whisper.cpp's server has been observed to
+        # non-deterministically return HTTP 500 "failed to process audio" for the exact
+        # same request/audio that succeeds moments later when VAD + beam search are both
+        # enabled — a flakiness bug in the backend, not something fixable here. Since the
+        # same request often succeeds on retry, one immediate retry is a cheap mitigation.
+        max_attempts = 2 if backend_path == "/inference" else 1
+        resp = resp_body = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=90)
+                conn.request("POST", backend_path, body=body, headers=forward_headers)
+                resp      = conn.getresponse()
+                resp_body = resp.read()
+                conn.close()
+            except Exception as exc:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] backend error (attempt {attempt}/{max_attempts}): {exc}", flush=True)
+                error_msg = json.dumps({"error": str(exc)}).encode("utf-8")
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(error_msg)))
+                self.end_headers()
+                self.wfile.write(error_msg)
+                return
+
+            if resp.status < 500 or attempt == max_attempts:
+                break
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            print(f"[{ts}] backend error: {exc}", flush=True)
-            error_msg = json.dumps({"error": str(exc)}).encode("utf-8")
-            self.send_response(503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(error_msg)))
-            self.end_headers()
-            self.wfile.write(error_msg)
-            return
+            print(f"[{ts}] backend HTTP {resp.status}, retrying ({attempt}/{max_attempts})...", flush=True)
 
         ts      = datetime.datetime.now().strftime("%H:%M:%S")
         channel = self.headers.get("X-Whisper-Channel", "").strip()
@@ -735,6 +898,10 @@ if __name__ == "__main__":
     else:
         print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
 
-    server = http.server.HTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
+    # Threaded: a single slow/failing external call (Claude API, backend decode) must not
+    # block every other in-flight transcription request. Shared state (_vessel_buffer,
+    # _vessel_cache, the vessels log file) is already lock-protected for the AIS/periodic-
+    # save background threads, which already run concurrently with request handling.
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
     print(f"Whisper proxy  :  localhost:{PROXY_PORT}  ->  backend localhost:{BACKEND_PORT}", flush=True)
     server.serve_forever()
