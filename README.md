@@ -27,6 +27,7 @@ Three tiers:
 | Maritime prompt | Fluent example transmissions (see `DEFAULT_MARITIME_PROMPT` in `whisper-proxy.py`) | The single largest lever found: ~9-10 points of WER improvement over no prompt. A keyword-list-style prompt was tried first and rejected — it primes Whisper to echo the list back verbatim on noisy/silent audio. |
 | Server-side Silero VAD | **Off** (`WHISPER_VAD=false`) | Measured no WER benefit over VAD-off at the same decoder settings (48.5%/41.8% vs 40.8% pooled), and whisper.cpp's VAD+beam combination has its own flakiness (intermittent HTTP 500s, and one full server wedge observed). The plugin's own client-side VAD already does this job. |
 | Suppress non-speech tokens | On | Reduces hallucinated fillers. |
+| Nautical-term corrections | Regex pass (`_apply_sttt_corrections` in `whisper-proxy.py`), applied to every non-CH01 maritime/airband response | Evidence-backed rules (Mass/Mars/March Approach → Maas Approach, call sign → Callsign, motor tanker → Motortanker, draft → draught, boys/boy → buoys/buoy) derived from substitution-frequency analysis of the baseline benchmark. Measured on the same 61-clip/49-reference set, `beam5_prompt`: pooled WER 41.6% direct against whisper.cpp (`:8080`, no corrections) → 35.9% through the proxy (`:9000`, corrections applied), a ~5.7-point improvement. 2026-07-28. |
 
 All of the above are env-overridable in `whisper-proxy.py` (`WHISPER_BEAM_SIZE`,
 `WHISPER_VAD`, `WHISPER_PROMPT`, etc.) without touching code.
@@ -40,9 +41,12 @@ Full per-clip results: `server/bench-report.html` (turbo, full config matrix) an
   accented non-native English, real radio noise, dense maritime jargon, proper nouns not
   in Whisper's vocabulary. Not something further parameter tuning fixes.
 - **Nautical-term and vessel-name errors** ("ladder" → "letter", "buoy" → "boy", the same
-  vessel name transcribed differently across nearby clips) are a distinct, known category
-  — planned for a later phase per `CLAUDE.md`'s "Additional Features" section (local LLM
-  term correction; vessel-name AIS matching is already built and working, see below).
+  vessel name transcribed differently across nearby clips) are a distinct, known category.
+  A first pass of evidence-backed regex corrections now runs in the proxy (see "Current
+  configuration" above, ~5.7-point pooled WER improvement); fuzzy/LLM-based correction for
+  cases the regex pass can't catch is still planned for a later phase per `CLAUDE.md`'s
+  "Additional Features" section (vessel-name AIS matching is already built and working,
+  see below).
 - **whisper.cpp/ROCm has a real, unresolved GPU driver hang** on this hardware
   (RX 7900 XTX / gfx1100 / ROCm 6.1.3 under WSL2): a per-request-random race that can
   strike any GPU kernel launch regardless of decode settings, audio content, or timing —
