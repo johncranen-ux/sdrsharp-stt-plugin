@@ -62,6 +62,9 @@ def test_is_hallucination_false(text):
     ("motor tanker Neptune", "Motortanker Neptune"),
     ("draft twelve metres", "draught twelve metres"),
     ("watch out for the boys", "watch out for the buoys"),
+    ("mars approach, over", "Maas Approach"),
+    ("this is mars control", "Maas control"),
+    ("watch out for the boy", "watch out for the buoy"),
 ])
 def test_apply_sttt_corrections(raw, expected_substring):
     result = proxy._apply_sttt_corrections(raw)

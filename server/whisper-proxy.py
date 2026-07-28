@@ -457,12 +457,15 @@ def _apply_sttt_corrections(text: str) -> str:
     corrections = [
         (r'\bmass\s+approach\b', 'Maas Approach', re.IGNORECASE),
         (r'\bmarch\s+approach\b', 'Maas Approach', re.IGNORECASE),
+        (r'\bmars\s+approach\b', 'Maas Approach', re.IGNORECASE),
         (r'\bmass\b(?=\s)', 'Maas', re.IGNORECASE),
+        (r'\bmars\b(?=\s)', 'Maas', re.IGNORECASE),
         (r'\bcosine\b', 'Callsign', re.IGNORECASE),
         (r'\bcall\s*sign\b', 'Callsign', re.IGNORECASE),
         (r'\bmotor\s+tanker\b', 'Motortanker', re.IGNORECASE),
         (r'\bdraft\b', 'draught', re.IGNORECASE),
         (r'\bboys\b', 'buoys', re.IGNORECASE),
+        (r'\bboy\b', 'buoy', re.IGNORECASE),
     ]
     result = text
     for pattern, replacement, flags in corrections:
