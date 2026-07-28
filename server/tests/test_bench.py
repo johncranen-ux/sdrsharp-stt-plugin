@@ -68,3 +68,35 @@ def test_pooled_wer_excludes_rows_without_a_reference():
         {"reference": "hello world", "text": "hello world"},
     ]
     assert bench._pooled_wer(rows) == 0.0
+
+
+def test_word_alignment_ops_identifies_substitution():
+    ops = bench.word_alignment_ops("mass approach over", "maas approach over")
+    subs = [(o[1], o[2]) for o in ops if o[0] == "sub"]
+    assert ("mass", "maas") in subs
+
+
+def test_word_alignment_ops_identifies_insertion_and_deletion():
+    ins_ops = bench.word_alignment_ops("roger copy over", "roger copy over standing by")
+    assert sum(1 for o in ins_ops if o[0] == "ins") == 2
+
+    del_ops = bench.word_alignment_ops("roger copy over standing by", "roger copy over")
+    assert sum(1 for o in del_ops if o[0] == "del") == 2
+
+
+def test_word_alignment_ops_matches_are_marked():
+    ops = bench.word_alignment_ops("roger copy over", "roger copy over")
+    assert all(o[0] == "match" for o in ops)
+    assert len(ops) == 3
+
+
+def test_word_alignment_ops_no_reference_returns_none():
+    assert bench.word_alignment_ops("", "anything") is None
+
+
+def test_word_alignment_ops_edit_count_matches_word_error_counts():
+    ref, hyp = "maas approach this is neptune over", "mass approach this is fjordstrom over standing by"
+    ops = bench.word_alignment_ops(ref, hyp)
+    non_matches = sum(1 for o in ops if o[0] != "match")
+    edits, _ = bench.word_error_counts(ref, hyp)
+    assert non_matches == edits

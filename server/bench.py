@@ -138,6 +138,52 @@ def word_error_counts(reference: str, hypothesis: str) -> tuple[int, int] | None
     return prev_row[m], n
 
 
+def word_alignment_ops(reference: str, hypothesis: str) -> list[tuple[str, str | None, str | None]] | None:
+    """Returns the Levenshtein alignment between reference and hypothesis as a list of
+    (op, ref_word, hyp_word) tuples, op in {"match", "sub", "ins", "del"}. Unlike
+    word_error_counts (which only returns the edit count), this exposes the actual
+    substitution pairs so real recurring mis-transcription patterns can be found instead
+    of just measured. Same normalization and no-reference behavior as word_error_counts.
+    """
+    ref = _normalize(reference)
+    hyp = _normalize(hypothesis)
+    if not ref:
+        return None
+
+    n, m = len(ref), len(hyp)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+
+    ops: list[tuple[str, str | None, str | None]] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and ref[i - 1] == hyp[j - 1] and dp[i][j] == dp[i - 1][j - 1]:
+            ops.append(("match", ref[i - 1], hyp[j - 1]))
+            i, j = i - 1, j - 1
+        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
+            ops.append(("sub", ref[i - 1], hyp[j - 1]))
+            i, j = i - 1, j - 1
+        elif j > 0 and dp[i][j] == dp[i][j - 1] + 1:
+            ops.append(("ins", None, hyp[j - 1]))
+            j -= 1
+        else:
+            ops.append(("del", ref[i - 1], None))
+            i -= 1
+    ops.reverse()
+    return ops
+
+
 def word_error_rate(reference: str, hypothesis: str) -> float | None:
     counts = word_error_counts(reference, hypothesis)
     if counts is None:
