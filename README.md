@@ -37,11 +37,12 @@ Full per-clip results: `server/bench-report.html` (turbo, full config matrix) an
 
 ## Known limitations
 
-- **~39% word error rate even in the best configuration.** This is genuinely hard audio —
+- **~36% pooled word error rate even in the best configuration** (35.9%, see the
+  nautical-term-corrections row in the table above). This is genuinely hard audio —
   accented non-native English, real radio noise, dense maritime jargon, proper nouns not
   in Whisper's vocabulary. Not something further parameter tuning fixes.
-- **Nautical-term and vessel-name errors** ("ladder" → "letter", "buoy" → "boy", the same
-  vessel name transcribed differently across nearby clips) are a distinct, known category.
+- **Nautical-term and vessel-name errors** ("ladder" → "letter", the same vessel name
+  transcribed differently across nearby clips) are a distinct, known category.
   A first pass of evidence-backed regex corrections now runs in the proxy (see "Current
   configuration" above, ~5.7-point pooled WER improvement); fuzzy/LLM-based correction for
   cases the regex pass can't catch is still planned for a later phase per `CLAUDE.md`'s
