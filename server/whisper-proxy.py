@@ -35,6 +35,8 @@ if not os.environ.get("SSL_CERT_FILE"):
 import atexit
 import datetime
 import re
+import subprocess
+import time
 from rapidfuzz import process as rf_process, fuzz as rf_fuzz
 import threading
 import anthropic
@@ -687,6 +689,100 @@ def _build_multipart(fields: dict, file_info: dict) -> tuple[str, bytes]:
 
 
 # ---------------------------------------------------------------------------
+# Backend watchdog
+#
+# whisper-server can hang indefinitely on GPU inference -- confirmed to be a
+# per-request-random AMD ROCm/gfx1100 driver race (matches the long-standing,
+# unresolved github.com/ROCm/ROCm#2689), not tied to any specific decode
+# setting, audio content, or idle timing we've been able to identify. It
+# cannot be prevented from here. What we CAN do is stop the plugin from
+# sitting on a dead request for the full client-side timeout: track how long
+# each backend call has been in flight, and if one exceeds STUCK_THRESHOLD_S,
+# kill and restart whisper-server so the stuck socket drops (the blocked
+# request thread gets a connection error immediately and returns a fast
+# error to the client instead of hanging) and the next real request gets a
+# fresh, working server ~15-20s later while it reloads.
+# ---------------------------------------------------------------------------
+
+STUCK_THRESHOLD_S  = float(os.environ.get("WHISPER_WATCHDOG_STUCK_S", "25"))
+WATCHDOG_POLL_S    = 3.0
+RESTART_COOLDOWN_S = 5.0
+
+_inflight_lock = threading.Lock()
+_inflight_requests: dict[int, float] = {}
+_inflight_next_id = 0
+
+_restarting = threading.Event()
+
+
+def _inflight_begin() -> int:
+    global _inflight_next_id
+    with _inflight_lock:
+        _inflight_next_id += 1
+        req_id = _inflight_next_id
+        _inflight_requests[req_id] = time.monotonic()
+    return req_id
+
+
+def _inflight_end(req_id: int) -> None:
+    with _inflight_lock:
+        _inflight_requests.pop(req_id, None)
+
+
+def _oldest_inflight_age() -> float | None:
+    with _inflight_lock:
+        if not _inflight_requests:
+            return None
+        return time.monotonic() - min(_inflight_requests.values())
+
+
+def _restart_backend() -> None:
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [watchdog] backend stuck >{STUCK_THRESHOLD_S:.0f}s, restarting whisper-server...", flush=True)
+    try:
+        find = subprocess.run(
+            ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-lc", "ss -ltnp 2>/dev/null | grep ':8080'"],
+            capture_output=True, text=True, timeout=15,
+        )
+        m = re.search(r"pid=(\d+)", find.stdout)
+        if m:
+            pid = m.group(1)
+            subprocess.run(
+                ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-lc", f"kill -9 {pid}"],
+                timeout=15,
+            )
+            print(f"[{ts}] [watchdog] killed whisper-server pid={pid}", flush=True)
+        else:
+            print(f"[{ts}] [watchdog] no listener found on :8080 to kill", flush=True)
+    except Exception as exc:
+        print(f"[{ts}] [watchdog] kill step failed: {exc}", flush=True)
+
+    try:
+        subprocess.Popen(
+            ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-l", "-c", "~/start-whisper-server.sh"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        print(f"[{ts}] [watchdog] whisper-server restart issued (model reload takes ~15-20s)", flush=True)
+    except Exception as exc:
+        print(f"[{ts}] [watchdog] restart failed: {exc}", flush=True)
+
+
+def _watchdog_loop() -> None:
+    while True:
+        threading.Event().wait(WATCHDOG_POLL_S)
+        if _restarting.is_set():
+            continue
+        age = _oldest_inflight_age()
+        if age is not None and age >= STUCK_THRESHOLD_S:
+            _restarting.set()
+            try:
+                _restart_backend()
+            finally:
+                threading.Event().wait(RESTART_COOLDOWN_S)
+                _restarting.clear()
+
+
+# ---------------------------------------------------------------------------
 # HTTP proxy
 # ---------------------------------------------------------------------------
 
@@ -773,9 +869,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # same request/audio that succeeds moments later when VAD + beam search are both
         # enabled — a flakiness bug in the backend, not something fixable here. Since the
         # same request often succeeds on retry, one immediate retry is a cheap mitigation.
+        #
+        # It can also hang outright (see the watchdog above) rather than error, so every
+        # attempt is tracked in _inflight_requests for the watchdog thread to see; killing
+        # the backend mid-hang drops this socket and turns the exception below into a fast
+        # 503 instead of a multi-minute wait.
         max_attempts = 2 if backend_path == "/inference" else 1
         resp = resp_body = None
         for attempt in range(1, max_attempts + 1):
+            req_id = _inflight_begin() if backend_path == "/inference" else None
             try:
                 conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=90)
                 conn.request("POST", backend_path, body=body, headers=forward_headers)
@@ -792,6 +894,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(error_msg)
                 return
+            finally:
+                if req_id is not None:
+                    _inflight_end(req_id)
 
             if resp.status < 500 or attempt == max_attempts:
                 break
@@ -897,6 +1002,9 @@ if __name__ == "__main__":
         print("AIS feed: starting...", flush=True)
     else:
         print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
+
+    threading.Thread(target=_watchdog_loop, daemon=True).start()
+    print(f"Backend watchdog: enabled (stuck threshold {STUCK_THRESHOLD_S:.0f}s)", flush=True)
 
     # Threaded: a single slow/failing external call (Claude API, backend decode) must not
     # block every other in-flight transcription request. Shared state (_vessel_buffer,

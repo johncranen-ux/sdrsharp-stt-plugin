@@ -42,19 +42,18 @@ Full per-clip results: `server/bench-report.html` (turbo, full config matrix) an
 - **Nautical-term and vessel-name errors** ("ladder" → "letter", "buoy" → "boy", the same
   vessel name transcribed differently across nearby clips) are a distinct, known category
   — planned for a later phase per `CLAUDE.md`'s "Additional Features" section (local LLM
-  term correction; vessel-name AIS matching already partially built but currently blocked
-  by an unrelated SSL/network issue on the dev machine, see below).
-- **Vessel-name extraction and AIS enrichment are currently non-functional.** SSL
-  certificate verification fails for both the Claude API and the AIS websocket feed on
-  this machine — confirmed not a simple cert-bundle issue (even `httpx`'s own bundled
-  `certifi` fails), most likely a corporate/antivirus TLS-inspection proxy. Needs
-  network/IT investigation outside this repo. Transcription itself is unaffected; the
-  proxy degrades gracefully to plain transcribed text.
-- **whisper.cpp itself has intermittent stability issues** independent of this codebase:
-  occasional `HTTP 500 "failed to process audio"` on valid audio, and it has been observed
-  to wedge entirely (stops responding to `/inference`, still answers plain `GET /`). The
-  proxy retries once on 5xx as a mitigation; a full wedge needs a manual restart of
-  `whisper-server`.
+  term correction; vessel-name AIS matching is already built and working, see below).
+- **whisper.cpp/ROCm has a real, unresolved GPU driver hang** on this hardware
+  (RX 7900 XTX / gfx1100 / ROCm 6.1.3 under WSL2): a per-request-random race that can
+  strike any GPU kernel launch regardless of decode settings, audio content, or timing —
+  matches the long-standing, still-open [ROCm/ROCm#2689](https://github.com/ROCm/ROCm/issues/2689)
+  (confirmed to affect this exact GPU on bare-metal Linux too, not a whisper.cpp or
+  WSL2-specific bug). `--no-flash-attn` measurably reduces frequency but does not
+  eliminate it. Not fixable from this repo. Mitigated with a watchdog in
+  `whisper-proxy.py`: it tracks in-flight backend requests and auto-restarts
+  `whisper-server` if one is stuck past `WHISPER_WATCHDOG_STUCK_S` (default 25s), so a
+  hang becomes a ~15-20s automatic recovery (surfaced to the plugin as one connection-reset
+  error) instead of a 60s hang or a full Windows GPU-driver-timeout popup.
 
 ## Testing
 
