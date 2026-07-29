@@ -324,6 +324,69 @@ cabling) relative to option 3 (driver rollback).
 
 ---
 
+## Change-history trace: nothing introduced the crashes
+
+Done 2026-07-29 evening, after the wedge. Every prior session tested hypotheses *forward*
+(change a setting, see if it still crashes). This instead traced *backward* from the hang
+record to find what changed before the onset. Result: there is no onset to explain.
+
+Full hang record from `server/gpuhangs.py --since 2026-05-01`, interleaved with what the
+machine was doing:
+
+| When | What happened | Hangs |
+|---|---|---|
+| 5/13 19:57 | **Windows Update** installs AMD Display `31.0.24002.92` | — |
+| 5/30 23:53 | Initial plugin release committed (`a00aa47`) | — |
+| 5/31 23:24–23:27 | AMD Software installer runs (`C:\AMD\AMDSoftwareInstaller` ctime) | — |
+| 5/31 23:40 / 23:44 / 23:45 | first real GPU inference use | **3** |
+| 6/1 – 7/26 | **no commits — GPU idle** | **0** |
+| 7/27 13:13 → 18:51 | heavy live use resumes | **37** |
+| *7/27 18:24* | *`ggml-large-v3.bin` downloaded — after 36 of that day's 37 hangs* | |
+| *7/27 18:52* | *pipeline rework committed (`1dc6769`) — after all but one* | |
+| 7/28 | full day of use | **50** |
+| 7/29 10:32–10:59 | morning use | **5** |
+| *7/29 11:01* | *Adrenalin 26.7.1 installed by **AMD's own installer**, not Windows Update* | |
+| 7/29 16:29–21:07 | afternoon/evening use | **14** |
+
+**The June–July silence is project dormancy, not GPU health.** No commits between 5/30 and
+7/27, and the one other GPU-capable workload on the box never touched the GPU — Ollama's
+`server.log` reports `inference compute id=cpu library=cpu`. So the fault has been present on
+every single day the GPU ran ROCm compute, starting the day after the initial release.
+
+### Retired by this trace — do not re-test
+
+- **The large-v3 model switch.** 36 of 37 hangs on 7/27 happened *before* `ggml-large-v3.bin`
+  finished downloading at 18:24. The machine was still on turbo.
+- **The 7/27 pipeline rework** (`1dc6769`, prompt fix / resampling / VAD overhaul). Committed
+  18:52, after nearly all that day's hangs.
+- **Driver rollback.** 7/27–7/28 hangs ran on the 5/13 Windows Update driver; 7/29 evening
+  hangs ran on Adrenalin 26.7.1. Two different drivers, 109 hangs, unchanged rate. Also note
+  the 11:01 install today *is* the "update the driver" experiment, run accidentally — the
+  afternoon rate did not move.
+
+### Also rejected: switching to large-v3-turbo to cut GPU-busy time
+
+Tempting reasoning — turbo has 4 decoder layers vs large-v3's 32, so it should slash GPU
+exposure per request. **The repo's own benchmark refutes it** (`README.md`, Model row): turbo
+is only ~25% cheaper in decode time (mean 2.66s vs 3.55s), because Whisper's encoder always
+processes a fixed 30-second window and turbo trims only the decoder. Best case 3.0 → ~2.25
+hangs/hr, at a cost of 1.9 points of WER (40.8% vs 38.9%). Bad trade; not worth a run.
+
+Note the same fixed-encoder effect measured on CPU (2026-07-29): CPU-only latency is flat at
+~6.0–6.5s per request regardless of clip length (0.88s of audio costs the same as 12.5s), and
+q5_0 quantization barely helps (6.0s vs 6.4s) — the path is compute-bound, not
+memory-bound. CPU-only remains the one option that cannot hang, at ~10x the GPU's latency.
+
+### What the trace leaves standing
+
+The rate is constant across three independent measurements: 3.0 hangs/hr (controlled
+520-request run), 3.59 hangs/hr (2026-07-29 evening, 14 min after a cold power-on), and the
+daily counts scale with hours of use. Combined with the wedge that occurred with WSL shut
+down, this is a hardware or kernel-driver fault that no software configuration in this repo
+influences. Remaining options are power/clock limiting, the PSU/cabling check, and RMA.
+
+---
+
 ## Revert steps, cheapest first
 
 1. **Switch the binary back.** Edit `server/start-whisper-server.sh` to point at
