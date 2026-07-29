@@ -255,6 +255,66 @@ conclusion. But it is worth checking before investing in the Phase 3 rewrite.
 
 ---
 
+## DECISIVE: the fault is not WSL's. Phases 2 and 3 are both dead ends.
+
+**Test (2026-07-29 19:38):** sustained fp16 GEMM + softmax load on the 7900 XTX using the
+**native Windows** ROCm stack — AMD AI Bundle's PyTorch `2.9.0+rocmsdk20251116`, **HIP 7.1**.
+
+Conditions, all verified at the time of the wedge:
+
+| | |
+|---|---|
+| WSL | **all distros shut down** (`wsl --shutdown`, "no running distributions") |
+| whisper-server / proxy | not running (0 processes) |
+| SDR# | closed |
+| GPU work | native Windows HIP only |
+
+**Result: the GPU wedged hard, ~40-52 minutes in.**
+
+- The load process spun at 100% of one core, holding 820 MB of GPU memory, stuck inside a
+  single iteration for 13+ minutes past its deadline (a normal iteration is ~5-10 ms).
+- An **independent** process could not run a trivial 512x512 matmul — timed out at 120s. The
+  device was wedged system-wide, not just for the loading process.
+- `Stop-Process -Force` **could not kill it** — stuck in an uninterruptible kernel GPU wait.
+- Killing the process did **not** free the GPU; a fresh probe still timed out.
+- **Zero `LiveKernelEvent 141` fired.** This wedge produced no TDR at all — a distinct, more
+  severe failure mode than the 107 recorded hangs, which do self-recover.
+
+### What this rules out
+
+- **Phase 2 (upgrade WSL ROCm 6.1.3 -> 7.2.1 + ROCDXG).** WSL was entirely shut down. The
+  version-skew hypothesis, however reasonable, cannot explain a hang that happens with WSL
+  not running. Upgrading it will not fix this.
+- **Phase 3 (rebuild whisper.cpp for native Windows HIP).** That configuration is what just
+  wedged, on **HIP 7.1** — six releases newer than the WSL stack. Porting to it would move
+  the problem, not remove it.
+- **Any whisper.cpp-level tuning.** whisper.cpp was not running.
+
+### What remains
+
+The fault is in the GPU or its Windows kernel driver under sustained ROCm compute. Note the
+2026-05-31 hangs predate the current Adrenalin 26.7.1 (dated 2026-07-24), so this is not a
+regression introduced by the recent driver either. Consistent with
+[ROCm#2689](https://github.com/ROCm/ROCm/issues/2689) being unresolved for years on this exact
+GPU.
+
+Honest remaining options, best first:
+
+1. **Power/clock limiting** via Adrenalin tuning (e.g. -10% power limit, or capping max clock).
+   Reducing transient power draw is the most commonly reported mitigation for RDNA3 compute
+   hangs, it is free, and it is reversible in seconds. Cheapest real test left.
+2. **PSU / cabling check.** The 7900 XTX draws very large instantaneous spikes; AMD-adjacent
+   guidance calls for a quality 850W+ unit with **independent** cables to each 8-pin connector
+   rather than a daisy-chained pigtail. A marginal rail would produce exactly this symptom.
+3. **Driver rollback** to an older Adrenalin. Weakened by the 2026-05-31 hangs predating the
+   current driver, but not excluded.
+4. **Accept and mitigate.** The existing proxy watchdog already handles the *recoverable*
+   hangs well. Note it cannot help with a hard wedge like this one, which needs a reboot.
+
+**Recovery from a hard wedge: reboot.** The GPU did not recover from killing the process.
+
+---
+
 ## Revert steps, cheapest first
 
 1. **Switch the binary back.** Edit `server/start-whisper-server.sh` to point at
