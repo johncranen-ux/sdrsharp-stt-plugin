@@ -64,6 +64,13 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "prompt": MARITIME_PROMPT,
         "carry_initial_prompt": "true",
     },
+    "beam1_prompt": {
+        "temperature": "0",
+        "beam_size": "1",
+        "best_of": "1",
+        "prompt": MARITIME_PROMPT,
+        "carry_initial_prompt": "true",
+    },
     "vad": {
         "temperature": "0",
         "vad": "true",
