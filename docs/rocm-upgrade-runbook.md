@@ -193,11 +193,65 @@ trap this harness was built to avoid. Work stopped here rather than proceeding b
 
 Audio content is *not* a candidate: the replayed clips are the real captured live audio.
 
-**Next experiment (single variable):** re-run the identical 520-request replay with SDR# open
-and rendering but its transcription disabled, so it adds GPU load without adding requests. If
-crashes appear, hypothesis 1 is confirmed and the fix space changes substantially — forcing
-SDR#'s rendering onto the idle Raphael iGPU via Windows graphics preferences would be a
-trivial, fully reversible test, and cheaper than any ROCm change.
+### CORRECTION — the GPU *did* hang during that run; the detector was wrong
+
+The user observed three AMD driver-timeout popups during the "clean" run. Investigating that
+overturned two earlier conclusions in this document.
+
+**1. "No `LiveKernelReports` GPU hang dumps" was a false negative.**
+`C:\Windows\LiveKernelReports` cannot be listed without elevation and returns *empty* rather
+than an error when unprivileged. Reading that as "no dumps exist" was wrong. **107 dumps
+exist.** The reliable, unprivileged route is the Windows Error Reporting event each dump
+raises — see `server/gpuhangs.py`, which now automates this.
+
+**2. The correct signal is `LiveKernelEvent 141`, not Event 4101 or Event 10111.**
+Event 4101 genuinely never fires. But `LiveKernelEvent 141` — the GPU-hang live-dump class —
+fires constantly. Note the WER event's own timestamp is the *upload* time (they arrive in
+bulk); the real hang time is in the dump filename, `WATCHDOG-YYYYMMDD-HHMM.dmp`.
+
+Because this is a GPU **timeout** event class, the earlier dismissal of `TdrDelay` was based
+on bad evidence and that option is back in play.
+
+Recorded hang history:
+
+| Date | Hangs |
+|---|---|
+| 2026-05-31 | 3 |
+| 2026-07-27 | 37 |
+| 2026-07-28 | 50 |
+| 2026-07-29 | 17 |
+
+### The real finding: a GPU hang and a lost transcription are separable
+
+The 520-request run spanned **2 hangs (18:00, 18:08) with 0 failed requests**, and throughput
+did not even dip — the 25-request checkpoint bracketing the 18:08 hang took 114s, identical to
+every other checkpoint.
+
+So the hardware faults at a fairly steady rate under load, the driver usually recovers
+transparently, and a user-visible 503 is only the subset where a hang stalls an inference past
+the proxy watchdog's 25s threshold — at which point the watchdog kills the backend and *that*
+produces the error. **Request failures measure a subset of hangs; hangs/hour is the metric.**
+
+Two measurement traps to avoid repeating:
+- The AMD popup undercounts: while one dialog is open, further hangs raise no new dialog.
+- Request-failure counts miss every hang the driver recovers from.
+
+### Suggestive: the hangs may not be WSL-specific
+
+The three 2026-05-31 hangs (23:40, 23:44, 23:45) land inside the window when AMD's AI Bundle
+(ComfyUI + Ollama, `torch 2.9.0+rocmsdk20251116`) was installed — 23:44 to 23:56 by file
+timestamps. That is **native Windows ROCm, no WSL involved**. If those hangs came from that
+workload, the fault is in the GPU/driver under ROCm compute generally, which would mean Phase 3
+(native Windows HIP) does not fix it either.
+
+Three events is not proof and what was running is not confirmed — treat as a lead, not a
+conclusion. But it is worth checking before investing in the Phase 3 rewrite.
+
+### Baseline (corrected)
+
+| Label | ROCm | SDR# | Duration | Hangs | Hangs/hr | Req failures |
+|---|---|---|---|---|---|---|
+| `baseline-rocm-6.1.3` | 6.1.3 | closed | 39.8 min | 2 | **3.0** | 0 / 520 |
 
 ---
 
