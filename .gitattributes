@@ -1,0 +1,8 @@
+# Files that must keep LF endings regardless of the checkout platform.
+#
+# *.patch  — a CRLF-mangled patch fails `git apply` with "corrupt patch at line N".
+# *.sh     — these run inside WSL; bash mis-parses a script with CRLF line endings
+#            (this is why deploying start-whisper-server.sh has needed a `sed -i 's/\r$//'`
+#            step by hand — with this rule that workaround is no longer required).
+*.patch text eol=lf
+*.sh    text eol=lf

@@ -1,0 +1,40 @@
+diff --git a/ggml/src/ggml-cuda/mma.cuh b/ggml/src/ggml-cuda/mma.cuh
+index 8d7c69dc..dbf47a76 100644
+--- a/ggml/src/ggml-cuda/mma.cuh
++++ b/ggml/src/ggml-cuda/mma.cuh
+@@ -437,7 +437,7 @@ namespace ggml_cuda_mma {
+ 
+ #if defined(AMD_WMMA_AVAILABLE)
+         static constexpr int ne = tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::ne;
+-        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
++        nv_bfloat162 x[ne] = {{(unsigned short)0, (unsigned short)0}};
+ 
+         static constexpr __device__ bool supported() {
+             return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::supported();
+@@ -452,7 +452,7 @@ namespace ggml_cuda_mma {
+         }
+ #elif defined(AMD_MFMA_AVAILABLE)
+         static constexpr int ne = tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::ne;
+-        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
++        nv_bfloat162 x[ne] = {{(unsigned short)0, (unsigned short)0}};
+ 
+         static constexpr __device__ bool supported() {
+             return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::supported();
+@@ -467,7 +467,7 @@ namespace ggml_cuda_mma {
+         }
+ #else
+         static constexpr int ne = I * J / WARP_SIZE;
+-        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
++        nv_bfloat162 x[ne] = {{(unsigned short)0, (unsigned short)0}};
+ 
+         static constexpr __device__ bool supported() {
+             if (I ==  8 && J ==  8) return true;
+@@ -626,7 +626,7 @@ namespace ggml_cuda_mma {
+         static constexpr data_layout dl = DATA_LAYOUT_I_MAJOR_MIRRORED;
+         static constexpr int         ne = tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::ne;
+ 
+-        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
++        nv_bfloat162 x[ne] = {{(unsigned short)0, (unsigned short)0}};
+ 
+         static constexpr __device__ bool supported() {
+             return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::supported();
