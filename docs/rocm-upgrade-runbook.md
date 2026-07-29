@@ -387,6 +387,65 @@ influences. Remaining options are power/clock limiting, the PSU/cabling check, a
 
 ---
 
+## 2026-07-29 late evening: the card degraded ~6x after the hard wedge
+
+Two runs, same harness / clips / driver / model (large-v3) / SDR# closed, measured with
+`gpuhangs.py` over each run's exact window:
+
+| Label | Time | Adrenalin power limit | Card state | Duration | Hangs | Rate |
+|---|---|---|---|---|---|---|
+| `baseline-rocm-6.1.3` | 18:00 | 0% (default) | **pre**-wedge | 39.8 min | 2 | **3.0/hr** |
+| `powerlimit-minus10` | 21:41 | **−10%** | post-wedge | ~6 min | 4 | **~40/hr** |
+| `revert-0pct-large-v3` | 22:12 | 0% (reverted) | post-wedge | 35 min | 11 | **18.5/hr** |
+
+Both runs were stopped early once the signal was unambiguous rather than run to completion —
+continuing only bought more driver crashes for the user.
+
+### Finding 1: lowering the power limit makes it worse, not better
+
+−10% ran at roughly double the rate of 0% in the same post-wedge state (~40 vs 18.5/hr).
+**Keep Adrenalin power tuning at default.** The reasoning that a lower cap means gentler
+operation looks backwards: if the fault is triggered by power-state *transients*, capping
+lower makes the card bump the ceiling constantly and transition harder and more often.
+
+That inverts the remaining tuning idea — the lever worth trying is *fewer* transitions
+(locked/fixed max clock), not a lower ceiling. Untested, and see Finding 2 before bothering.
+
+### Finding 2: the hard wedge appears to have damaged the card
+
+At the identical default power setting, same everything else, the rate went from 3.0/hr to
+18.5/hr in four hours — 11 hangs observed in 35 min where 1.75 were expected. Not a sampling
+fluke.
+
+**Thermal soak was considered and is a weak explanation:** the 18:00 baseline was itself taken
+after a full day of heavy load (hangs at 16:29 through 17:55, right up to the run), so a hot
+card was already the baseline condition.
+
+What distinguishes the two periods is the **19:38 hard wedge**, which was categorically
+different from the 120 recoverable hangs: no TDR raised, process unkillable, GPU wedged
+system-wide for all processes, survived a warm reboot, cleared only by removing power.
+
+**How to apply:** treat this card as failing, not mistuned. Stop spending time on Adrenalin
+tuning experiments. Confirmation test, if wanted, is cheap: same 20-min run from a cold boot
+in the morning — still ~18/hr confirms degradation and kills the thermal alternative.
+
+### Note: `OD8Settings` is not a usable indicator of custom tuning
+
+Recorded because it was misread once during this session. `OD8Settings = 64` on the display
+class key was taken as confirmation that a custom power limit was active. It still read 64
+*after* the tuning was reset to default, and its pre-change value was never captured — so it
+carries no information either way. What did track the change: `%LOCALAPPDATA%\AMD\CN\gmdb.blb`
+mtime, and the presence/absence of `gmrevert.blb` (Adrenalin's tuning-revert snapshot, which
+it deletes on reset). Neither exposes the actual percentage — there is no unprivileged way
+found to read or set the power limit programmatically; AMD ships no supported CLI for it.
+
+`RGStats.db` in the same folder is a game-session log, not telemetry — no temperature or
+clock history available there. `rocm-smi` remains non-functional under WSL2
+(`amdgpu not found in modules`), so no GPU temperature readout is available from this side at
+all; only Adrenalin's own Performance tab shows it.
+
+---
+
 ## Revert steps, cheapest first
 
 1. **Switch the binary back.** Edit `server/start-whisper-server.sh` to point at
