@@ -743,22 +743,29 @@ def _restart_backend() -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [watchdog] backend stuck >{STUCK_THRESHOLD_S:.0f}s, restarting whisper-server...", flush=True)
     try:
-        find = subprocess.run(
-            ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-lc", "ss -ltnp 2>/dev/null | grep ':8080'"],
-            capture_output=True, text=True, timeout=15,
+        # whisper-server (cpp-httplib) sets SO_REUSEPORT, so a hung instance can
+        # coexist with a freshly restarted one instead of erroring on bind -- the
+        # kernel then load-balances requests across both, silently routing some
+        # fraction to the dead one forever. Find+kill every PID on :8080 in one
+        # combined call (fewer WSL interop round trips = less likely to time out
+        # under the load a live GPU driver TDR event can put on WSL) with a
+        # generous timeout. This is a best-effort fast path only -- the real
+        # backstop is that start-whisper-server.sh itself self-cleans any stale
+        # listener before binding, so it's safe to proceed to restart below even
+        # if this step fails or times out.
+        result = subprocess.run(
+            ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-lc",
+             "pids=$(ss -ltnp 2>/dev/null | grep ':8080' | grep -oP 'pid=\\K[0-9]+' | sort -u); "
+             "[ -n \"$pids\" ] && kill -9 $pids; echo \"$pids\""],
+            capture_output=True, text=True, timeout=30,
         )
-        m = re.search(r"pid=(\d+)", find.stdout)
-        if m:
-            pid = m.group(1)
-            subprocess.run(
-                ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-lc", f"kill -9 {pid}"],
-                timeout=15,
-            )
-            print(f"[{ts}] [watchdog] killed whisper-server pid={pid}", flush=True)
+        pids = result.stdout.split()
+        if pids:
+            print(f"[{ts}] [watchdog] killed whisper-server pid(s)={','.join(pids)}", flush=True)
         else:
             print(f"[{ts}] [watchdog] no listener found on :8080 to kill", flush=True)
     except Exception as exc:
-        print(f"[{ts}] [watchdog] kill step failed: {exc}", flush=True)
+        print(f"[{ts}] [watchdog] kill step failed (start-whisper-server.sh will self-clean): {exc}", flush=True)
 
     try:
         subprocess.Popen(
