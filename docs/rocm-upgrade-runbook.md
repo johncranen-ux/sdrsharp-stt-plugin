@@ -165,9 +165,39 @@ py stress.py --captures "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-07-28" 
 
 ### Results
 
-| Label | ROCm | Requests | Crashes | Per 100 | Notes |
-|---|---|---|---|---|---|
-| _(baseline pending)_ | 6.1.3 | | | | |
+| Label | ROCm | SDR# | Requests | Crashes | Per 100 | Notes |
+|---|---|---|---|---|---|---|
+| `baseline-rocm-6.1.3` | 6.1.3 | **closed** | 520 | **0** | 0.00 | 2026-07-29 17:59-18:39, 39.8 min |
+
+### The baseline did not reproduce the bug — this invalidated the measurement plan
+
+520 consecutive requests on the supposedly-broken ROCm 6.1.3 stack produced **zero** failures,
+zero Event 10111s, and `whisper-server` ran 42 minutes on a single PID without one watchdog
+restart. For contrast, the same machine on the same day with SDR# running logged three crashes
+between 10:32 and 11:00.
+
+**The synthetic replay is therefore not a valid before/after metric on its own.** Upgrading
+ROCm and re-running it would produce 0 crashes either way and prove nothing — precisely the
+trap this harness was built to avoid. Work stopped here rather than proceeding blind.
+
+**What the replay did not have that production does:**
+
+1. **SDR# running.** It renders a continuous spectrum + waterfall on the same GPU, so
+   production has a second concurrent user-mode GPU client that the replay lacks. This is now
+   the leading hypothesis, and it reframes an earlier dismissal: Event 10111 names the
+   *display* adapter, which was written off as incidental. If the fault involves contention
+   on the graphics path, that naming is a clue rather than noise.
+2. **Bursty pacing.** The replay sends back-to-back requests ~4.6s apart; real VHF has long
+   idle gaps. A previous session tried to test this with a GPU keep-alive and concluded it
+   was disproven — but that test ran with SDR# open, so it never separated the two factors.
+
+Audio content is *not* a candidate: the replayed clips are the real captured live audio.
+
+**Next experiment (single variable):** re-run the identical 520-request replay with SDR# open
+and rendering but its transcription disabled, so it adds GPU load without adding requests. If
+crashes appear, hypothesis 1 is confirmed and the fix space changes substantially — forcing
+SDR#'s rendering onto the idle Raphael iGPU via Windows graphics preferences would be a
+trivial, fully reversible test, and cheaper than any ROCm change.
 
 ---
 
