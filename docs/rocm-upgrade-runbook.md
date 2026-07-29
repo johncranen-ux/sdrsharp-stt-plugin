@@ -311,7 +311,16 @@ Honest remaining options, best first:
 4. **Accept and mitigate.** The existing proxy watchdog already handles the *recoverable*
    hangs well. Note it cannot help with a hard wedge like this one, which needs a reboot.
 
-**Recovery from a hard wedge: reboot.** The GPU did not recover from killing the process.
+**Recovery from a hard wedge: full power-off, not a reboot.** Killing the process did not free
+the GPU, and a **warm reboot did not clear it either** — only a full power cycle brought the
+card back (confirmed 2026-07-29). After the power cycle, `rocminfo` in WSL enumerated `gfx1100`
+normally and whisper-server served a real inference in 0.7s.
+
+That detail is diagnostic, not just operational: a warm reboot re-initialises the driver but
+does not necessarily cut power to the card or force a full PCIe/device reset. A fault that
+survives driver re-init and only clears on power removal sits in device or firmware state the
+driver cannot reset — which strengthens options 1 and 2 above (power/clock limiting, PSU and
+cabling) relative to option 3 (driver rollback).
 
 ---
 
