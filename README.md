@@ -32,6 +32,19 @@ Groq requires `GROQ_API_KEY`. Its free tier allows 20 req/min, 2,000 req/day, an
 audio-seconds/hour; measured busy-channel traffic is ~105 requests and ~507 audio-seconds
 per hour, so requests/day is the only limit with any realistic chance of binding.
 
+The daily cap is a continuously refilling token bucket, not a midnight reset:
+`x-ratelimit-reset-requests` comes back as `43.2s`, exactly 86400/2000. Exhausting it
+therefore throttles you to ~1 request per 43 s rather than blocking outright — degraded
+service, not a blackout, but still most of a busy channel's traffic dropped. To get warning
+before that, the proxy watches the `x-ratelimit-remaining-requests` header and logs
+`[quota] Groq daily requests remaining: N` once the balance falls below
+`GROQ_QUOTA_WARN_AT` (default 200), repeating every `GROQ_QUOTA_WARN_STEP` (default 50)
+after that. Requests/minute is deliberately *not* throttled: the plugin's send loop is
+serial and its queue is bounded drop-oldest, so pacing sends would convert a visible 429 on
+the newest chunk into a silent discard of the oldest one — usually the transmission that
+names the vessel. A 429 with a short `Retry-After` is waited out and retried once; a long
+one is surfaced immediately rather than stalling every chunk queued behind it.
+
 **Trade-off:** Groq accepts only `model`, `language`, `prompt`, `temperature` and
 `response_format`. The `beam_size=5` / `best_of=5` / `carry_initial_prompt` /
 `suppress_nst` tuning documented below applies to the local backend only and has no

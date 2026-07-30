@@ -17,6 +17,8 @@ Optional env vars:
     STT_BACKEND           — "groq" (default) or "whisper_cpp"
     GROQ_MODEL            — Groq model id (default: whisper-large-v3)
     GROQ_TIMEOUT_S        — Groq HTTP timeout (default: 30, plugin cancels at 60)
+    GROQ_QUOTA_WARN_AT    — warn below this many daily requests left (default: 200)
+    GROQ_QUOTA_WARN_STEP  — repeat the warning every N further requests (default: 50)
     WHISPER_BACKEND_PORT  — override local backend port (default: 8080)
     PROXY_PORT            — override proxy listen port (default: 9000)
 
@@ -76,6 +78,11 @@ GROQ_PROMPT_MAX_WORDS = int(os.environ.get("GROQ_PROMPT_MAX_WORDS", "140"))
 # How long a 429 may ask us to wait before we give up and let the chunk fail. The
 # plugin's send loop is serial, so sleeping here stalls every chunk behind this one.
 GROQ_MAX_RETRY_WAIT_S = float(os.environ.get("GROQ_MAX_RETRY_WAIT_S", "5"))
+
+# Warn once the daily request allowance drops below GROQ_QUOTA_WARN_AT, then again
+# on every GROQ_QUOTA_WARN_STEP consumed after that.
+GROQ_QUOTA_WARN_AT   = int(os.environ.get("GROQ_QUOTA_WARN_AT", "200"))
+GROQ_QUOTA_WARN_STEP = int(os.environ.get("GROQ_QUOTA_WARN_STEP", "50"))
 
 # Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
 ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
@@ -933,6 +940,50 @@ def _parse_retry_after(value: str) -> float | None:
         return None
 
 
+_quota_lock = threading.Lock()
+_quota_last_bucket: int | None = None
+
+
+def _check_groq_quota(headers: list) -> None:
+    """Warn as the daily request allowance runs down.
+
+    Requests/day (2,000 on the free tier) is the only Groq limit this workload can
+    realistically reach — roughly 19 hours of continuous busy-channel monitoring.
+    Reaching it silently would mean every subsequent chunk is lost until the quota
+    resets, so it's worth surfacing early. Groq returns the counter on every
+    response, so nothing has to be tracked or estimated locally.
+
+    Warnings are bucketed rather than per-request: one line each time another
+    GROQ_QUOTA_WARN_STEP requests are consumed, not one line per chunk.
+    """
+    global _quota_last_bucket
+
+    remaining = None
+    for key, value in headers:
+        if key.lower() == "x-ratelimit-remaining-requests":
+            try:
+                remaining = int(value)
+            except (TypeError, ValueError):
+                return
+            break
+    if remaining is None:
+        return
+
+    with _quota_lock:
+        if remaining > GROQ_QUOTA_WARN_AT:
+            # Comfortably clear, or the daily quota has just rolled over — re-arm so
+            # tomorrow's run warns again instead of staying silent below yesterday's mark.
+            _quota_last_bucket = None
+            return
+        bucket = remaining // max(GROQ_QUOTA_WARN_STEP, 1)
+        if _quota_last_bucket is not None and bucket >= _quota_last_bucket:
+            return
+        _quota_last_bucket = bucket
+
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [quota] Groq daily requests remaining: {remaining}", flush=True)
+
+
 def _transcribe_groq(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
     """Transcribe via Groq's hosted Whisper API."""
     if not GROQ_API_KEY:
@@ -960,6 +1011,8 @@ def _transcribe_groq(file_info: dict, language: str, prompt: str) -> tuple[int, 
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] groq error (attempt {attempt}/{max_attempts}): {exc}", flush=True)
             return _error_response(str(exc))
+
+        _check_groq_quota(resp_headers)
 
         if resp.status < 500 and resp.status != 429:
             return resp.status, resp_body, resp_headers

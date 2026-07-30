@@ -361,6 +361,77 @@ def test_transcribe_groq_waits_out_a_short_rate_limit(fake_groq, monkeypatch):
     assert slept == [1.5]
 
 
+# ---------------------------------------------------------------------------
+# Daily quota warnings
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def quota(monkeypatch, capsys):
+    """Reset the module-level warning state so each test starts un-warned."""
+    monkeypatch.setattr(proxy, "_quota_last_bucket", None)
+    capsys.readouterr()
+    return capsys
+
+
+def _quota_headers(remaining):
+    return [("Content-Type", "application/json"), ("x-ratelimit-remaining-requests", str(remaining))]
+
+
+def test_quota_silent_when_plenty_remains(quota):
+    proxy._check_groq_quota(_quota_headers(1999))
+    assert quota.readouterr().out == ""
+
+
+def test_quota_warns_once_below_threshold(quota):
+    proxy._check_groq_quota(_quota_headers(180))
+    out = quota.readouterr().out
+    assert "Groq daily requests remaining: 180" in out
+
+
+def test_quota_does_not_repeat_within_the_same_bucket(quota):
+    proxy._check_groq_quota(_quota_headers(180))
+    quota.readouterr()
+    for remaining in (179, 165, 151):
+        proxy._check_groq_quota(_quota_headers(remaining))
+    assert quota.readouterr().out == ""
+
+
+def test_quota_warns_again_on_the_next_bucket(quota):
+    proxy._check_groq_quota(_quota_headers(180))
+    quota.readouterr()
+    proxy._check_groq_quota(_quota_headers(149))
+    assert "remaining: 149" in quota.readouterr().out
+
+
+def test_quota_rearms_after_the_daily_reset(quota):
+    """A quota rollover must not leave warnings suppressed for the next day."""
+    proxy._check_groq_quota(_quota_headers(60))
+    quota.readouterr()
+    proxy._check_groq_quota(_quota_headers(2000))   # new day
+    assert quota.readouterr().out == ""
+    proxy._check_groq_quota(_quota_headers(180))
+    assert "remaining: 180" in quota.readouterr().out
+
+
+@pytest.mark.parametrize("headers", [
+    [],
+    [("Content-Type", "application/json")],
+    [("x-ratelimit-remaining-requests", "not-a-number")],
+])
+def test_quota_ignores_missing_or_unparseable_headers(quota, headers):
+    proxy._check_groq_quota(headers)
+    assert quota.readouterr().out == ""
+
+
+def test_transcribe_groq_reports_quota_from_a_real_response(fake_groq, quota):
+    fake_groq.responses = [
+        _FakeResponse(200, b'{"text":"ok"}', {"x-ratelimit-remaining-requests": "42"})
+    ]
+    status, _, _ = proxy._transcribe_groq(_FILE_INFO, language="en", prompt="")
+    assert status == 200
+    assert "Groq daily requests remaining: 42" in quota.readouterr().out
+
+
 def test_transcribe_groq_gives_up_on_a_long_rate_limit(fake_groq, monkeypatch):
     """The plugin sends chunks serially, so a long sleep here stalls every chunk behind
     this one. Surfacing the 429 lets the next chunk start clean instead."""
