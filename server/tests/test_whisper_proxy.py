@@ -33,7 +33,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import corrections  # noqa: E402
+from stt_proxy import ais, corrections  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ def ais_cache(monkeypatch):
         "SYNTHESE 11":    {"name": "SYNTHESE 11", "mmsi": "111111111"},
         "AFTER YOU":      {"name": "AFTER YOU", "mmsi": "222222222"},
     }
-    monkeypatch.setattr(proxy, "_vessel_cache", cache)
+    monkeypatch.setattr(ais, "_vessel_cache", cache)
     return cache
 
 
@@ -164,7 +164,7 @@ def test_hints_still_surface_a_stated_vessel(ais_cache):
 def test_hint_filter_can_be_disabled(monkeypatch, ais_cache):
     """AIS_HINT_FILTER=off must restore the old loose behaviour exactly, which is what
     makes the revert trustworthy."""
-    monkeypatch.setattr(proxy, "AIS_HINT_FILTER", False)
+    monkeypatch.setattr(ais, "AIS_HINT_FILTER", False)
     assert proxy._find_ais_hints("Yes, good day sir, we are entering new area") != []
 
 
@@ -190,7 +190,7 @@ def _legacy_probes(text: str) -> list[str]:
 def test_flag_off_reproduces_the_original_probe_generation(monkeypatch, text):
     """The revert has to be exact, not approximate: with the flag off this must produce
     byte-identical probes to the pre-change implementation."""
-    monkeypatch.setattr(proxy, "AIS_HINT_FILTER", False)
+    monkeypatch.setattr(ais, "AIS_HINT_FILTER", False)
     assert proxy._hint_probes(text) == _legacy_probes(text)
 
 
@@ -407,8 +407,8 @@ def test_confidence_is_clamped_to_known_values():
 
 def test_callsign_candidates_are_marked_and_come_first(monkeypatch):
     """An exact callsign lookup is evidence, not similarity, so the resolver is told so."""
-    monkeypatch.setattr(proxy, "_callsign_cache", {"PABC": _CANDIDATES["SERENADA"]})
-    monkeypatch.setattr(proxy, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {"PABC": _CANDIDATES["SERENADA"]})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
     cands = proxy._resolver_candidates([_chunk(10, "callsign papa alpha bravo charlie", callsign="PABC")])
     assert cands[0]["name"] == "SERENADA" and cands[0]["via_callsign"] is True
 
@@ -457,8 +457,8 @@ def test_spelled_out_runs_break_on_ordinary_words():
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
     """Measured: the live pass emitted callsigns for transmissions containing none, and they
     hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
-    monkeypatch.setattr(proxy, "_callsign_cache", {"VRSQ4": {"name": "COSCO SHIPPING STAR", "mmsi": "1"}})
-    monkeypatch.setattr(proxy, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {"VRSQ4": {"name": "COSCO SHIPPING STAR", "mmsi": "1"}})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
     cands = proxy._resolver_candidates(
         [_chunk(10, "Gungor Star one three one five, correct.", callsign="VRSQ4")])
     assert cands == []
