@@ -78,9 +78,40 @@ Latency is comparable or slightly better: median 2.83 s end-to-end including net
 p95 6.20 s, against a 3.55 s mean local decode. That is where the LPU shows up — in speed,
 not accuracy; the weights and therefore the achievable quality are the same.
 
-**Open follow-up:** extend `_apply_sttt_corrections` with Groq's "Maas" variants, ideally
-validated against the un-referenced 2026-07-28 captures rather than the set the rules came
-from.
+### Correcting Groq's errors: fuzzy, not regex (2026-07-30)
+
+Closing that gap with more hand-written rules **does not work**, and the split-half
+experiment is worth keeping. Deriving `Maas` rules from 25 clips and scoring them on a
+held-out 24:
+
+| | Derivation (in-sample) | Hold-out (out-of-sample) |
+|---|---|---|
+| Raw Groq, no corrections | 0.401 | 0.431 |
+| + existing regex corrections | 0.372 | 0.412 |
+| + new hand-written Groq rules | 0.356 (−0.016) | 0.409 (**−0.003**) |
+| + fuzzy `<x> Approach` → `Maas Approach` | 0.365 (−0.007) | 0.375 (**−0.037**) |
+
+Hand-written rules were worth **0.3 points held out against 1.6 in-sample** — almost
+entirely overfitting. The cause is the shape of the error distribution: whisper.cpp got
+"Maas" wrong *consistently* (`mass`/`mars`/`march`), which regexes capture well, while
+Groq gets it wrong *diversely* — 13 spellings over 27 instances — so a rule learned from
+one sample rarely fires on the next. Similarity matching generalises to spellings never
+seen during derivation and is worth **3.7 points held out**.
+
+`_correct_maas_before_approach` therefore replaces any token preceding an "approach"-like
+word whose `rapidfuzz.ratio` to "maas" is ≥ `MAAS_FUZZ_THRESHOLD` (default 70). Reviewed
+against every rewrite it makes on the full set: no false positives, and the ambiguous real
+words (`Marsh`, `Moth`, `last`, `are`) fall below threshold and are correctly left alone.
+
+Corrections are now **mode-scoped**: `_apply_sttt_corrections(text, mode=...)` applies
+shared rules (`Callsign`) on any band but restricts the maritime set, including the fuzzy
+Maas rule, to maritime traffic. Previously `draft`→`draught` and `mass`→`Maas` fired on
+airband too; on the aviation band that would rewrite "final approach" as "Maas Approach".
+
+**Caveat on all Groq WER figures:** Groq is *not* deterministic at `temperature=0` — 10 of
+61 clips returned different text across two runs of the same audio. Differences under
+~2 points between separate runs are noise. The hold-out figures above are paired
+comparisons on identical text, so they are unaffected.
 
 ## Current configuration (chosen on real data, 2026-07-27)
 

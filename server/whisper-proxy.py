@@ -491,23 +491,67 @@ def _is_hallucination(text: str) -> bool:
 # Post-processing corrections
 # ---------------------------------------------------------------------------
 
-def _apply_sttt_corrections(text: str) -> str:
-    corrections = [
-        (r'\bmass\s+approach\b', 'Maas Approach', re.IGNORECASE),
-        (r'\bmarch\s+approach\b', 'Maas Approach', re.IGNORECASE),
-        (r'\bmars\s+approach\b', 'Maas Approach', re.IGNORECASE),
-        (r'\bmass\b(?=\s)', 'Maas', re.IGNORECASE),
-        (r'\bmars\b(?=\s)', 'Maas', re.IGNORECASE),
-        (r'\bcosine\b', 'Callsign', re.IGNORECASE),
-        (r'\bcall\s*sign\b', 'Callsign', re.IGNORECASE),
-        (r'\bmotor\s+tanker\b', 'Motortanker', re.IGNORECASE),
-        (r'\bdraft\b', 'draught', re.IGNORECASE),
-        (r'\bboys\b', 'buoys', re.IGNORECASE),
-        (r'\bboy\b', 'buoy', re.IGNORECASE),
-    ]
+# Rules safe on any band. "Callsign" is standard aviation phraseology too.
+_SHARED_CORRECTIONS = [
+    (r'\bcosine\b', 'Callsign', re.IGNORECASE),
+    (r'\bcall\s*sign\b', 'Callsign', re.IGNORECASE),
+]
+
+# Maritime-only: every one of these would be wrong or nonsensical on the aviation band
+# ("draught" and "buoy" have no airband meaning, and "Maas" would corrupt legitimate
+# approach names like "Rotterdam Approach" or "final approach").
+_MARITIME_CORRECTIONS = [
+    (r'\bmass\s+approach\b', 'Maas Approach', re.IGNORECASE),
+    (r'\bmarch\s+approach\b', 'Maas Approach', re.IGNORECASE),
+    (r'\bmars\s+approach\b', 'Maas Approach', re.IGNORECASE),
+    (r'\bmass\b(?=\s)', 'Maas', re.IGNORECASE),
+    (r'\bmars\b(?=\s)', 'Maas', re.IGNORECASE),
+    (r'\bmotor\s+tanker\b', 'Motortanker', re.IGNORECASE),
+    (r'\bdraft\b', 'draught', re.IGNORECASE),
+    (r'\bboys\b', 'buoys', re.IGNORECASE),
+    (r'\bboy\b', 'buoy', re.IGNORECASE),
+]
+
+# Fuzzy "<something> Approach" -> "Maas Approach".
+#
+# Measured necessity: the fixed regex rules above were derived from whisper.cpp's
+# substitutions, which were consistent (mass/mars/march, over and over). Groq gets the
+# same word wrong far more diversely -- 27 instances across 13 spellings on one 61-clip
+# set (Aas, AAS, Aps, A.M.A.S.S., MAAAS, Ameas, Moth, MOTR, Master, ...). Hand-written
+# rules do not survive that: on a held-out half they were worth 0.3 WER points, against
+# 1.6 in-sample. Similarity matching generalises to spellings never seen during
+# derivation and measured 3.7 points on the same held-out half.
+_APPROACH_RE = re.compile(r"\b([A-Za-z.']{1,12})(\s+)(ap+r?oa?ch\w*)", re.IGNORECASE)
+MAAS_FUZZ_THRESHOLD = int(os.environ.get("MAAS_FUZZ_THRESHOLD", "70"))
+
+
+def _correct_maas_before_approach(text: str) -> str:
+    def repl(match):
+        word = match.group(1)
+        stripped = word.lower().replace(".", "")
+        if stripped == "maas" or rf_fuzz.ratio(stripped, "maas") >= MAAS_FUZZ_THRESHOLD:
+            return f"Maas{match.group(2)}Approach"
+        return match.group(0)
+
+    return _APPROACH_RE.sub(repl, text)
+
+
+def _apply_sttt_corrections(text: str, mode: str = "maritime") -> str:
+    """Apply STT corrections appropriate to the band.
+
+    Mode-scoped because these rules are not band-neutral: firing the maritime set on
+    aviation traffic would rewrite "final approach" as "Maas Approach" and "draft" as
+    "draught".
+    """
+    corrections = list(_SHARED_CORRECTIONS)
+    if mode != "airband":
+        corrections += _MARITIME_CORRECTIONS
+
     result = text
     for pattern, replacement, flags in corrections:
         result = re.sub(pattern, replacement, result, flags=flags)
+    if mode != "airband":
+        result = _correct_maas_before_approach(result)
     return result
 
 
@@ -1141,7 +1185,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     resp_body = json.dumps(data).encode("utf-8")
 
                 elif mode == "airband":
-                    corrected = _apply_sttt_corrections(raw_text)
+                    corrected = _apply_sttt_corrections(raw_text, mode="airband")
                     channel_label = f"[{channel} MHz]" if channel else "[airband]"
                     print(f"[{ts}] {channel_label} {corrected}", flush=True)
                     data["text"] = corrected

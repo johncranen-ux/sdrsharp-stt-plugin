@@ -73,6 +73,81 @@ def test_apply_sttt_corrections(raw, expected_substring):
 
 
 # ---------------------------------------------------------------------------
+# Mode scoping
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("what is your cosine", "Callsign"),
+    ("what is your call sign", "Callsign"),
+])
+def test_shared_corrections_apply_to_both_bands(raw, expected):
+    assert expected in proxy._apply_sttt_corrections(raw, mode="maritime")
+    assert expected in proxy._apply_sttt_corrections(raw, mode="airband")
+
+
+@pytest.mark.parametrize("raw,maritime_only", [
+    ("draft twelve metres", "draught"),
+    ("watch out for the boys", "buoys"),
+    ("motor tanker Neptune", "Motortanker"),
+    ("mass approach, over", "Maas"),
+])
+def test_maritime_corrections_do_not_fire_on_airband(raw, maritime_only):
+    assert maritime_only in proxy._apply_sttt_corrections(raw, mode="maritime")
+    assert maritime_only not in proxy._apply_sttt_corrections(raw, mode="airband")
+
+
+def test_airband_keeps_aviation_phraseology_intact():
+    """'final approach' and 'draft' are ordinary aviation words -- rewriting them to
+    'Maas Approach' and 'draught' would corrupt real airband traffic."""
+    text = "cleared for final approach, check the draft of the flight plan"
+    assert proxy._apply_sttt_corrections(text, mode="airband") == text
+
+
+def test_corrections_default_to_maritime():
+    assert "Maas" in proxy._apply_sttt_corrections("mass approach, over")
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy "<x> Approach" -> "Maas Approach"
+#
+# Groq spells Maas 13 different ways; fixed regexes derived from one sample did not
+# generalise (0.3 WER points held out, vs 3.7 for this).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("variant", [
+    "Aas", "AAS", "MAAAS", "Mass", "Mars", "Mase", "Mast", "maas",
+])
+def test_fuzzy_maas_normalises_known_variants(variant):
+    result = proxy._correct_maas_before_approach(f"{variant} approach, this is Neptune")
+    assert result.startswith("Maas Approach")
+
+
+@pytest.mark.parametrize("spelling", ["approach", "Approach", "Aproach"])
+def test_fuzzy_maas_tolerates_misspelled_approach(spelling):
+    """Only spellings actually observed in Groq output -- 'Approach' 25x, 'approach' 14x,
+    'Aproach' 2x. The regex is deliberately not widened past what the data shows."""
+    assert proxy._correct_maas_before_approach(f"Aas {spelling}").startswith("Maas Approach")
+
+
+@pytest.mark.parametrize("text", [
+    "Rotterdam Approach, this is Neptune",
+    "cleared for final approach",
+    "Schiphol approach, good morning",
+])
+def test_fuzzy_maas_leaves_dissimilar_names_alone(text):
+    assert proxy._correct_maas_before_approach(text) == text
+
+
+def test_fuzzy_maas_is_applied_through_the_maritime_pipeline():
+    assert "Maas Approach" in proxy._apply_sttt_corrections("AAS approach, AAS approach, Fjordstrom")
+
+
+def test_fuzzy_maas_is_not_applied_on_airband():
+    text = "Aas approach"
+    assert proxy._apply_sttt_corrections(text, mode="airband") == text
+
+
+# ---------------------------------------------------------------------------
 # Multipart parse / rebuild round-trip
 # ---------------------------------------------------------------------------
 
