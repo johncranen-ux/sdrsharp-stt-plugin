@@ -859,6 +859,61 @@ def _get_claude() -> anthropic.Anthropic:
     return _claude
 
 
+# Callsign verification
+#
+# The extractor used to be told to "always extract callsigns", and it obliged even when the
+# transmission contained none: "Gungor Star one three one five, correct." produced VRSQ4,
+# "Help Trader Maas Approach." produced PE2026. Both are real entries in the AIS callsign
+# table, so match_by_callsign confirms them and a fabrication acquires an MMSI.
+#
+# A callsign is spoken by spelling it out, so a genuine one can be reconstructed from the
+# words. Anything that cannot be is discarded. The asymmetry is deliberate: dropping a real
+# callsign costs some enrichment, while keeping an invented one puts false identity on screen.
+_PHONETIC_LETTERS = {
+    "alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C", "delta": "D", "echo": "E",
+    "foxtrot": "F", "golf": "G", "hotel": "H", "india": "I", "juliet": "J", "juliett": "J",
+    "kilo": "K", "lima": "L", "mike": "M", "november": "N", "oscar": "O", "papa": "P",
+    "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T", "uniform": "U", "victor": "V",
+    "whiskey": "W", "whisky": "W", "xray": "X", "yankee": "Y", "zulu": "Z",
+}
+_SPOKEN_DIGITS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "niner": "9",
+}
+_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _spelled_out_runs(text: str) -> list[str]:
+    """Unbroken runs of spelled-out characters: phonetic letters, spoken digits, literals."""
+    runs, current = [], []
+    for word in re.findall(r"[A-Za-z0-9'-]+", (text or "").lower()):
+        char = _PHONETIC_LETTERS.get(word) or _SPOKEN_DIGITS.get(word)
+        if char is None and word.isalnum():
+            # Already-compact forms the decoder sometimes emits whole ("9HF5093"), and
+            # single spoken characters ("9 Hotel Alpha").
+            if len(word) == 1 or (len(word) <= 8 and any(c.isdigit() for c in word)
+                                  and any(c.isalpha() for c in word)):
+                char = word.upper()
+        if char:
+            current.append(char)
+        elif current:
+            runs.append("".join(current))
+            current = []
+    if current:
+        runs.append("".join(current))
+    return runs
+
+
+def _callsign_supported_by_text(callsign: str, text: str) -> bool:
+    """True only if `callsign` can be read out of `text`."""
+    wanted = _ALNUM_RE.sub("", callsign or "").upper()
+    if len(wanted) < 3:
+        return False
+    if wanted in _ALNUM_RE.sub("", text or "").upper():
+        return True
+    return any(wanted in run for run in _spelled_out_runs(text))
+
+
 SYSTEM_PROMPT = """\
 You analyse VHF marine radio transcriptions from Rotterdam harbour (Maas Approach / Rotterdam VTS area).
 Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdown:
@@ -867,7 +922,11 @@ Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdo
 Rules:
 1. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are NOT vessels.
 2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station addresses a vessel.
-3. Always extract callsigns (4-letter codes, MMSI 9-digit, alphanumeric like 9HF5093).
+3. Extract a callsign ONLY when the transmission spells one out -- phonetically
+   ("Juliet Lima Sierra Romeo"), as characters ("9 Hotel Alpha six one"), or verbatim
+   ("9HF5093"). If no callsign was spoken, return null. Do not guess one from the vessel
+   name, from the AIS hints, or from anything else: a callsign nobody said is worse than
+   no callsign, because it looks up to a real ship.
 4. Correct STT errors: mass->maas, draft->draught, boys->buoys, motor tanker->Motortanker.
 5. vessel_type: tanker/bulker/container/tug/ferry/general_cargo/passenger/yacht/pilot/null.
 6. [AIS: ...] hints are nearby vessels, NOT a list of who is speaking. Only use a hint to
@@ -922,6 +981,14 @@ def extract_vessel(raw_text: str, channel: str = "",
         result = json.loads(content)
         if result.get("text"):
             result["text"] = _apply_sttt_corrections(result["text"])
+
+        # Prompt rules alone have not held on this pipeline: verify the callsign is actually
+        # readable out of the transmission rather than trusting that it was.
+        callsign = result.get("callsign")
+        if callsign and not _callsign_supported_by_text(callsign, raw_text):
+            print(f"  [callsign] dropped {callsign!r}: not spelled out in the transmission", flush=True)
+            result["callsign"] = None
+
         return result
     except json.JSONDecodeError:
         return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
@@ -995,25 +1062,6 @@ Rules:
 """
 
 
-# A transmission that really spells out a callsign says so, or reads out phonetic letters.
-# Measured need: the live pass emits callsigns for transmissions containing none at all --
-# "Gungor Star one three one five, correct." yielded VRSQ4, "Help Trader Maas Approach."
-# yielded PE2026. Those are exact hits in the AIS callsign table, so match_by_callsign
-# happily confirms them, and the resolver would then be told an invention was hard evidence.
-_CALLSIGN_CUE_RE = re.compile(r"\bcall\s*sign\b", re.IGNORECASE)
-_PHONETIC_WORDS = frozenset("""
-alpha bravo charlie delta echo foxtrot golf hotel india juliet juliett kilo lima mike
-november oscar papa quebec romeo sierra tango uniform victor whiskey xray x-ray yankee zulu
-""".split())
-
-
-def _states_a_callsign(text: str) -> bool:
-    if _CALLSIGN_CUE_RE.search(text):
-        return True
-    words = _WORD_TOKEN_RE.findall(text.lower())
-    return sum(1 for w in words if w in _PHONETIC_WORDS) >= 3
-
-
 def _resolver_candidates(chunks: list[dict]) -> list[dict]:
     """AIS vessels plausibly involved in this window.
 
@@ -1025,7 +1073,9 @@ def _resolver_candidates(chunks: list[dict]) -> list[dict]:
     candidates: dict[str, dict] = {}
 
     for chunk in chunks:
-        if not _states_a_callsign(chunk.get("text", "")):
+        # Belt and braces: the live pass now drops unsupported callsigns, but a journal
+        # written before that fix, or a future regression, must not promote one to evidence.
+        if not _callsign_supported_by_text(chunk.get("callsign") or "", chunk.get("text", "")):
             continue
         ais = match_by_callsign(chunk.get("callsign") or "")
         if ais and ais.get("mmsi"):

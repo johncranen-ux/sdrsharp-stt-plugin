@@ -439,21 +439,50 @@ def test_callsign_candidates_are_marked_and_come_first(monkeypatch):
     assert cands[0]["name"] == "SERENADA" and cands[0]["via_callsign"] is True
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("Maas Approach, Callsign nine Hotel Alpha six one", True),
-    ("this is call sign PABC", True),
-    ("Zulu Charlie Foxtrot seven, over", True),          # three phonetics, no cue word
-    ("Gungor Star one three one five, correct.", False),  # produced VRSQ4 live: invented
-    ("Help Trader Maas Approach.", False),                # produced PE2026 live: invented
-    ("Maas Approach, Maas Approach, Wilson Durness.", False),
+@pytest.mark.parametrize("callsign,text", [
+    # Real transmissions from the 07-28 replay that must keep working.
+    ("5LKV5", "Maas Approach, this is MSC Athens, Callsign five Lima Kilo Victor Five."),
+    ("JLSR", "Callsign Juliet Lima Sierra Romeo, over."),
+    ("9HA6176", "Maas Approach, Cigars Lay Apart, Callsign 9 Hotel Alpha six one seven six"),
+    ("9HF5093", "this is motor vessel Anna, callsign 9HF5093, over"),   # verbatim
+    ("ZCF7", "Callsign Zulu Charlie Foxtrot seven, over"),
 ])
-def test_states_a_callsign(text, expected):
-    assert proxy._states_a_callsign(text) is expected
+def test_a_spelled_out_callsign_is_supported(callsign, text):
+    assert proxy._callsign_supported_by_text(callsign, text) is True
+
+
+@pytest.mark.parametrize("callsign,text", [
+    # Every one of these was actually produced by the live pass on the 07-28 captures.
+    ("VRSQ4", "Gungor Star one three one five, correct."),
+    ("PE2026", "Help Trader Maas Approach."),
+    ("PA3534", "MSC Jungair, MSC Jungair, this is Mildredship Protector on one."),
+    ("PE2026", "Maas Approach, this is Masiadel, Masiadel, Maas Approach."),
+    ("PABC", "Maas Approach, Maas Approach, Wilson Durness, calling you."),
+])
+def test_an_invented_callsign_is_rejected(callsign, text):
+    assert proxy._callsign_supported_by_text(callsign, text) is False
+
+
+@pytest.mark.parametrize("callsign,text", [
+    ("", "Callsign Juliet Lima Sierra Romeo"),
+    (None, "Callsign Juliet Lima Sierra Romeo"),
+    ("AB", "Alpha Bravo"),          # too short to be distinctive
+    ("JLSR", ""),
+    ("JLSR", None),
+])
+def test_callsign_support_handles_edge_cases(callsign, text):
+    assert proxy._callsign_supported_by_text(callsign, text) is False
+
+
+def test_spelled_out_runs_break_on_ordinary_words():
+    """Runs must not bridge unrelated speech, or scattered digits would form a callsign."""
+    runs = proxy._spelled_out_runs("Alpha Bravo proceeding Charlie Delta")
+    assert runs == ["AB", "CD"]
 
 
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
-    """Measured: the live pass emits callsigns for transmissions containing none, and they
-    can hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
+    """Measured: the live pass emitted callsigns for transmissions containing none, and they
+    hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
     monkeypatch.setattr(proxy, "_callsign_cache", {"VRSQ4": {"name": "COSCO SHIPPING STAR", "mmsi": "1"}})
     monkeypatch.setattr(proxy, "_vessel_cache", {})
     cands = proxy._resolver_candidates(
