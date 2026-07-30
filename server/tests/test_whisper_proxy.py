@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 
-_MODULE_PATH = Path(__file__).resolve().parent.parent / "whisper-proxy.py"
+_SERVER_DIR  = Path(__file__).resolve().parent.parent
+_MODULE_PATH = _SERVER_DIR / "whisper-proxy.py"
+
+# whisper-proxy.py imports the stt_proxy package, so server/ must be importable.
+sys.path.insert(0, str(_SERVER_DIR))
 
 
 def _load_proxy_module():
@@ -25,6 +29,11 @@ def _load_proxy_module():
 
 
 proxy = _load_proxy_module()
+
+# Submodules are imported directly where a test needs to patch module-level state: a flag
+# is read inside the module that owns it, so patching the re-export on `proxy` would have
+# no effect. Patch the owner.
+from stt_proxy import corrections  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +231,7 @@ def test_one_novel_word_is_enough_to_clear_a_transmission():
 
 
 def test_prompt_echo_filter_can_be_disabled(monkeypatch):
-    monkeypatch.setattr(proxy, "PROMPT_ECHO_FILTER", False)
+    monkeypatch.setattr(corrections, "PROMPT_ECHO_FILTER", False)
     assert proxy._is_prompt_echo("Motortanker Neptune, over.", _PROMPT) is False
 
 
