@@ -33,7 +33,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import ais, corrections  # noqa: E402
+from stt_proxy import ais, backends, corrections  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -797,8 +797,8 @@ class _FakeConnection:
 def fake_groq(monkeypatch):
     _FakeConnection.instances = []
     _FakeConnection.responses = []
-    monkeypatch.setattr(proxy.http.client, "HTTPSConnection", _FakeConnection)
-    monkeypatch.setattr(proxy, "GROQ_API_KEY", "gsk_test_key")
+    monkeypatch.setattr(backends.http.client, "HTTPSConnection", _FakeConnection)
+    monkeypatch.setattr(backends, "GROQ_API_KEY", "gsk_test_key")
     return _FakeConnection
 
 
@@ -806,25 +806,25 @@ _FILE_INFO = {"field": "file", "filename": "audio.wav", "content_type": "audio/w
 
 
 def test_transcribe_dispatches_to_groq_when_selected(monkeypatch):
-    monkeypatch.setattr(proxy, "STT_BACKEND", "groq")
-    monkeypatch.setattr(proxy, "_transcribe_groq", lambda *a, **k: (200, b'{"text":"groq"}', []))
-    monkeypatch.setattr(proxy, "_transcribe_whisper_cpp", lambda *a, **k: pytest.fail("wrong backend"))
+    monkeypatch.setattr(backends, "STT_BACKEND", "groq")
+    monkeypatch.setattr(backends, "_transcribe_groq", lambda *a, **k: (200, b'{"text":"groq"}', []))
+    monkeypatch.setattr(backends, "_transcribe_whisper_cpp", lambda *a, **k: pytest.fail("wrong backend"))
 
     status, body, _ = proxy.transcribe(_FILE_INFO, language="en", prompt="")
     assert (status, body) == (200, b'{"text":"groq"}')
 
 
 def test_transcribe_dispatches_to_whisper_cpp_when_selected(monkeypatch):
-    monkeypatch.setattr(proxy, "STT_BACKEND", "whisper_cpp")
-    monkeypatch.setattr(proxy, "_transcribe_whisper_cpp", lambda *a, **k: (200, b'{"text":"local"}', []))
-    monkeypatch.setattr(proxy, "_transcribe_groq", lambda *a, **k: pytest.fail("wrong backend"))
+    monkeypatch.setattr(backends, "STT_BACKEND", "whisper_cpp")
+    monkeypatch.setattr(backends, "_transcribe_whisper_cpp", lambda *a, **k: (200, b'{"text":"local"}', []))
+    monkeypatch.setattr(backends, "_transcribe_groq", lambda *a, **k: pytest.fail("wrong backend"))
 
     status, body, _ = proxy.transcribe(_FILE_INFO, language="en", prompt="")
     assert (status, body) == (200, b'{"text":"local"}')
 
 
 def test_transcribe_groq_missing_key_returns_error_envelope(monkeypatch):
-    monkeypatch.setattr(proxy, "GROQ_API_KEY", "")
+    monkeypatch.setattr(backends, "GROQ_API_KEY", "")
     status, body, _ = proxy._transcribe_groq(_FILE_INFO, language="en", prompt="")
     assert status == 503
     assert "GROQ_API_KEY" in json.loads(body)["error"]
@@ -850,7 +850,7 @@ def test_transcribe_groq_transport_failure_returns_503(fake_groq, monkeypatch):
     def boom(*args, **kwargs):
         raise OSError("connection reset")
 
-    monkeypatch.setattr(proxy.http.client, "HTTPSConnection", boom)
+    monkeypatch.setattr(backends.http.client, "HTTPSConnection", boom)
 
     status, body, _ = proxy._transcribe_groq(_FILE_INFO, language="en", prompt="")
     assert status == 503
@@ -872,7 +872,7 @@ def test_transcribe_groq_retries_once_on_server_error(fake_groq):
 
 def test_transcribe_groq_waits_out_a_short_rate_limit(fake_groq, monkeypatch):
     slept = []
-    monkeypatch.setattr(proxy.time, "sleep", slept.append)
+    monkeypatch.setattr(backends.time, "sleep", slept.append)
     fake_groq.responses = [
         _FakeResponse(429, b'{"error":"rate limited"}', {"Retry-After": "1.5"}),
         _FakeResponse(200, b'{"text":"after wait"}'),
@@ -966,7 +966,7 @@ def test_empty_upstream_headers_are_handled():
 @pytest.fixture
 def quota(monkeypatch, capsys):
     """Reset the module-level warning state so each test starts un-warned."""
-    monkeypatch.setattr(proxy, "_quota_last_bucket", None)
+    monkeypatch.setattr(backends, "_quota_last_bucket", None)
     capsys.readouterr()
     return capsys
 
@@ -1034,7 +1034,7 @@ def test_transcribe_groq_gives_up_on_a_long_rate_limit(fake_groq, monkeypatch):
     """The plugin sends chunks serially, so a long sleep here stalls every chunk behind
     this one. Surfacing the 429 lets the next chunk start clean instead."""
     slept = []
-    monkeypatch.setattr(proxy.time, "sleep", slept.append)
+    monkeypatch.setattr(backends.time, "sleep", slept.append)
     fake_groq.responses = [_FakeResponse(429, b'{"error":"rate limited"}', {"Retry-After": "60"})]
 
     status, _, _ = proxy._transcribe_groq(_FILE_INFO, language="en", prompt="")
