@@ -30,7 +30,7 @@ works on any voice channel.
 - **Retrospective conversation resolution** — exchanges are identified after they end, so a
   garbled opening call is resolved by a clearer later turn or a spelled-out callsign
 - **Benchmark and replay tooling** for measuring accuracy on your own recordings
-- **250 tests** covering the DSP, the proxy pipeline and the identification logic
+- **254 tests** covering the DSP, the proxy pipeline and the identification logic
 
 ## Getting started
 

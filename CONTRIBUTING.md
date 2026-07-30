@@ -11,10 +11,50 @@ py -m pip install -r server/requirements.txt        # proxy + tooling
 dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj
 ```
 
+## Layout
+
+```
+SDRSharp.SttPlugin/        the plugin that runs inside SDR# (C#)
+  Dsp/                     VAD, resampling, filtering, normalisation
+  Capture/                 optional chunk and raw-stream recording
+  WhisperClient.cs         the only file that talks to the proxy
+
+server/
+  whisper-proxy.py         configuration, routing, HTTP handler, entry point
+  stt_proxy/
+    corrections.py         hallucination, prompt echo, STT fixes, callsign checks
+    ais.py                 vessel cache, aisstream feed, name and callsign matching
+    backends.py            groq + whisper.cpp, decoder params, watchdog
+    identify.py            identifying the vessel in one transmission
+    conversations.py       journal, windowing, retrospective resolver, page
+    vessel_log.py          the /identified-vessels HTML log
+    claude.py              shared Anthropic client
+  bench.py, stress.py, replay_sessions.py, make_references.py   tooling
+  tests/                   pytest suite
+```
+
+### One rule that matters when editing
+
+Several modules own mutable state — the AIS caches, the conversation journal, the resolved
+list — and background threads write to it. **Read it through the module, not through an
+imported name:**
+
+```python
+from stt_proxy import ais
+if ais._vessel_cache: ...        # sees current state
+
+from stt_proxy.ais import _vessel_cache
+if _vessel_cache: ...            # binds a snapshot at import; silently wrong
+```
+
+The same applies to tests: patch the module that *owns* a flag, not a re-export. Getting
+this wrong produces wrong results rather than an error, which is the worst kind of bug.
+A `/conversations` outage caused by exactly this is what prompted the route tests.
+
 ## Running the tests
 
 ```bash
-py -m pytest server/tests -q                                              # ~212 tests
+py -m pytest server/tests -q                                              # 216 tests
 dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj      # 38 tests
 ```
 
