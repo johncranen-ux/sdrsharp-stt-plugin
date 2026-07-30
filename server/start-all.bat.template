@@ -28,9 +28,10 @@ set GROQ_MODEL=whisper-large-v3
 :: set AIS_HINT_FILTER=off
 :: set PROMPT_ECHO_FILTER=off
 ::
-:: SESSION_CONTEXT carries vessel identity across turns of one conversation. Built and
-:: measured, but OFF by default: it nearly doubles transcript fabrication (see README).
-:: set SESSION_CONTEXT=on
+:: CONVERSATION_RESOLVER decides vessel identity after each exchange ends, from the whole
+:: exchange, and publishes it at http://localhost:9000/conversations. It never touches the
+:: live transcript. On by default.
+:: set CONVERSATION_RESOLVER=off
 
 :: -- Ports (defaults match whisper proxy settings) -----------
 :: Whisper-server listens on 8080 inside WSL (accessible as localhost:8080 from Windows)

@@ -93,20 +93,20 @@ AIS_SAVE_INTERVAL   = 300
 
 # Conversation sessions
 #
-# A VHF exchange is normally one vessel alternating with the shore station over a couple of
-# minutes. Identifying each chunk in isolation loses that, so a single weak name cue in a
-# mid-exchange reply can invent a second vessel. Turns closer together than SESSION_GAP_S
-# are treated as one conversation and shown to Claude as context.
+# A VHF exchange is normally one vessel alternating with the shore station. Identifying each
+# chunk in isolation loses that, so a garbled first call is identified from the worst evidence
+# available and never revisited.
 #
-# DEFAULT OFF, on measured evidence. Replaying 249 real chunks with and without it: it does
-# fix some identifications, but it also nearly doubles text fabrication (18 -> 32 chunks
-# where the returned "text" adds 3+ words nobody said, e.g. "Copy that, thank you." coming
-# back as "Gungor Star one three one five, correct."), and it can propagate a wrong identity
-# across a whole exchange (WILSON DURNESS -> WILSON DUNDEE). Showing prior turns in the same
-# message lets them bleed into the transcription, and tightening the instruction reduced but
-# did not stop it. Fixing that needs identification and transcription separated, not another
-# prompt rule -- see README. Set SESSION_CONTEXT=on to enable and judge for yourself.
-SESSION_CONTEXT     = os.environ.get("SESSION_CONTEXT", "off").strip().lower() == "on"
+# Feeding prior turns into the *same* Claude call that produces the transcription was tried
+# and removed: measured over 249 real chunks it nearly doubled fabrication (18 -> 32 chunks
+# returning words nobody said, e.g. "Copy that, thank you." coming back as "Gungor Star one
+# three one five, correct.") and could propagate a wrong identity across a whole exchange.
+# Context in the transcription call bleeds into the transcription, and two rounds of prompt
+# tightening reduced but never stopped it.
+#
+# Identity is now resolved *after* a conversation ends, by a separate pass whose output schema
+# has no text field at all -- see resolve_conversation(). These constants survive because the
+# retrospective windowing reuses them.
 SESSION_GAP_S       = int(os.environ.get("SESSION_GAP_S", "120"))
 SESSION_MAX_TURNS   = int(os.environ.get("SESSION_MAX_TURNS", "6"))
 
@@ -188,17 +188,98 @@ def _session_vessel(turns: list[dict]) -> str | None:
     return names.pop() if len(names) == 1 else None
 
 
-def _render_session_context(turns: list[dict], now: datetime.datetime | None = None) -> str:
-    """Compact transcript of the exchange so far, for the extraction prompt."""
-    if not turns:
-        return ""
+# ---------------------------------------------------------------------------
+# Conversation journal and windowing
+#
+# Live identification sees one transmission and cannot revisit it, so a garbled first call
+# is identified from the worst evidence available. These chunks are kept until the traffic
+# on their channel goes quiet, then handed to resolve_conversation() which sees the whole
+# exchange -- including the turn where the shore station repeats the name clearly, or asks
+# for a callsign that settles it exactly.
+#
+# A window is a *container*, not a conversation. Measured on the 260-chunk 2026-07-28
+# session, a 120s gap yields a median window of 11 chunks spanning 116s and a longest of 45
+# chunks over 10 minutes: CH01 is shared, so Maas Approach works many vessels back-to-back
+# and a 20s gap often means a different ship called. 60s is tighter (median 5 chunks, 39s)
+# but still merges exchanges, so the resolver segments the window by content -- something no
+# gap rule can do.
+# ---------------------------------------------------------------------------
+
+CONVERSATION_RESOLVER   = os.environ.get("CONVERSATION_RESOLVER", "on").strip().lower() != "off"
+CONVERSATION_GAP_S      = int(os.environ.get("CONVERSATION_GAP_S", "60"))
+CONVERSATION_MAX_CHUNKS = int(os.environ.get("CONVERSATION_MAX_CHUNKS", "40"))
+CONVERSATION_POLL_S     = 10.0
+
+_conversation_chunks: list[dict] = []
+_conversation_lock = threading.Lock()
+_chunk_seq = 0
+
+
+def _record_chunk(channel: str, raw_text: str, result: dict,
+                  when: datetime.datetime | None = None) -> dict:
+    """Journal one transmission for later retrospective resolution."""
+    global _chunk_seq
+    with _conversation_lock:
+        _chunk_seq += 1
+        chunk = {
+            "id": _chunk_seq,
+            "time": when or datetime.datetime.now(),
+            "channel": channel,
+            # Raw feeds the resolver -- corrections can mask the very evidence it needs
+            # (a mangled name is a clue). Corrected is what the operator saw, so that is
+            # what the page shows.
+            "text": raw_text,
+            "corrected": result.get("text") or raw_text,
+            "live_vessel": result.get("vessel"),
+            "live_mmsi": result.get("mmsi"),
+            "callsign": result.get("callsign"),
+        }
+        _conversation_chunks.append(chunk)
+    return chunk
+
+
+def _split_windows(chunks: list[dict]) -> list[list[dict]]:
+    """Split time-ordered chunks wherever the silence exceeds CONVERSATION_GAP_S."""
+    windows: list[list[dict]] = []
+    for chunk in sorted(chunks, key=lambda c: c["time"]):
+        if windows and (chunk["time"] - windows[-1][-1]["time"]).total_seconds() <= CONVERSATION_GAP_S \
+                and len(windows[-1]) < CONVERSATION_MAX_CHUNKS:
+            windows[-1].append(chunk)
+        else:
+            windows.append([chunk])
+    return windows
+
+
+def _take_closed_windows(now: datetime.datetime | None = None) -> list[list[dict]]:
+    """Remove and return every window that is finished; leave open ones journalled.
+
+    A window is finished when a newer window exists on the same channel, when it has hit
+    CONVERSATION_MAX_CHUNKS (bounding the resolver prompt), or when nothing has been heard
+    on that channel for CONVERSATION_GAP_S.
+    """
     now = now or datetime.datetime.now()
-    lines = []
-    for t in turns:
-        age = int((now - t["time"]).total_seconds())
-        who = "(shore)" if t.get("shore") else (t.get("vessel") or "(unidentified)")
-        lines.append(f"  -{age}s {who}: {t.get('raw_text', '')[:120]}")
-    return "[recent exchange on this channel, oldest first]\n" + "\n".join(lines)
+    taken: list[list[dict]] = []
+    keep:  list[dict] = []
+
+    with _conversation_lock:
+        by_channel: dict[str, list[dict]] = {}
+        for chunk in _conversation_chunks:
+            by_channel.setdefault(chunk["channel"], []).append(chunk)
+
+        for chunks in by_channel.values():
+            windows = _split_windows(chunks)
+            for i, window in enumerate(windows):
+                superseded = i < len(windows) - 1
+                full       = len(window) >= CONVERSATION_MAX_CHUNKS
+                quiet      = (now - window[-1]["time"]).total_seconds() > CONVERSATION_GAP_S
+                if superseded or full or quiet:
+                    taken.append(window)
+                else:
+                    keep.extend(window)
+
+        _conversation_chunks[:] = sorted(keep, key=lambda c: c["time"])
+
+    return sorted(taken, key=lambda w: w[0]["time"])
 
 
 def _find_fuzzy_match_in_buffer(vessel_name: str) -> tuple:
@@ -781,18 +862,9 @@ def _get_claude() -> anthropic.Anthropic:
 SYSTEM_PROMPT = """\
 You analyse VHF marine radio transcriptions from Rotterdam harbour (Maas Approach / Rotterdam VTS area).
 Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdown:
-{"vessel": "<name or null>", "callsign": "<callsign or null>", "vessel_type": "<type or null>", "vessel_source": "stated|inferred|null", "text": "<corrected text>"}
+{"vessel": "<name or null>", "callsign": "<callsign or null>", "vessel_type": "<type or null>", "text": "<corrected text>"}
 
 Rules:
-0. If a [recent exchange ...] block is given, this transmission is most likely another turn
-   in that same conversation, which is normally ONE vessel alternating with the shore
-   station. Only report a different vessel when this transmission actually names one --
-   "this is X", "X calling", or the shore station addressing X. A passing resemblance to a
-   name is not naming a vessel. Set "vessel_source" to "stated" when the transmission names
-   the vessel itself, or "inferred" when you are carrying it over from the exchange.
-   The exchange block is for identification ONLY. Never let it change "text": do not copy
-   words from it, do not complete a sentence with it, do not add a vessel name that was not
-   spoken in THIS transmission. "text" is a transcription of this transmission alone.
 1. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are NOT vessels.
 2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station addresses a vessel.
 3. Always extract callsigns (4-letter codes, MMSI 9-digit, alphanumeric like 9HF5093).
@@ -803,59 +875,23 @@ Rules:
    hints alone: if the transmission does not name a vessel, return null even when hints
    are present. "Yes, good day sir" names no vessel, whatever the hints say.
 7. "text" is a transcription of THIS transmission and nothing else. Fix mis-heard words,
-   but never add content: no vessel name that was not spoken here, nothing carried in from
-   the recent-exchange block, no completing of a half-finished sentence. If the whole
-   transmission was "Maas Approach." then "text" is "Maas Approach." -- NOT
-   "Maas Approach, <vessel>." Identifying the speaker is what the "vessel" field is for.
+   but never add content: no vessel name that was not spoken here, no completing of a
+   half-finished sentence. If the whole transmission was "Maas Approach." then "text" is
+   "Maas Approach." -- NOT "Maas Approach, <vessel>." Identifying the speaker is what the
+   "vessel" field is for.
 """
-
-
-def _reconcile_with_session(result: dict, turns: list[dict]) -> dict:
-    """Reconcile a single-chunk identification against the conversation it sits in.
-
-    Two corrections, both for cases where a mid-exchange reply carries no real evidence of
-    a vessel but something in it resembled a name:
-      - nothing identified  -> carry over the vessel this exchange is with
-      - a *different* vessel identified without the transmission stating it -> distrust it
-        and keep the exchange's vessel (this is the "good day sir" -> GOOD WAY case)
-    A transmission that genuinely states a different vessel always wins: that is how a new
-    conversation legitimately starts.
-    """
-    session_vessel = _session_vessel(turns)
-    if not session_vessel:
-        return result
-
-    vessel = result.get("vessel")
-    stated = result.get("vessel_source") == "stated"
-
-    if not vessel or (vessel != session_vessel and not stated):
-        carried = dict(result)
-        carried["vessel"] = session_vessel
-        carried["vessel_source"] = "inferred"
-        carried["match_method"] = "session"
-        # AIS detail belonged to the vessel we just rejected, so it cannot travel with the
-        # carried-over identity. The callsign is deliberately NOT dropped: if this
-        # transmission spelled one out ("Callsign Juliet Lima Sierra Romeo"), that is
-        # first-hand evidence from the audio, not an attribute of the discarded match.
-        for stale in ("mmsi", "imo", "type", "vessel_type"):
-            carried.pop(stale, None)
-        return carried
-
-    return result
 
 
 def extract_vessel(raw_text: str, channel: str = "",
                    now: datetime.datetime | None = None) -> dict:
+    """Identify the vessel in a single transmission, live.
+
+    Deliberately sees only this transmission: conversation context in this call bleeds into
+    the transcription it also produces. Cross-turn identity is settled afterwards by
+    resolve_conversation(), which cannot touch the text because its schema has no text field.
+    """
     hints = _find_ais_hints(raw_text)
     blocks = [raw_text]
-
-    if SESSION_CONTEXT:
-        turns   = _session_turns(channel, now)
-        context = _render_session_context(turns, now)
-        if context:
-            blocks.append(context)
-    else:
-        turns = []
 
     if hints:
         hint_parts = []
@@ -886,7 +922,7 @@ def extract_vessel(raw_text: str, channel: str = "",
         result = json.loads(content)
         if result.get("text"):
             result["text"] = _apply_sttt_corrections(result["text"])
-        return _reconcile_with_session(result, turns) if SESSION_CONTEXT else result
+        return result
     except json.JSONDecodeError:
         return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
     except Exception as exc:
@@ -915,15 +951,353 @@ def enrich_with_ais(result: dict) -> dict:
     return enriched
 
 
+# ---------------------------------------------------------------------------
+# Retrospective conversation resolution
+#
+# Runs after a window closes, so the transcriptions are already final. Its output schema has
+# NO text field: this pass physically cannot alter what was said, which is the difference
+# between it and the forward-context approach that was tried and removed (that one shared a
+# call with the transcription and nearly doubled fabrication).
+#
+# It picks from a candidate list assembled from AIS rather than naming vessels freely -- the
+# same reasoning that forced the hint filter: given an open field it will match ordinary
+# speech to a real ship.
+# ---------------------------------------------------------------------------
+
+RESOLVER_SYSTEM_PROMPT = """\
+You are given consecutive VHF radio transmissions from one channel near Rotterdam
+(Maas Approach / Rotterdam VTS), in time order, already transcribed.
+
+They may contain SEVERAL separate exchanges: this is a shared working channel, so one vessel
+finishes and another calls in shortly after. An exchange typically opens with a vessel
+calling the shore station ("Maas Approach, Maas Approach, <name>") and then alternates
+between that vessel and the shore station.
+
+Split the transmissions into exchanges and identify the vessel in each.
+
+Return ONLY raw JSON, no markdown:
+{"exchanges": [{"chunk_ids": [1,2,3], "vessel": "<name or null>", "mmsi": "<mmsi or null>",
+                "evidence": "<short quote or reason>", "confidence": "high|medium|low"}]}
+
+Rules:
+1. Every chunk id you were given must appear in exactly one exchange.
+2. Choose "vessel" from the [CANDIDATES] list, copying the name exactly, or return null.
+   Never invent a name and never use one that is not in the list. If the transmissions do
+   not identify anyone, null is the correct answer.
+3. Prefer the clearest evidence anywhere in the exchange over the first mention. A garbled
+   opening call ("Selenada") is resolved by a later clear one, by the shore station repeating
+   the name, or best of all by a spelled-out callsign.
+4. A candidate marked "via callsign" was matched exactly on a spelled-out callsign. Trust it
+   above any name similarity.
+5. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are never the vessel.
+6. "evidence" is a short quote from the transmissions, or a one-line reason. Keep it factual.
+7. Do NOT return transcriptions. You are identifying speakers, not transcribing.
+"""
+
+
+# A transmission that really spells out a callsign says so, or reads out phonetic letters.
+# Measured need: the live pass emits callsigns for transmissions containing none at all --
+# "Gungor Star one three one five, correct." yielded VRSQ4, "Help Trader Maas Approach."
+# yielded PE2026. Those are exact hits in the AIS callsign table, so match_by_callsign
+# happily confirms them, and the resolver would then be told an invention was hard evidence.
+_CALLSIGN_CUE_RE = re.compile(r"\bcall\s*sign\b", re.IGNORECASE)
+_PHONETIC_WORDS = frozenset("""
+alpha bravo charlie delta echo foxtrot golf hotel india juliet juliett kilo lima mike
+november oscar papa quebec romeo sierra tango uniform victor whiskey xray x-ray yankee zulu
+""".split())
+
+
+def _states_a_callsign(text: str) -> bool:
+    if _CALLSIGN_CUE_RE.search(text):
+        return True
+    words = _WORD_TOKEN_RE.findall(text.lower())
+    return sum(1 for w in words if w in _PHONETIC_WORDS) >= 3
+
+
+def _resolver_candidates(chunks: list[dict]) -> list[dict]:
+    """AIS vessels plausibly involved in this window.
+
+    Callsign matches come first and are marked: match_by_callsign is an exact dictionary
+    lookup, so it is real evidence -- but only when the transmission actually spelled a
+    callsign out. Otherwise the "exactness" is just an invented string that happened to
+    exist, and the mark would launder a guess into evidence.
+    """
+    candidates: dict[str, dict] = {}
+
+    for chunk in chunks:
+        if not _states_a_callsign(chunk.get("text", "")):
+            continue
+        ais = match_by_callsign(chunk.get("callsign") or "")
+        if ais and ais.get("mmsi"):
+            entry = dict(ais)
+            entry["via_callsign"] = True
+            candidates[ais["mmsi"]] = entry
+
+    for chunk in chunks:
+        for hint in _find_ais_hints(chunk.get("text", "")):
+            mmsi = hint.get("mmsi")
+            if mmsi and mmsi not in candidates:
+                candidates[mmsi] = dict(hint)
+
+    return list(candidates.values())
+
+
+def _render_resolver_input(chunks: list[dict], candidates: list[dict]) -> str:
+    lines = ["[TRANSMISSIONS]"]
+    for chunk in chunks:
+        lines.append(f"  {chunk['id']}. [{chunk['time'].strftime('%H:%M:%S')}] {chunk.get('text', '')}")
+
+    lines.append("")
+    lines.append("[CANDIDATES]")
+    if candidates:
+        for c in candidates:
+            bits = [f"{c['name']} (MMSI:{c['mmsi']})"]
+            if c.get("callsign"):
+                bits.append(f"cs:{c['callsign']}")
+            if c.get("type"):
+                bits.append(f"type:{_get_ship_type_name(c['type'])}")
+            if c.get("via_callsign"):
+                bits.append("** via callsign, exact match **")
+            lines.append("  - " + " ".join(bits))
+    else:
+        lines.append("  (none -- every vessel must then be null)")
+    return "\n".join(lines)
+
+
+def resolve_conversation(chunks: list[dict]) -> list[dict]:
+    """Segment a closed window into exchanges and identify each. Never returns text."""
+    if not chunks:
+        return []
+
+    candidates = _resolver_candidates(chunks)
+    by_name = {c["name"].upper(): c for c in candidates}
+
+    try:
+        client = _get_claude()
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=RESOLVER_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": _render_resolver_input(chunks, candidates)}],
+        )
+        content = message.content[0].text.strip()
+        if "```" in content:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if m:
+                content = m.group(1)
+        exchanges = json.loads(content).get("exchanges", [])
+    except Exception as exc:
+        print(f"  [resolve error] {exc}", flush=True)
+        return _unresolved(chunks)
+
+    return _validate_exchanges(exchanges, chunks, by_name)
+
+
+def _unresolved(chunks: list[dict]) -> list[dict]:
+    """Fallback: one exchange, nobody identified. Never loses a transmission."""
+    return [{"chunk_ids": [c["id"] for c in chunks], "vessel": None, "mmsi": None,
+             "evidence": "resolver unavailable", "confidence": "low"}]
+
+
+def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
+    """Keep the model inside the candidate list and account for every transmission.
+
+    A name outside [CANDIDATES] is dropped rather than trusted: free-form naming is exactly
+    how ordinary speech turned into real ships before the hint filter was tightened.
+    """
+    valid_ids = {c["id"] for c in chunks}
+    seen: set[int] = set()
+    out: list[dict] = []
+
+    for ex in exchanges if isinstance(exchanges, list) else []:
+        ids = [i for i in ex.get("chunk_ids", []) if i in valid_ids and i not in seen]
+        if not ids:
+            continue
+        seen.update(ids)
+
+        name = (ex.get("vessel") or "").strip()
+        ais  = by_name.get(name.upper())
+        if name and not ais:
+            print(f"  [resolve] dropped off-list vessel {name!r}", flush=True)
+        out.append({
+            "chunk_ids": sorted(ids),
+            "vessel": ais["name"] if ais else None,
+            "mmsi": ais.get("mmsi") if ais else None,
+            "callsign": ais.get("callsign") if ais else None,
+            "type": _get_ship_type_name(ais.get("type")) if ais else None,
+            "via_callsign": bool(ais and ais.get("via_callsign")),
+            "evidence": str(ex.get("evidence") or "")[:200],
+            "confidence": ex.get("confidence") if ex.get("confidence") in ("high", "medium", "low") else "low",
+        })
+
+    missing = sorted(valid_ids - seen)
+    if missing:
+        out.append({"chunk_ids": missing, "vessel": None, "mmsi": None, "callsign": None,
+                    "type": None, "via_callsign": False,
+                    "evidence": "not assigned by resolver", "confidence": "low"})
+    return out
+
+
+CONVERSATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conversations.json")
+CONVERSATIONS_KEEP = int(os.environ.get("CONVERSATIONS_KEEP", "300"))
+
+_resolved: list[dict] = []
+_resolved_lock = threading.Lock()
+
+
+def _load_conversations() -> None:
+    try:
+        with open(CONVERSATIONS_FILE, "r", encoding="utf-8") as fh:
+            with _resolved_lock:
+                _resolved[:] = json.load(fh)[-CONVERSATIONS_KEEP:]
+        print(f"[conv] loaded {len(_resolved)} resolved exchanges", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"[conv] could not load {CONVERSATIONS_FILE}: {exc}", flush=True)
+
+
+def _save_conversations() -> None:
+    try:
+        with _resolved_lock:
+            data = list(_resolved[-CONVERSATIONS_KEEP:])
+        with open(CONVERSATIONS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1)
+    except Exception as exc:
+        print(f"[conv] could not save {CONVERSATIONS_FILE}: {exc}", flush=True)
+
+
+def _store_resolved(window: list[dict], exchanges: list[dict]) -> None:
+    """Record resolved exchanges together with the transmissions they cover, verbatim."""
+    by_id = {c["id"]: c for c in window}
+    rows = []
+    for ex in exchanges:
+        turns = [by_id[i] for i in ex["chunk_ids"] if i in by_id]
+        if not turns:
+            continue
+        rows.append({
+            **{k: v for k, v in ex.items() if k != "chunk_ids"},
+            "channel": turns[0]["channel"],
+            "start": turns[0]["time"].strftime("%Y-%m-%d %H:%M:%S"),
+            "end":   turns[-1]["time"].strftime("%Y-%m-%d %H:%M:%S"),
+            # Text is copied straight from the journal, never from the resolver.
+            "turns": [{"time": t["time"].strftime("%H:%M:%S"),
+                       "text": t.get("corrected") or t.get("text", ""),
+                       "raw": t.get("text", ""),
+                       "live_vessel": t.get("live_vessel")} for t in turns],
+        })
+    if not rows:
+        return
+    with _resolved_lock:
+        _resolved.extend(rows)
+        del _resolved[:-CONVERSATIONS_KEEP]
+    _save_conversations()
+
+
+def _resolve_window(window: list[dict]) -> None:
+    exchanges = resolve_conversation(window)
+    _store_resolved(window, exchanges)
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    for ex in exchanges:
+        who = ex.get("vessel") or "unidentified"
+        via = " via callsign" if ex.get("via_callsign") else ""
+        print(f"[{ts}] [conv] {len(ex['chunk_ids'])} turns -> {who}{via} ({ex.get('confidence')})", flush=True)
+
+
+def _html_escape(text: str) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def render_conversations_page(rows: list[dict]) -> str:
+    """Render resolved exchanges, newest first. Built from stored data on every request."""
+    blocks = []
+    for row in reversed(rows):
+        vessel = row.get("vessel")
+        conf   = row.get("confidence", "low")
+        ident  = _html_escape(vessel) if vessel else "unidentified"
+        badge  = "via callsign" if row.get("via_callsign") else f"{_html_escape(conf)} confidence"
+
+        meta = []
+        if row.get("mmsi"):
+            meta.append(f"MMSI {_html_escape(row['mmsi'])}")
+        if row.get("callsign"):
+            meta.append(f"callsign {_html_escape(row['callsign'])}")
+        if row.get("type"):
+            meta.append(_html_escape(row["type"]))
+
+        turns = []
+        for t in row.get("turns", []):
+            live = t.get("live_vessel")
+            # Shown when the live guess disagreed, so the correction is visible rather than
+            # silently overwritten.
+            note = (f'<span class="was">live: {_html_escape(live)}</span>'
+                    if live and live != vessel else "")
+            turns.append(f'<li><span class="t">{_html_escape(t.get("time",""))}</span> '
+                         f'{_html_escape(t.get("text",""))} {note}</li>')
+
+        blocks.append(f"""
+    <div class="conv {'named' if vessel else 'unnamed'}">
+      <div class="hd">
+        <span class="vessel">{ident}</span>
+        <span class="badge {_html_escape(conf)}">{badge}</span>
+        <span class="meta">{' &middot; '.join(meta)}</span>
+        <span class="when">{_html_escape(row.get('start',''))} &ndash; {_html_escape(row.get('end',''))[-8:]}
+              &middot; ch {_html_escape(row.get('channel',''))} &middot; {len(row.get('turns', []))} turns</span>
+      </div>
+      <div class="ev">{_html_escape(row.get('evidence',''))}</div>
+      <ul>{''.join(turns)}</ul>
+    </div>""")
+
+    body = "".join(blocks) if blocks else '<p class="empty">No conversations resolved yet.</p>'
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Resolved Conversations</title>
+<meta http-equiv="refresh" content="30">
+<style>
+ body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; color: #222; }}
+ h1 {{ color: #333; }} a {{ color: #2c3e50; }}
+ .conv {{ background: #fff; margin-bottom: 14px; padding: 12px 14px; border-radius: 4px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.12); border-left: 4px solid #bbb; }}
+ .conv.named {{ border-left-color: #27ae60; }}
+ .conv.unnamed {{ border-left-color: #e0b400; }}
+ .hd {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }}
+ .vessel {{ font-weight: bold; font-size: 1.1em; }}
+ .badge {{ font-size: .75em; padding: 2px 7px; border-radius: 10px; background: #eee; }}
+ .badge.high {{ background: #d4edda; }} .badge.medium {{ background: #fff3cd; }}
+ .badge.low {{ background: #f8d7da; }}
+ .meta, .when {{ color: #666; font-size: .85em; }} .when {{ margin-left: auto; }}
+ .ev {{ color: #555; font-style: italic; font-size: .9em; margin: 6px 0; }}
+ ul {{ list-style: none; padding-left: 0; margin: 6px 0 0; }}
+ li {{ padding: 3px 0; border-top: 1px solid #f0f0f0; font-size: .95em; }}
+ .t {{ color: #888; font-family: monospace; margin-right: 8px; }}
+ .was {{ color: #c0392b; font-size: .8em; margin-left: 6px; }}
+ .empty {{ color: #666; }}
+</style></head><body>
+<h1>Resolved Conversations</h1>
+<p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>
+<p style="color:#666;font-size:.9em">Identity is decided after each exchange ends, from the whole
+exchange rather than one transmission. Transmission text is copied verbatim from the live
+transcript &mdash; this pass never rewrites it.</p>
+{body}
+</body></html>"""
+
+
+def _conversation_reaper() -> None:
+    while True:
+        threading.Event().wait(CONVERSATION_POLL_S)
+        try:
+            for window in _take_closed_windows():
+                _resolve_window(window)
+        except Exception as exc:
+            print(f"  [conv reaper error] {exc}", flush=True)
+
+
 def format_for_plugin(result: dict) -> str:
     parts = []
     vessel = result.get("vessel")
     vtype  = result.get("vessel_type")
     if vessel:
-        # "~" marks an identity carried over from the conversation rather than stated in
-        # this transmission, so an inherited name never reads as a confirmed one.
-        mark = "~" if result.get("vessel_source") == "inferred" else ""
-        parts.append(f"[{mark}{vessel}/{vtype}]" if vtype else f"[{mark}{vessel}]")
+        parts.append(f"[{vessel}/{vtype}]" if vtype else f"[{vessel}]")
     if result.get("mmsi"):
         parts.append(f"(MMSI:{result['mmsi']})")
     elif result.get("callsign"):
@@ -1416,6 +1790,34 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error(500, str(exc))
             return
 
+        if self.path in ("/conversations", "/conversations/"):
+            try:
+                with _resolved_lock:
+                    rows = list(_resolved)
+                data = render_conversations_page(rows).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as exc:
+                self.send_error(500, str(exc))
+            return
+
+        if self.path == "/api/conversations":
+            try:
+                with _resolved_lock:
+                    data = json.dumps(list(_resolved)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as exc:
+                self.send_error(500, str(exc))
+            return
+
         if self.path == "/api/ais-cache":
             try:
                 with _cache_lock:
@@ -1517,6 +1919,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     display_text = format_for_plugin(result)
                     _append_vessel_to_log(result, raw_text)
                     _add_to_buffer(result, raw_text, channel)
+                    if CONVERSATION_RESOLVER:
+                        # Journalled with the raw transcription. The retrospective pass reads
+                        # this text and never writes it back.
+                        _record_chunk(channel, raw_text, result)
 
                     vessel   = result.get("vessel") or "?"
                     vtype    = result.get("vessel_type") or "-"
@@ -1576,6 +1982,15 @@ if __name__ == "__main__":
 
     _init_vessels_log()
     _load_cache()
+    _load_conversations()
+
+    if CONVERSATION_RESOLVER:
+        threading.Thread(target=_conversation_reaper, daemon=True).start()
+        atexit.register(_save_conversations)
+        print(f"Conversation resolver: enabled (window gap {CONVERSATION_GAP_S}s) "
+              f"-> http://localhost:{PROXY_PORT}/conversations", flush=True)
+    else:
+        print("Conversation resolver: disabled (CONVERSATION_RESOLVER=off)", flush=True)
 
     ais_key = os.environ.get("AISSTREAM_API_KEY", "")
     if ais_key:

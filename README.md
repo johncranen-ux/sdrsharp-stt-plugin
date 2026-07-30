@@ -151,7 +151,7 @@ Investigation found three independent causes, all now addressed, each behind its
 |---|---|---|
 | `AIS_HINT_FILTER` | `on` | Hint tightening (restores the original matching exactly) |
 | `PROMPT_ECHO_FILTER` | `on` | Prompt-echo suppression |
-| `SESSION_CONTEXT` | **`off`** | (set `on` to enable — measured net-negative, see below) |
+| `CONVERSATION_RESOLVER` | `on` | Retrospective conversation resolution + `/conversations` |
 
 **1. AIS hints were manufacturing vessels.** `_find_ais_hints` probed every word and
 word-pair against 7,313 AIS names with `WRatio` at `score_cutoff=65`. `WRatio` falls back to
@@ -181,30 +181,34 @@ requires that *every* word came from the prompt **and** either ≥6 words or a w
 to the prompt. Flags **9 of 307** transcripts, all verifiably verbatim prompt fragments,
 while leaving real short transmissions such as *"This is Maas Approach."* alone.
 
-**3. Each chunk was identified in isolation — built, measured, and left OFF by default.**
-Turns within `SESSION_GAP_S` (120 s) form a conversation whose recent turns are shown to
-Claude; a turn identifying nobody inherits the exchange's vessel, a turn naming a *different*
-vessel without stating it is distrusted, and inherited identities display as `[~NAME]`.
+**3. Each chunk was identified in isolation** — so a garbled opening call was identified from
+the worst evidence available and never revisited, even when the shore station repeated the
+name clearly two turns later.
 
-Replaying 249 real chunks with it on and off shows it is **not currently a net improvement**:
+Feeding prior turns into the *same* Claude call that produces the transcription was tried and
+**removed**: over 249 real chunks it nearly doubled fabrication (18 → 32 chunks returning
+words nobody said — `"Copy that, thank you."` came back as `"Gungor Star one three one five,
+correct."`) and could propagate a wrong identity across a whole exchange. Context in the
+transcription call bleeds into the transcription; two rounds of prompt tightening reduced but
+never stopped it.
 
-| | filters off | filters on |
-|---|---|---|
-| phantom identifications dropped | — | 5 |
-| identifications replaced | — | 24 (several worse, e.g. `MSC PANTERA` → `RED`) |
-| identity inherited | — | 126 |
-| **text adds ≥3 words nobody said** | **18** | **32** |
+Identity is now resolved **after** an exchange ends, by a separate pass
+(`resolve_conversation`) whose **output schema has no text field at all**. It cannot rewrite a
+transcription — the failure mode is impossible by construction rather than discouraged by
+instruction. It also makes late evidence retroactive: a callsign spelled out in turn 4
+resolves turns 1–3 through the exact `match_by_callsign` lookup.
 
-Two problems. It nearly doubles transcript fabrication — showing prior turns in the same
-message lets them bleed into the `text` field (`"Copy that, thank you."` came back as
-`"Gungor Star one three one five, correct."`); tightening the instruction reduced but did not
-stop it. And a wrong identity propagates across a whole exchange
-(`WILSON DURNESS` → `WILSON DUNDEE`).
+A background reaper closes a window when its channel has been quiet for `CONVERSATION_GAP_S`
+(60 s) or it reaches `CONVERSATION_MAX_CHUNKS` (40). A window is a **container, not a
+conversation** — measured on the 07-28 session, a 120 s gap gives a median window of 11 chunks
+over 116 s and a longest of 45 chunks over 10 minutes, because CH01 is shared and Maas works
+many vessels back-to-back. So the resolver segments the window into exchanges *by content*,
+which no gap rule can do, and picks each vessel **from an AIS candidate list or returns null**
+— never naming one freely.
 
-The fix is structural rather than another prompt rule: identification and transcription need
-to be separate calls, so conversation context can inform *who is speaking* without ever
-touching *what was said*. Until then this stays off; fixes 1 and 2 are independent of it and
-remain on.
+Results appear at **`localhost:9000/conversations`**, not in the plugin: the proxy answers per
+request, so holding a response until an exchange ends would stall the plugin's serial send
+loop, and at exchange end no request is in flight to answer. The live transcript is unchanged.
 
 **Judging it:** `server/replay_sessions.py` replays a capture directory in original order and
 timing with the filters on and off and prints the diff. It deliberately reports **no accuracy

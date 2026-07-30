@@ -284,77 +284,238 @@ def test_session_vessel_is_none_when_two_vessels_disagree():
     assert proxy._session_vessel(turns) is None
 
 
-def test_render_session_context_is_empty_without_turns():
-    assert proxy._render_session_context([]) == ""
+
+# ---------------------------------------------------------------------------
+# Conversation windowing
+# ---------------------------------------------------------------------------
+
+def _chunk(seconds_ago, text="", channel="160,650", cid=None, callsign=None, vessel=None):
+    return {
+        "id": cid if cid is not None else seconds_ago,
+        "time": datetime.datetime.now() - datetime.timedelta(seconds=seconds_ago),
+        "channel": channel, "text": text, "callsign": callsign,
+        "live_vessel": vessel, "live_mmsi": None,
+    }
 
 
-def test_render_session_context_labels_speakers():
-    out = proxy._render_session_context([
-        _turn(16, "WILSON DURNESS", "Maas Approach, Wilson Durness, calling you."),
-        _turn(13, None, "Wilson Durness, Maas Approach.", shore=True),
-        _turn(3, None, "Yes, good day sir."),
-    ])
-    assert "WILSON DURNESS:" in out and "(shore):" in out and "(unidentified):" in out
+@pytest.fixture
+def journal(monkeypatch):
+    entries = []
+    monkeypatch.setattr(proxy, "_conversation_chunks", entries)
+    return entries
 
 
-# --- reconciliation: the actual behaviour change --------------------------
-
-_SESSION = [_turn(16, "WILSON DURNESS"), _turn(13, None, shore=True)]
-
-
-def test_unidentified_turn_inherits_the_conversation_vessel():
-    out = proxy._reconcile_with_session({"vessel": None, "text": "Yes, understood."}, _SESSION)
-    assert out["vessel"] == "WILSON DURNESS"
-    assert out["vessel_source"] == "inferred"
-    assert out["match_method"] == "session"
+def test_split_windows_breaks_on_a_long_silence():
+    windows = proxy._split_windows([_chunk(300), _chunk(200), _chunk(20), _chunk(10)])
+    assert [len(w) for w in windows] == [1, 1, 2]
 
 
-def test_a_different_vessel_not_stated_is_rejected():
-    """'Yes, good day sir' -> GOOD WAY: exactly the reported false identification."""
-    out = proxy._reconcile_with_session(
-        {"vessel": "GOOD WAY", "mmsi": "538010145", "vessel_source": "inferred",
-         "text": "Yes, good day sir"}, _SESSION)
-    assert out["vessel"] == "WILSON DURNESS"
-    assert "mmsi" not in out, "stale AIS detail must not survive an inherited identity"
+def test_split_windows_keeps_a_continuous_exchange_together():
+    windows = proxy._split_windows([_chunk(50), _chunk(40), _chunk(30), _chunk(20)])
+    assert len(windows) == 1
 
 
-def test_a_callsign_spoken_in_this_transmission_survives_inheritance():
-    """Found by replay: a spelled-out callsign is first-hand evidence from the audio, not
-    an attribute of the vessel match being discarded, so it must not be dropped."""
-    out = proxy._reconcile_with_session(
-        {"vessel": None, "callsign": "JLSR", "text": "Callsign Juliet Lima Sierra Romeo, over."},
-        _SESSION)
-    assert out["vessel"] == "WILSON DURNESS"
-    assert out["callsign"] == "JLSR"
+def test_split_windows_caps_window_size(monkeypatch):
+    """Bounds the resolver prompt: a busy channel must not build one huge window."""
+    monkeypatch.setattr(proxy, "CONVERSATION_MAX_CHUNKS", 3)
+    windows = proxy._split_windows([_chunk(60 - i, cid=i) for i in range(7)])
+    assert [len(w) for w in windows] == [3, 3, 1]
 
 
-def test_a_stated_different_vessel_wins():
-    """This is how a new conversation legitimately begins."""
-    out = proxy._reconcile_with_session(
-        {"vessel": "MSC PANTERA", "vessel_source": "stated",
-         "text": "Maas Approach, this is MSC Pantera"}, _SESSION)
-    assert out["vessel"] == "MSC PANTERA"
+def test_open_window_is_left_in_the_journal(journal):
+    journal.extend([_chunk(20), _chunk(5)])
+    assert proxy._take_closed_windows() == []
+    assert len(journal) == 2, "an exchange still in progress must not be resolved early"
 
 
-def test_the_same_vessel_restated_is_left_alone():
-    out = proxy._reconcile_with_session(
-        {"vessel": "WILSON DURNESS", "mmsi": "314632000", "vessel_source": "stated"}, _SESSION)
-    assert out["vessel"] == "WILSON DURNESS" and out["mmsi"] == "314632000"
+def test_quiet_window_is_taken(journal):
+    journal.extend([_chunk(300), _chunk(290)])
+    taken = proxy._take_closed_windows()
+    assert [len(w) for w in taken] == [2]
+    assert journal == []
 
 
-def test_nothing_is_inherited_from_an_ambiguous_session():
-    ambiguous = [_turn(20, "WILSON DURNESS"), _turn(10, "MSC PANTERA")]
-    out = proxy._reconcile_with_session({"vessel": None, "text": "Roger."}, ambiguous)
-    assert out["vessel"] is None
+def test_superseded_window_is_taken_but_the_live_one_is_kept(journal):
+    journal.extend([_chunk(400, cid=1), _chunk(390, cid=2), _chunk(10, cid=3)])
+    taken = proxy._take_closed_windows()
+    assert [[c["id"] for c in w] for w in taken] == [[1, 2]]
+    assert [c["id"] for c in journal] == [3]
 
 
-@pytest.mark.parametrize("result,expected", [
-    ({"vessel": "WILSON DURNESS", "text": "hi"}, "[WILSON DURNESS] hi"),
-    ({"vessel": "WILSON DURNESS", "vessel_source": "inferred", "text": "hi"}, "[~WILSON DURNESS] hi"),
-    ({"vessel": "WILSON DURNESS", "vessel_source": "stated", "text": "hi"}, "[WILSON DURNESS] hi"),
+def test_windows_do_not_span_channels(journal):
+    journal.extend([_chunk(300, channel="160,650", cid=1), _chunk(299, channel="161,650", cid=2)])
+    taken = proxy._take_closed_windows()
+    assert sorted(len(w) for w in taken) == [1, 1]
+
+
+def test_record_chunk_journals_the_raw_transcription(journal):
+    proxy._record_chunk("160,650", "Mass Approach, Serenada.",
+                        {"vessel": "SERENADA", "callsign": "PABC", "text": "Maas Approach, Serenada."})
+    assert journal[0]["text"] == "Mass Approach, Serenada.", "resolver needs the raw decode"
+    assert journal[0]["corrected"] == "Maas Approach, Serenada.", "page shows what the operator saw"
+    assert journal[0]["live_vessel"] == "SERENADA"
+    assert journal[0]["callsign"] == "PABC"
+
+
+def test_record_chunk_falls_back_to_raw_when_uncorrected(journal):
+    proxy._record_chunk("160,650", "Roger, over.", {"vessel": None})
+    assert journal[0]["corrected"] == "Roger, over."
+
+
+# ---------------------------------------------------------------------------
+# Retrospective resolver
+#
+# The reason this design replaced forward context: its schema has no text field, so it
+# cannot rewrite a transcription. That is asserted here rather than assumed.
+# ---------------------------------------------------------------------------
+
+_CANDIDATES = {
+    "SERENADA": {"name": "SERENADA", "mmsi": "275545000", "callsign": "PABC", "type": 80},
+    "WILSON DURNESS": {"name": "WILSON DURNESS", "mmsi": "314632000"},
+}
+
+
+def test_resolver_schema_has_no_text_field():
+    """The firewall. If a text field ever appears here, the fabrication bug is back."""
+    assert '"text"' not in proxy.RESOLVER_SYSTEM_PROMPT
+    assert "Do NOT return transcriptions" in proxy.RESOLVER_SYSTEM_PROMPT
+
+
+def test_validate_keeps_only_candidate_vessels():
+    """A name outside the candidate list is dropped, not trusted -- free-form naming is how
+    ordinary speech became real ships before the hint filter was tightened."""
+    chunks = [_chunk(30, cid=1), _chunk(20, cid=2)]
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1, 2], "vessel": "GOOD WAY", "confidence": "high"}], chunks, _CANDIDATES)
+    assert out[0]["vessel"] is None
+
+
+def test_validate_accepts_a_candidate_and_attaches_its_ais_detail():
+    chunks = [_chunk(30, cid=1)]
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1], "vessel": "serenada", "confidence": "high"}], chunks, _CANDIDATES)
+    assert out[0]["vessel"] == "SERENADA"
+    assert out[0]["mmsi"] == "275545000"
+
+
+def test_validate_accounts_for_every_transmission():
+    """No transmission may be silently dropped by the resolver."""
+    chunks = [_chunk(30, cid=1), _chunk(20, cid=2), _chunk(10, cid=3)]
+    out = proxy._validate_exchanges([{"chunk_ids": [1], "vessel": None}], chunks, _CANDIDATES)
+    assert sorted(i for ex in out for i in ex["chunk_ids"]) == [1, 2, 3]
+
+
+def test_validate_ignores_unknown_and_duplicate_chunk_ids():
+    chunks = [_chunk(30, cid=1), _chunk(20, cid=2)]
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1, 99]}, {"chunk_ids": [1, 2]}], chunks, _CANDIDATES)
+    assert sorted(i for ex in out for i in ex["chunk_ids"]) == [1, 2]
+
+
+@pytest.mark.parametrize("bad", [None, "not a list", [], [{"chunk_ids": []}]])
+def test_validate_survives_a_malformed_response(bad):
+    chunks = [_chunk(30, cid=1)]
+    out = proxy._validate_exchanges(bad, chunks, _CANDIDATES)
+    assert [i for ex in out for i in ex["chunk_ids"]] == [1]
+
+
+def test_unresolved_fallback_keeps_every_chunk():
+    out = proxy._unresolved([_chunk(30, cid=1), _chunk(20, cid=2)])
+    assert out[0]["chunk_ids"] == [1, 2] and out[0]["vessel"] is None
+
+
+def test_confidence_is_clamped_to_known_values():
+    chunks = [_chunk(30, cid=1)]
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1], "vessel": None, "confidence": "certain"}], chunks, _CANDIDATES)
+    assert out[0]["confidence"] == "low"
+
+
+def test_callsign_candidates_are_marked_and_come_first(monkeypatch):
+    """An exact callsign lookup is evidence, not similarity, so the resolver is told so."""
+    monkeypatch.setattr(proxy, "_callsign_cache", {"PABC": _CANDIDATES["SERENADA"]})
+    monkeypatch.setattr(proxy, "_vessel_cache", {})
+    cands = proxy._resolver_candidates([_chunk(10, "callsign papa alpha bravo charlie", callsign="PABC")])
+    assert cands[0]["name"] == "SERENADA" and cands[0]["via_callsign"] is True
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Maas Approach, Callsign nine Hotel Alpha six one", True),
+    ("this is call sign PABC", True),
+    ("Zulu Charlie Foxtrot seven, over", True),          # three phonetics, no cue word
+    ("Gungor Star one three one five, correct.", False),  # produced VRSQ4 live: invented
+    ("Help Trader Maas Approach.", False),                # produced PE2026 live: invented
+    ("Maas Approach, Maas Approach, Wilson Durness.", False),
 ])
-def test_inherited_identities_are_marked_in_the_display(result, expected):
-    assert proxy.format_for_plugin(result) == expected
+def test_states_a_callsign(text, expected):
+    assert proxy._states_a_callsign(text) is expected
+
+
+def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
+    """Measured: the live pass emits callsigns for transmissions containing none, and they
+    can hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
+    monkeypatch.setattr(proxy, "_callsign_cache", {"VRSQ4": {"name": "COSCO SHIPPING STAR", "mmsi": "1"}})
+    monkeypatch.setattr(proxy, "_vessel_cache", {})
+    cands = proxy._resolver_candidates(
+        [_chunk(10, "Gungor Star one three one five, correct.", callsign="VRSQ4")])
+    assert cands == []
+
+
+def test_resolver_input_lists_transmissions_and_candidates():
+    text = proxy._render_resolver_input(
+        [_chunk(30, "Maas Approach, Serenada.", cid=1)],
+        [{"name": "SERENADA", "mmsi": "275545000", "via_callsign": True}])
+    assert "1. [" in text and "Maas Approach, Serenada." in text
+    assert "SERENADA" in text and "via callsign" in text
+
+
+def test_resolver_input_says_so_when_there_are_no_candidates():
+    text = proxy._render_resolver_input([_chunk(30, "hello", cid=1)], [])
+    assert "none" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Stored conversations and the page
+# ---------------------------------------------------------------------------
+
+def test_stored_turn_text_is_copied_verbatim_from_the_journal(monkeypatch):
+    """The whole point of resolving afterwards: transcriptions must be untouched."""
+    saved = []
+    monkeypatch.setattr(proxy, "_resolved", saved)
+    monkeypatch.setattr(proxy, "_save_conversations", lambda: None)
+    window = [_chunk(30, "Maas Approach, Selenada.", cid=1), _chunk(20, "Roger, over.", cid=2)]
+    original = [c["text"] for c in window]
+
+    proxy._store_resolved(window, [{"chunk_ids": [1, 2], "vessel": "SERENADA", "mmsi": "275545000",
+                                    "evidence": "later turn", "confidence": "high"}])
+
+    assert [t["text"] for t in saved[0]["turns"]] == original
+    assert [c["text"] for c in window] == original, "resolution must not mutate the journal"
+
+
+def test_page_renders_with_no_conversations():
+    assert "No conversations resolved yet" in proxy.render_conversations_page([])
+
+
+def test_page_shows_the_resolved_identity_and_a_disagreeing_live_guess():
+    html = proxy.render_conversations_page([{
+        "vessel": "SERENADA", "mmsi": "275545000", "confidence": "high", "via_callsign": True,
+        "evidence": "callsign PABC", "channel": "160,650",
+        "start": "2026-07-30 11:31:27", "end": "2026-07-30 11:31:57",
+        "turns": [{"time": "11:31:27", "text": "Maas Approach, Selenada.", "live_vessel": "AD"}],
+    }])
+    assert "SERENADA" in html and "via callsign" in html
+    assert "live: AD" in html, "a corrected live guess should stay visible"
+    assert "Maas Approach, Selenada." in html
+
+
+def test_page_escapes_html_in_transcriptions():
+    html = proxy.render_conversations_page([{
+        "vessel": None, "confidence": "low", "evidence": "", "channel": "160,650",
+        "start": "s", "end": "e",
+        "turns": [{"time": "11:00:00", "text": "<script>alert(1)</script>", "live_vessel": None}],
+    }])
+    assert "<script>" not in html and "&lt;script&gt;" in html
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ env/
 debug_chunk.wav
 ais_cache.json
 identified_vessels.html
+conversations.json
 
 # bench.py / stress.py output (generated locally, references.txt/captures are user data)
 bench-results*.json
