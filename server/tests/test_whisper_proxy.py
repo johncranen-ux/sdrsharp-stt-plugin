@@ -437,6 +437,80 @@ def test_transcribe_groq_waits_out_a_short_rate_limit(fake_groq, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Response header filtering
+#
+# WhisperClient.ReadToEndAsync reads until EOF and ignores Content-Length, so the socket
+# MUST close for the plugin to ever see a response. Groq sits behind Cloudflare and
+# returns "Connection: keep-alive"; forwarding it verbatim makes
+# BaseHTTPRequestHandler.send_header set close_connection = False, the socket stays open,
+# and every chunk dies on the plugin's 60s timeout with the body already delivered.
+# ---------------------------------------------------------------------------
+
+_GROQ_REAL_HEADERS = [
+    ("Date", "Thu, 30 Jul 2026 09:48:57 GMT"),
+    ("Content-Type", "application/json"),
+    ("Connection", "keep-alive"),
+    ("Cache-Control", "private, max-age=0, no-store"),
+    ("Server", "cloudflare"),
+    ("vary", "Origin"),
+    ("x-ratelimit-remaining-requests", "1935"),
+    ("x-request-id", "req_01kys6tnaxftma7vh1w5w4s4t8"),
+    ("set-cookie", "__cf_bm=WX_k4xin; HttpOnly; Secure; Domain=groq.com"),
+    ("CF-RAY", "a233735b9921b927-AMS"),
+    ("alt-svc", 'h3=":443"; ma=86400'),
+    ("Content-Length", "90"),
+]
+
+
+def _names(headers):
+    return {k.lower() for k, _ in headers}
+
+
+@pytest.mark.parametrize("dropped", ["connection", "keep-alive", "transfer-encoding"])
+def test_hop_by_hop_headers_are_never_forwarded(dropped):
+    """RFC 7230 hop-by-hop headers describe one connection and must not be relayed."""
+    src = _GROQ_REAL_HEADERS + [("Keep-Alive", "timeout=5"), ("Transfer-Encoding", "chunked")]
+    assert dropped not in _names(proxy._client_response_headers(src))
+
+
+def test_connection_keep_alive_is_stripped_from_a_real_groq_response():
+    assert "connection" not in _names(proxy._client_response_headers(_GROQ_REAL_HEADERS))
+
+
+@pytest.mark.parametrize("dropped", ["content-length", "content-encoding"])
+def test_framing_headers_are_dropped_because_the_body_is_rewritten(dropped):
+    src = _GROQ_REAL_HEADERS + [("Content-Encoding", "gzip")]
+    assert dropped not in _names(proxy._client_response_headers(src))
+
+
+@pytest.mark.parametrize("dropped", ["date", "server"])
+def test_upstream_date_and_server_are_dropped(dropped):
+    """send_response() emits its own; forwarding these produced duplicate headers."""
+    assert dropped not in _names(proxy._client_response_headers(_GROQ_REAL_HEADERS))
+
+
+@pytest.mark.parametrize("dropped", ["set-cookie", "alt-svc", "cf-ray", "cache-control", "vary"])
+def test_cdn_noise_is_not_relayed_to_the_plugin(dropped):
+    """A Cloudflare session cookie has no meaning to an SDR# plugin and should not leak."""
+    assert dropped not in _names(proxy._client_response_headers(_GROQ_REAL_HEADERS))
+
+
+@pytest.mark.parametrize("kept", ["content-type", "x-ratelimit-remaining-requests", "x-request-id"])
+def test_useful_headers_survive(kept):
+    assert kept in _names(proxy._client_response_headers(_GROQ_REAL_HEADERS))
+
+
+def test_header_values_are_preserved():
+    out = dict((k.lower(), v) for k, v in proxy._client_response_headers(_GROQ_REAL_HEADERS))
+    assert out["content-type"] == "application/json"
+    assert out["x-ratelimit-remaining-requests"] == "1935"
+
+
+def test_empty_upstream_headers_are_handled():
+    assert proxy._client_response_headers([]) == []
+
+
+# ---------------------------------------------------------------------------
 # Daily quota warnings
 # ---------------------------------------------------------------------------
 

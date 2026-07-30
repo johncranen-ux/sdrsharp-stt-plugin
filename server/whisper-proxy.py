@@ -1079,6 +1079,33 @@ def _transcribe_groq(file_info: dict, language: str, prompt: str) -> tuple[int, 
             print(f"[{ts}] groq HTTP {resp.status}, retrying ({attempt}/{max_attempts})...", flush=True)
 
 
+# Headers that must not be relayed from the upstream response to the plugin.
+#
+# The critical one is `connection`. Groq sits behind Cloudflare and answers
+# "Connection: keep-alive"; BaseHTTPRequestHandler.send_header() *special-cases* that
+# value and sets close_connection = False, so the proxy then never closes the socket.
+# WhisperClient.ReadToEndAsync() reads until EOF and ignores Content-Length, so the
+# plugin sits on a fully-delivered response until its own 60s cancel fires. whisper.cpp
+# never triggered this because cpp-httplib honours the client's "Connection: close".
+#
+# The rest are hop-by-hop headers (RFC 7230 6.1), framing headers invalidated by the
+# post-processing rewrite, headers send_response() emits itself (duplicated otherwise),
+# and CDN bookkeeping -- a Cloudflare session cookie means nothing to an SDR# plugin.
+_SKIP_RESPONSE_HEADERS = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade",
+    "content-length", "content-encoding",
+    "date", "server",
+    "set-cookie", "alt-svc", "cf-ray", "cf-cache-status", "cache-control",
+    "vary", "via", "strict-transport-security",
+})
+
+
+def _client_response_headers(upstream: list) -> list:
+    """Filter an upstream response's headers down to what the plugin should receive."""
+    return [(k, v) for k, v in upstream if k.lower() not in _SKIP_RESPONSE_HEADERS]
+
+
 def transcribe(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
     """Transcribe one audio chunk using whichever backend STT_BACKEND selects."""
     if STT_BACKEND == "groq":
@@ -1236,12 +1263,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             print(f"[{ts}] {STT_BACKEND} HTTP {status}: {preview}", flush=True)
 
         self.send_response(status)
-        for key, val in resp_headers:
-            # Length is recomputed because post-processing rewrites the body; the
-            # encoding/framing headers describe the upstream response, not this one.
-            if key.lower() not in ("transfer-encoding", "content-length", "content-encoding"):
-                self.send_header(key, val)
+        for key, val in _client_response_headers(resp_headers):
+            self.send_header(key, val)
         self.send_header("Content-Length", str(len(resp_body)))
+        # The plugin reads until EOF, so the socket has to close for it to see anything.
+        # Set explicitly rather than relying on the header filter above: this is the
+        # contract WhisperClient depends on, and it should not be one stray upstream
+        # header away from breaking again.
+        self.close_connection = True
         self.end_headers()
         self.wfile.write(resp_body)
 
