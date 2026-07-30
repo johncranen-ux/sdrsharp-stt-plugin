@@ -92,8 +92,8 @@ Listening is generally lawful; **recording or republishing the content of commun
 addressed to you often is not**, and the rules vary by country (NL: Telecommunicatiewet
 art. 18.13; ITU Radio Regulations 17.3).
 
-This repository contains no real received traffic — the sample transcripts are synthetic.
-Capture features are off by default.
+This repository contains no transcripts of received traffic at all. Capture features are
+off by default, and anything you record stays local — `references-*.txt` is gitignored.
 
 ## Licence
 

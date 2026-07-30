@@ -338,9 +338,33 @@ Restart the proxy. It now targets the local server and arms a watchdog that rest
    py server/make_references.py --captures "<captures>\<date>" --out server/references-local.txt
    ```
 
-3. Correct it while listening to each clip. The file explains its own conventions;
-   `server/references-sample.txt` shows the format. **Listen properly** — the pre-fill is
-   often confidently wrong, and accepting it makes the resulting scores flatter the model.
+3. Correct it while listening to each clip. **Listen properly** — the pre-fill is often
+   confidently wrong, and accepting it without checking makes the resulting scores flatter
+   the model rather than measure it.
+
+   The format is one clip per line, `<4-digit id><TAB><correct transcript>`:
+
+   ```
+   0000	Maas Approach, Maas Approach, this is Motorvessel Northern Harrier, over.
+   0001	Northern Harrier, Maas Approach, go ahead.
+   0002	Good morning sir, we are approaching the pilot station.
+   ```
+
+   Conventions, which `bench.py` understands:
+
+   | Situation | Write | Effect |
+   |---|---|---|
+   | Best guess, not certain | `Fjordstrom?` | Scored as a normal word; the `?` is a note to yourself and is ignored |
+   | A word or phrase is unintelligible | `this is [inaudible], calling` | That span is excluded from scoring rather than penalising the model |
+   | Nothing usable, or you want to skip the clip | leave empty after the TAB | Clip is excluded from all aggregates |
+
+   A partly finished file is perfectly usable — clips without a reference are simply not
+   scored, so you can stop whenever you have enough.
+
+   On CH01 the plugin records the AIS-enriched display string rather than the plain
+   transcript (`[CALLAO EXPRESS/tanker] (MMSI:218839000) Callao Express, Maas...`).
+   `make_references.py` strips that prefix for you; if you spot one that survived, delete
+   it — a reference nobody said corrupts the score it feeds.
 4. Score:
 
    ```bash

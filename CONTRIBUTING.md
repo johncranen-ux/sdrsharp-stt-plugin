@@ -117,6 +117,8 @@ unit tests. Both traps pass a clean build.
 
 ## Reference data
 
-Do not commit real received traffic. `references-*.txt` is gitignored apart from the
-synthetic `references-sample.txt`; see the [legal note](docs/user-manual.md#legal-note).
-Build your own set with `server/make_references.py`.
+Do not commit transcripts of received traffic, and note that `references-*.txt` is
+gitignored entirely — there is no tracked sample either. The file format is documented in
+the [user manual](docs/user-manual.md#measuring-accuracy-on-your-own-traffic); build your
+own set with `server/make_references.py`. See also the
+[legal note](docs/user-manual.md#legal-note).

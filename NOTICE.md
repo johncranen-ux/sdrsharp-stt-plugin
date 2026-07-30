@@ -50,6 +50,6 @@ This software transcribes radio transmissions you receive. Receiving is generall
 to you may not be**, and the rules differ by country (in the Netherlands see
 Telecommunicatiewet art. 18.13; internationally see ITU Radio Regulations 17.3).
 
-The repository therefore ships only synthetic sample transcripts. If you enable the capture
-features, the resulting audio and transcripts are yours to handle — check what your
-jurisdiction allows before sharing them.
+The repository therefore ships no transcripts at all. If you enable the capture features,
+the resulting audio and transcripts are yours to handle — check what your jurisdiction
+allows before sharing them.

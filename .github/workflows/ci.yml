@@ -64,12 +64,12 @@ jobs:
           fi
           echo "no credential-shaped literals found"
 
-      - name: Fail if real reference transcripts are committed
+      - name: Fail if any reference transcript is committed
         run: |
-          bad=$(git ls-files 'server/references*.txt' | grep -v 'references-sample.txt' || true)
+          bad=$(git ls-files 'server/references*.txt' || true)
           if [ -n "$bad" ]; then
-            echo "::error::Real reference transcripts committed: $bad"
-            echo "Only the synthetic references-sample.txt belongs in the repository."
+            echo "::error::Reference transcripts committed: $bad"
+            echo "No transcript file belongs in the repository. See docs/user-manual.md."
             exit 1
           fi
-          echo "only the synthetic sample is tracked"
+          echo "no transcript files tracked"
