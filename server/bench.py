@@ -71,6 +71,16 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "prompt": MARITIME_PROMPT,
         "carry_initial_prompt": "true",
     },
+    # Groq exposes no decoder controls, so this is beam5_prompt minus the knobs that
+    # have no equivalent there. Run it through the proxy (--port 9000 --path
+    # /v1/audio/transcriptions) with STT_BACKEND=groq; the proxy drops client-supplied
+    # decoder params either way, so what actually differs from beam5_prompt is the
+    # backend, not these fields.
+    "groq_prompt": {
+        "temperature": "0",
+        "prompt": MARITIME_PROMPT,
+        "carry_initial_prompt": "true",
+    },
     "vad": {
         "temperature": "0",
         "vad": "true",

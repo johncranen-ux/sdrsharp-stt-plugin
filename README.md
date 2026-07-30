@@ -48,8 +48,39 @@ one is surfaced immediately rather than stalling every chunk queued behind it.
 **Trade-off:** Groq accepts only `model`, `language`, `prompt`, `temperature` and
 `response_format`. The `beam_size=5` / `best_of=5` / `carry_initial_prompt` /
 `suppress_nst` tuning documented below applies to the local backend only and has no
-equivalent on Groq. The 35.9% pooled WER figure was measured on the local backend; Groq's
-accuracy on this audio has not yet been benchmarked (`server/bench.py` can do it).
+equivalent on Groq.
+
+### Groq vs whisper.cpp, measured 2026-07-30
+
+Same 61-clip / 49-reference set, same prompt, same script
+(`--matrix groq_prompt --port 9000 --path /v1/audio/transcriptions`):
+
+| Run | Pooled WER |
+|---|---|
+| whisper.cpp `beam5_prompt`, raw (`:8080`, no corrections) | 0.416 |
+| **Groq `whisper-large-v3` (`:9000`, corrections applied)** | **0.411** |
+| whisper.cpp `beam5_prompt` (`:9000`, corrections applied) | 0.359 |
+
+**Losing beam search costs essentially nothing.** Groq at 0.411 matches whisper.cpp's
+0.416 raw baseline, so whatever decoding Groq runs server-side is worth about as much as
+`beam_size=5`/`best_of=5` was.
+
+The remaining ~5-point gap to 0.359 is **not** a model-quality difference — it is the
+correction pass being backend-specific. `_apply_sttt_corrections` targets whisper.cpp's
+error patterns (`mass`, `mars`, `march`), but Groq misspells "Maas" differently: 27
+instances across 13 spellings (`Aas`, `AAS`, `Aps`, `A.M.A.S.S.`, `MAAAS`, `Ameas`,
+`Master`, `Moth`, `MOTR`, …), none of which the existing rules match. Applying
+Groq-shaped rules to the same outputs recovers most of it — ~0.369 — though that figure is
+in-sample (rules derived from the set they are scored on) and so optimistic, the same
+caveat that applies to the original correction work.
+
+Latency is comparable or slightly better: median 2.83 s end-to-end including network,
+p95 6.20 s, against a 3.55 s mean local decode. That is where the LPU shows up — in speed,
+not accuracy; the weights and therefore the achievable quality are the same.
+
+**Open follow-up:** extend `_apply_sttt_corrections` with Groq's "Maas" variants, ideally
+validated against the un-referenced 2026-07-28 captures rather than the set the rules came
+from.
 
 ## Current configuration (chosen on real data, 2026-07-27)
 
