@@ -1,5 +1,6 @@
 """
-Whisper STT proxy — listens on :9000, forwards to whisper.cpp server on :8080 (WSL2),
+Whisper STT proxy — listens on :9000, transcribes audio via the selected STT backend
+(Groq's hosted Whisper API, or a local whisper.cpp server on :8080 in WSL2),
 post-processes maritime transcriptions with Claude to extract vessel names and callsigns,
 fuzzy-matches against a live AIS feed (aisstream.io) for Rotterdam / Maas Approach,
 and returns enriched text to the SDRSharp plugin.
@@ -10,10 +11,18 @@ Usage:
 Required env vars:
     ANTHROPIC_API_KEY   — Claude API key (for maritime vessel extraction)
     AISSTREAM_API_KEY   — aisstream.io API key (free at aisstream.io)
+    GROQ_API_KEY        — Groq API key (only when STT_BACKEND=groq, the default)
 
 Optional env vars:
-    WHISPER_BACKEND_PORT  — override backend port (default: 8080)
+    STT_BACKEND           — "groq" (default) or "whisper_cpp"
+    GROQ_MODEL            — Groq model id (default: whisper-large-v3)
+    GROQ_TIMEOUT_S        — Groq HTTP timeout (default: 30, plugin cancels at 60)
+    WHISPER_BACKEND_PORT  — override local backend port (default: 8080)
     PROXY_PORT            — override proxy listen port (default: 9000)
+
+Switching backends is deliberately a config change, not a code change: set
+STT_BACKEND=whisper_cpp in start-all.bat and restart the proxy to fall back to
+the local GPU. Both paths are fully maintained.
 """
 
 import http.server
@@ -45,6 +54,28 @@ import anthropic
 PROXY_PORT   = int(os.environ.get("PROXY_PORT", "9000"))
 BACKEND_HOST = "localhost"
 BACKEND_PORT = int(os.environ.get("WHISPER_BACKEND_PORT", "8080"))
+
+# Which STT backend transcribes audio. "groq" (default) calls Groq's hosted Whisper
+# API; "whisper_cpp" calls the local whisper.cpp server in WSL2. The local GPU (RX
+# 7900 XTX) has a hardware fault that hangs the ROCm driver mid-inference and costs
+# one chunk of radio audio per event -- see docs/rocm-upgrade-runbook.md -- so the
+# cloud is the default. The local path is kept fully working as the fallback.
+STT_BACKEND = os.environ.get("STT_BACKEND", "groq").strip().lower()
+
+GROQ_HOST      = "api.groq.com"
+GROQ_PATH      = "/openai/v1/audio/transcriptions"
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL     = os.environ.get("GROQ_MODEL", "whisper-large-v3").strip()
+GROQ_TIMEOUT_S = float(os.environ.get("GROQ_TIMEOUT_S", "30"))
+
+# Groq documents a 224-token cap on `prompt`. Tokens aren't countable here without
+# pulling in a tokenizer, so cap on words with enough slack that even a worst-case
+# ~1.5 tokens/word prompt stays inside the limit.
+GROQ_PROMPT_MAX_WORDS = int(os.environ.get("GROQ_PROMPT_MAX_WORDS", "140"))
+
+# How long a 429 may ask us to wait before we give up and let the chunk fail. The
+# plugin's send loop is serial, so sleeping here stalls every chunk behind this one.
+GROQ_MAX_RETRY_WAIT_S = float(os.environ.get("GROQ_MAX_RETRY_WAIT_S", "5"))
 
 # Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
 ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
@@ -628,6 +659,43 @@ def _build_whisper_params(client_language: str, client_prompt: str) -> dict:
     }
 
 
+def _truncate_prompt(text: str, max_words: int = None) -> str:
+    """Trim a prompt to Groq's documented length cap.
+
+    Over-long prompts are a hard 400 from the API, which would cost a real chunk of
+    radio audio. Trimming is the lesser evil -- the prompt is a decoding hint, not
+    content, so losing its tail degrades nothing that matters.
+    """
+    limit = GROQ_PROMPT_MAX_WORDS if max_words is None else max_words
+    words = text.split()
+    if len(words) <= limit:
+        return text
+    return " ".join(words[:limit])
+
+
+def _build_groq_fields(client_language: str, client_prompt: str) -> dict:
+    """Form fields for Groq's OpenAI-compatible transcription endpoint.
+
+    Deliberately narrower than _build_whisper_params: Groq accepts only model,
+    language, prompt, temperature and response_format. The decoder tuning the local
+    backend uses (beam_size=5, best_of=5, carry_initial_prompt, suppress_nst) has no
+    equivalent here and is simply not available -- Groq serves the same
+    whisper-large-v3 weights, but its decoding settings are not exposed.
+
+    Shares the WHISPER_* env knobs with the local path on purpose, so one setting
+    means one thing regardless of which backend is active.
+    """
+    return {
+        "model": GROQ_MODEL,
+        "temperature": os.environ.get("WHISPER_TEMPERATURE", "0"),
+        "response_format": "json",
+        "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
+        "prompt": _truncate_prompt(
+            client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT)
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Multipart parse / rebuild
 #
@@ -793,15 +861,145 @@ def _watchdog_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Transcription backends
+#
+# One seam, two implementations, selected by STT_BACKEND. Both return
+# (status, body, headers) where body is the raw JSON bytes of an OpenAI-style
+# {"text": ...} envelope. Everything downstream of here -- the hallucination
+# filter, STT corrections, Claude vessel extraction, AIS enrichment -- reads only
+# that envelope, so it is backend-agnostic and untouched by the choice made here.
+#
+# Errors are normalised to (503, {"error": ...}) to match what the plugin already
+# renders into its transcript pane; it needs no change to work with either backend.
+# ---------------------------------------------------------------------------
+
+
+def _error_response(message: str) -> tuple[int, bytes, list]:
+    return 503, json.dumps({"error": message}).encode("utf-8"), []
+
+
+def _transcribe_whisper_cpp(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+    """Transcribe via the local whisper.cpp server in WSL2."""
+    params = _build_whisper_params(client_language=language, client_prompt=prompt)
+    boundary, body = _build_multipart(params, file_info)
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+
+    # whisper.cpp's server has been observed to non-deterministically return HTTP 500
+    # "failed to process audio" for the exact same request/audio that succeeds moments
+    # later when VAD + beam search are both enabled — a flakiness bug in the backend,
+    # not something fixable here. Since the same request often succeeds on retry, one
+    # immediate retry is a cheap mitigation.
+    #
+    # It can also hang outright (see the watchdog above) rather than error, so every
+    # attempt is tracked in _inflight_requests for the watchdog thread to see; killing
+    # the backend mid-hang drops this socket and turns the exception below into a fast
+    # 503 instead of a multi-minute wait.
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        req_id = _inflight_begin()
+        try:
+            conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=90)
+            conn.request("POST", "/inference", body=body, headers=headers)
+            resp         = conn.getresponse()
+            resp_body    = resp.read()
+            resp_headers = resp.getheaders()
+            conn.close()
+        except Exception as exc:
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] backend error (attempt {attempt}/{max_attempts}): {exc}", flush=True)
+            return _error_response(str(exc))
+        finally:
+            _inflight_end(req_id)
+
+        if resp.status < 500 or attempt == max_attempts:
+            return resp.status, resp_body, resp_headers
+
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] backend HTTP {resp.status}, retrying ({attempt}/{max_attempts})...", flush=True)
+
+
+def _parse_retry_after(value: str) -> float | None:
+    """Seconds from a Retry-After header, or None if absent/not a plain number.
+
+    Groq sends a decimal seconds value. The HTTP-date form is legal but unused here,
+    and treating an unparseable value as "don't wait" is the safe default.
+    """
+    try:
+        return float(value.strip())
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _transcribe_groq(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+    """Transcribe via Groq's hosted Whisper API."""
+    if not GROQ_API_KEY:
+        return _error_response("GROQ_API_KEY not set (needed when STT_BACKEND=groq)")
+
+    fields = _build_groq_fields(client_language=language, client_prompt=prompt)
+    boundary, body = _build_multipart(fields, file_info)
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            conn = http.client.HTTPSConnection(GROQ_HOST, timeout=GROQ_TIMEOUT_S)
+            conn.request("POST", GROQ_PATH, body=body, headers=headers)
+            resp         = conn.getresponse()
+            resp_body    = resp.read()
+            resp_headers = resp.getheaders()
+            retry_after  = resp.getheader("Retry-After", "")
+            conn.close()
+        except Exception as exc:
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] groq error (attempt {attempt}/{max_attempts}): {exc}", flush=True)
+            return _error_response(str(exc))
+
+        if resp.status < 500 and resp.status != 429:
+            return resp.status, resp_body, resp_headers
+        if attempt == max_attempts:
+            return resp.status, resp_body, resp_headers
+
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if resp.status == 429:
+            # Only worth waiting out a rate limit if it clears quickly. The plugin sends
+            # chunks one at a time, so sleeping here stalls everything queued behind this
+            # one; past a few seconds it's better to drop this chunk and let the next
+            # start clean than to build a backlog the send queue will discard anyway.
+            delay = _parse_retry_after(retry_after)
+            if delay is None or delay > GROQ_MAX_RETRY_WAIT_S:
+                print(f"[{ts}] groq rate limited (retry-after={retry_after or 'n/a'}), giving up on this chunk", flush=True)
+                return resp.status, resp_body, resp_headers
+            print(f"[{ts}] groq rate limited, waiting {delay:.1f}s then retrying...", flush=True)
+            time.sleep(delay)
+        else:
+            print(f"[{ts}] groq HTTP {resp.status}, retrying ({attempt}/{max_attempts})...", flush=True)
+
+
+def transcribe(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+    """Transcribe one audio chunk using whichever backend STT_BACKEND selects."""
+    if STT_BACKEND == "groq":
+        return _transcribe_groq(file_info, language, prompt)
+    return _transcribe_whisper_cpp(file_info, language, prompt)
+
+
+# ---------------------------------------------------------------------------
 # HTTP proxy
 # ---------------------------------------------------------------------------
 
 # The SDRSharp plugin sends to /v1/audio/transcriptions (OpenAI-compatible path).
-# whisper.cpp server uses /inference. This map translates the path.
-PATH_MAP = {
-    "/v1/audio/transcriptions": "/inference",
-    "/v1/audio/transcriptions/": "/inference",
-}
+# Each backend knows its own upstream path, so this is now just the set of paths the
+# plugin is allowed to POST to.
+PATH_MAP = frozenset({
+    "/v1/audio/transcriptions",
+    "/v1/audio/transcriptions/",
+})
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -838,87 +1036,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _send_json(self, status: int, payload: dict) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length)
-
-        # Translate OpenAI-style path to whisper.cpp path
-        backend_path = PATH_MAP.get(self.path, self.path)
-
-        forward_headers = {
-            k: v for k, v in self.headers.items()
-            if k.lower() not in ("host", "content-length", "content-type")
-        }
-        content_type = self.headers.get("Content-Type", "")
-
-        # Rewrite the multipart body: drop the client's decoder params, keep only the
-        # audio file (plus optional language/prompt overrides), inject the server-owned
-        # WHISPER_PARAMS. Falls back to forwarding the original body unchanged if the
-        # request isn't parseable multipart, so a malformed request still gets a response
-        # instead of silently vanishing.
-        if backend_path == "/inference":
-            try:
-                client_fields, file_info = _parse_multipart(content_type, body)
-                if file_info is None:
-                    raise ValueError("no file part in request")
-                params = _build_whisper_params(
-                    client_language=client_fields.get("language", ""),
-                    client_prompt=client_fields.get("prompt", ""),
-                )
-                boundary, body = _build_multipart(params, file_info)
-                content_type = f"multipart/form-data; boundary={boundary}"
-            except Exception as exc:
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                print(f"[{ts}] multipart rewrite failed, forwarding original body: {exc}", flush=True)
-
-        forward_headers["Content-Type"] = content_type
-        forward_headers["Content-Length"] = str(len(body))
-
-        # Forward to whisper.cpp backend. whisper.cpp's server has been observed to
-        # non-deterministically return HTTP 500 "failed to process audio" for the exact
-        # same request/audio that succeeds moments later when VAD + beam search are both
-        # enabled — a flakiness bug in the backend, not something fixable here. Since the
-        # same request often succeeds on retry, one immediate retry is a cheap mitigation.
-        #
-        # It can also hang outright (see the watchdog above) rather than error, so every
-        # attempt is tracked in _inflight_requests for the watchdog thread to see; killing
-        # the backend mid-hang drops this socket and turns the exception below into a fast
-        # 503 instead of a multi-minute wait.
-        max_attempts = 2 if backend_path == "/inference" else 1
-        resp = resp_body = None
-        for attempt in range(1, max_attempts + 1):
-            req_id = _inflight_begin() if backend_path == "/inference" else None
-            try:
-                conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=90)
-                conn.request("POST", backend_path, body=body, headers=forward_headers)
-                resp      = conn.getresponse()
-                resp_body = resp.read()
-                conn.close()
-            except Exception as exc:
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                print(f"[{ts}] backend error (attempt {attempt}/{max_attempts}): {exc}", flush=True)
-                error_msg = json.dumps({"error": str(exc)}).encode("utf-8")
-                self.send_response(503)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(error_msg)))
-                self.end_headers()
-                self.wfile.write(error_msg)
-                return
-            finally:
-                if req_id is not None:
-                    _inflight_end(req_id)
-
-            if resp.status < 500 or attempt == max_attempts:
-                break
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            print(f"[{ts}] backend HTTP {resp.status}, retrying ({attempt}/{max_attempts})...", flush=True)
 
         ts      = datetime.datetime.now().strftime("%H:%M:%S")
         channel = self.headers.get("X-Whisper-Channel", "").strip()
         mode    = self.headers.get("X-Whisper-Mode", "maritime").lower()
 
+        # Transcription is the only thing this proxy accepts a POST for.
+        if self.path not in PATH_MAP:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        # Keep only the audio file and the client's optional language/prompt overrides.
+        # Every other decoder param is server-owned (see _build_whisper_params) so tuning
+        # is a proxy restart rather than a plugin rebuild + SDR# restart.
+        try:
+            client_fields, file_info = _parse_multipart(self.headers.get("Content-Type", ""), body)
+            if file_info is None:
+                raise ValueError("no file part in request")
+        except Exception as exc:
+            print(f"[{ts}] malformed request body: {exc}", flush=True)
+            self._send_json(400, {"error": f"malformed multipart request: {exc}"})
+            return
+
+        status, resp_body, resp_headers = transcribe(
+            file_info,
+            language=client_fields.get("language", ""),
+            prompt=client_fields.get("prompt", ""),
+        )
+
         # Post-process successful transcriptions
-        if resp.status == 200 and backend_path == "/inference":
+        if status == 200:
             try:
                 data     = json.loads(resp_body)
                 raw_text = data.get("text", "").strip()
@@ -975,17 +1134,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             except Exception as exc:
                 print(f"[{ts}] post-process error: {exc}", flush=True)
-
-        elif resp.status == 200:
-            # Pass through non-transcription responses unchanged
-            pass
         else:
             preview = resp_body[:120].decode("utf-8", errors="replace")
-            print(f"[{ts}] backend HTTP {resp.status}: {preview}", flush=True)
+            print(f"[{ts}] {STT_BACKEND} HTTP {status}: {preview}", flush=True)
 
-        self.send_response(resp.status)
-        for key, val in resp.getheaders():
-            if key.lower() not in ("transfer-encoding", "content-length"):
+        self.send_response(status)
+        for key, val in resp_headers:
+            # Length is recomputed because post-processing rewrites the body; the
+            # encoding/framing headers describe the upstream response, not this one.
+            if key.lower() not in ("transfer-encoding", "content-length", "content-encoding"):
                 self.send_header(key, val)
         self.send_header("Content-Length", str(len(resp_body)))
         self.end_headers()
@@ -996,10 +1153,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if STT_BACKEND not in ("groq", "whisper_cpp"):
+        raise SystemExit(
+            f"STT_BACKEND={STT_BACKEND!r} is not valid — use 'groq' or 'whisper_cpp'."
+        )
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("WARNING: ANTHROPIC_API_KEY not set — maritime vessel extraction disabled.")
     else:
         print("Anthropic API key: OK")
+
+    if STT_BACKEND == "groq" and not GROQ_API_KEY:
+        print("WARNING: GROQ_API_KEY not set — transcription will fail on every chunk.")
 
     _init_vessels_log()
     _load_cache()
@@ -1013,13 +1178,23 @@ if __name__ == "__main__":
     else:
         print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
 
-    threading.Thread(target=_watchdog_loop, daemon=True).start()
-    print(f"Backend watchdog: enabled (stuck threshold {STUCK_THRESHOLD_S:.0f}s)", flush=True)
+    # The watchdog exists solely to kill and restart the local whisper-server when the
+    # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed
+    # watchdog would shell into WSL to "restart" it on any slow API call.
+    if STT_BACKEND == "whisper_cpp":
+        threading.Thread(target=_watchdog_loop, daemon=True).start()
+        print(f"Backend watchdog: enabled (stuck threshold {STUCK_THRESHOLD_S:.0f}s)", flush=True)
+    else:
+        print("Backend watchdog: disabled (not applicable to the groq backend)", flush=True)
 
     # Threaded: a single slow/failing external call (Claude API, backend decode) must not
     # block every other in-flight transcription request. Shared state (_vessel_buffer,
     # _vessel_cache, the vessels log file) is already lock-protected for the AIS/periodic-
     # save background threads, which already run concurrently with request handling.
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
-    print(f"Whisper proxy  :  localhost:{PROXY_PORT}  ->  backend localhost:{BACKEND_PORT}", flush=True)
+    if STT_BACKEND == "groq":
+        destination = f"groq {GROQ_HOST} ({GROQ_MODEL})"
+    else:
+        destination = f"whisper.cpp localhost:{BACKEND_PORT}"
+    print(f"Whisper proxy  :  localhost:{PROXY_PORT}  ->  {destination}", flush=True)
     server.serve_forever()

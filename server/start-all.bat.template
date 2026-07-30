@@ -10,10 +10,20 @@ setlocal
 :: -- API Keys (edit these) -----------------------------------
 set ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
 set AISSTREAM_API_KEY=YOUR_AISSTREAM_KEY_HERE
+set GROQ_API_KEY=gsk_YOUR_GROQ_KEY_HERE
+
+:: -- STT backend ---------------------------------------------
+:: groq        = Groq's hosted Whisper API (default). No GPU involved.
+:: whisper_cpp = local whisper.cpp server on the RX 7900 XTX in WSL2.
+::
+:: ROLLBACK: change this one line to whisper_cpp and restart to go back to the
+:: local GPU. Nothing else needs changing; both paths are fully maintained.
+set STT_BACKEND=groq
+set GROQ_MODEL=whisper-large-v3
 
 :: -- Ports (defaults match whisper proxy settings) -----------
 :: Whisper-server listens on 8080 inside WSL (accessible as localhost:8080 from Windows)
-:: Proxy listens on 9000 and forwards to 8080
+:: Proxy listens on 9000; under STT_BACKEND=whisper_cpp it forwards to 8080
 set WHISPER_BACKEND_PORT=8080
 set PROXY_PORT=9000
 
@@ -22,21 +32,24 @@ set PROXY_PORT=9000
 set PROXY_SCRIPT=d:\Claudecode\projects\SDRSharp-Plugin\server\whisper-proxy.py
 
 :: -- Start whisper-server in WSL2 Ubuntu-22.04 ---------------
-echo [1/2] Starting whisper-server in WSL2 Ubuntu-22.04 (large-v3-turbo, port 8080)...
+:: Only needed for the local backend — under groq there is nothing to start.
+if /i not "%STT_BACKEND%"=="whisper_cpp" goto :start_proxy
+
+echo [1/2] Starting whisper-server in WSL2 Ubuntu-22.04 (large-v3, port 8080)...
 start "Whisper Server (WSL)" cmd /k wsl -d Ubuntu-22.04 -- bash -l -c "~/start-whisper-server.sh"
 
-:: -- Wait for whisper-server to be ready ---------------------
 echo     Waiting 20 seconds for model to load into GPU VRAM...
 timeout /t 20 /nobreak >nul
 
+:start_proxy
 :: -- Start the Python proxy ----------------------------------
-echo [2/2] Starting Whisper proxy (port 9000)...
+echo [2/2] Starting Whisper proxy (port 9000, backend=%STT_BACKEND%)...
 start "Whisper Proxy" cmd /k py "%PROXY_SCRIPT%"
 
 echo.
-echo Both services started.
-echo   Whisper server : localhost:8080  (inside WSL2 Ubuntu-22.04)
-echo   Proxy          : localhost:9000  (Windows, forwards to :8080)
+echo Started.
+echo   STT backend    : %STT_BACKEND%
+echo   Proxy          : localhost:9000  (Windows)
 echo.
 echo SDRSharp plugin should connect to: http://localhost:9000
 echo.

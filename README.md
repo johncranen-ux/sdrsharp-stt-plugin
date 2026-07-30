@@ -1,24 +1,48 @@
 # SDR# Speech-to-Text Plugin
 
 Transcribes VHF radio traffic (Rotterdam maritime, later aviation) received in SDR#, using
-a local whisper.cpp server on an AMD GPU via ROCm. See `CLAUDE.md` for the full project
-brief and business requirements.
+either Groq's hosted Whisper API or a local whisper.cpp server on an AMD GPU via ROCm.
+See `CLAUDE.md` for the full project brief and business requirements.
 
 ## Architecture
 
-Three tiers:
-
-1. **whisper.cpp server** (WSL2 Ubuntu-22.04, port 8080) — `~/whisper.cpp/build-rocm/bin/whisper-server`,
-   GPU-accelerated via ROCm. Start with `~/start-whisper-server.sh` or `server/start-all.bat`.
-2. **Python proxy** (`server/whisper-proxy.py`, port 9000 → 8080) — owns all whisper.cpp
-   decoder parameters (see below), rewrites the plugin's request to inject them, applies
-   hallucination filtering and maritime-term corrections, and (on channel 160.650 / Maas
-   Approach) extracts vessel names via Claude and enriches them against a live AIS feed.
+1. **STT backend** — one of two, selected by `STT_BACKEND` (see below).
+2. **Python proxy** (`server/whisper-proxy.py`, port 9000) — owns all decoder parameters
+   (see below), rewrites the plugin's request to inject them, applies hallucination
+   filtering and maritime-term corrections, and (on channel 160.650 / Maas Approach)
+   extracts vessel names via Claude and enriches them against a live AIS feed.
 3. **C# SDR# plugin** (`SDRSharp.SttPlugin/`) — captures post-filter audio, runs VAD
    (pre-roll buffer, squelch-aware, adaptive noise floor), applies an anti-aliased
    resample + DC-block + highpass + normalize chain, and sends chunks to the proxy.
 
+The plugin only ever talks to the proxy on `http://localhost:9000`, so switching backends
+never requires a plugin rebuild or an SDR# restart.
+
+## STT backends
+
+| `STT_BACKEND` | What it uses | Notes |
+|---|---|---|
+| `groq` *(default)* | Groq hosted `whisper-large-v3` over HTTPS | No GPU involved. Same model weights as the local backend, but Groq's OpenAI-compatible endpoint exposes no decoder tuning. |
+| `whisper_cpp` | Local `whisper-server` on port 8080 in WSL2 Ubuntu-22.04, ROCm-accelerated | Full decoder control (beam search, VAD, prompt carry). Subject to the GPU driver hang described under "Known limitations"; the watchdog arms automatically for this backend only. |
+
+**Rollback:** set `STT_BACKEND=whisper_cpp` in `server/start-all.bat` and restart the proxy.
+That is the entire procedure — both code paths are maintained and covered by tests.
+
+Groq requires `GROQ_API_KEY`. Its free tier allows 20 req/min, 2,000 req/day, and 7,200
+audio-seconds/hour; measured busy-channel traffic is ~105 requests and ~507 audio-seconds
+per hour, so requests/day is the only limit with any realistic chance of binding.
+
+**Trade-off:** Groq accepts only `model`, `language`, `prompt`, `temperature` and
+`response_format`. The `beam_size=5` / `best_of=5` / `carry_initial_prompt` /
+`suppress_nst` tuning documented below applies to the local backend only and has no
+equivalent on Groq. The 35.9% pooled WER figure was measured on the local backend; Groq's
+accuracy on this audio has not yet been benchmarked (`server/bench.py` can do it).
+
 ## Current configuration (chosen on real data, 2026-07-27)
+
+Decoder rows below are `STT_BACKEND=whisper_cpp` settings. The prompt and the nautical-term
+correction pass apply to both backends; the model, beam-search, VAD and token-suppression
+rows have no equivalent on Groq.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -57,7 +81,9 @@ Full per-clip results: `server/bench-report.html` (turbo, full config matrix) an
   later phase per `CLAUDE.md`'s "Additional Features" section (vessel-name AIS matching is
   already built and working, see below).
 - **whisper.cpp/ROCm has a real, unresolved GPU driver hang** on this hardware
-  (RX 7900 XTX / gfx1100 / ROCm 6.1.3 under WSL2): a per-request-random race that can
+  (RX 7900 XTX / gfx1100 / ROCm 6.1.3 under WSL2) — this is why `groq` is now the default
+  backend; everything in this bullet applies only under `STT_BACKEND=whisper_cpp`.
+  It is a per-request-random race that can
   strike any GPU kernel launch regardless of decode settings, audio content, or timing —
   matches the long-standing, still-open [ROCm/ROCm#2689](https://github.com/ROCm/ROCm/issues/2689)
   (confirmed to affect this exact GPU on bare-metal Linux too, not a whisper.cpp or
