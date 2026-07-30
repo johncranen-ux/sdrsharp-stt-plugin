@@ -105,14 +105,11 @@ AIS_SAVE_INTERVAL   = 300
 # tightening reduced but never stopped it.
 #
 # Identity is now resolved *after* a conversation ends, by a separate pass whose output schema
-# has no text field at all -- see resolve_conversation(). These constants survive because the
-# retrospective windowing reuses them.
-SESSION_GAP_S       = int(os.environ.get("SESSION_GAP_S", "120"))
-SESSION_MAX_TURNS   = int(os.environ.get("SESSION_MAX_TURNS", "6"))
+# has no text field at all -- see resolve_conversation().
 
-# The identification buffer doubles as the session history, so it has to retain turns for at
-# least one session gap.
-VESSEL_BUFFER_TTL   = max(60, SESSION_GAP_S)
+# How long a recent identification stays available for the "Maas response" correlation in
+# do_POST, which upgrades a fuzzy vessel match when a later turn names the vessel clearly.
+VESSEL_BUFFER_TTL   = int(os.environ.get("VESSEL_BUFFER_TTL_S", "120"))
 
 # ---------------------------------------------------------------------------
 # Recent vessel identifications buffer
@@ -149,43 +146,6 @@ def _add_to_buffer(result: dict, raw_text: str, channel: str = "",
         cutoff = now - datetime.timedelta(seconds=VESSEL_BUFFER_TTL)
         _vessel_buffer[:] = [e for e in _vessel_buffer if e["time"] > cutoff]
 
-
-def _session_turns(channel: str = "", now: datetime.datetime | None = None) -> list[dict]:
-    """Turns belonging to the conversation still in progress, oldest first.
-
-    Walks backwards from the most recent turn and stops at the first gap wider than
-    SESSION_GAP_S, so an exchange is bounded by silence rather than by a fixed window --
-    a long conversation stays whole, and an unrelated call after a quiet spell starts fresh.
-    """
-    now = now or datetime.datetime.now()
-    with _buffer_lock:
-        entries = [e for e in _vessel_buffer if not channel or e.get("channel", "") == channel]
-
-    turns: list[dict] = []
-    later = now
-    for entry in reversed(entries):
-        if (later - entry["time"]).total_seconds() > SESSION_GAP_S:
-            break
-        turns.append(entry)
-        later = entry["time"]
-        if len(turns) >= SESSION_MAX_TURNS:
-            break
-    return list(reversed(turns))
-
-
-def _session_vessel(turns: list[dict]) -> str | None:
-    """The vessel this conversation is with, if the turns agree on one.
-
-    Every turn counts, including shore-station ones: when Maas Approach speaks it addresses
-    the vessel by name ("Serenada, Maas Approach"), so that turn identifies the counterpart
-    just as well as the vessel's own call does. Note also that _is_maas_response flags any
-    transmission merely *containing* "maas approach", which includes a vessel calling in --
-    so the shore flag is too blunt to filter identity on.
-
-    If two different vessels appear the session is ambiguous and nothing is carried over.
-    """
-    names = {t["vessel"] for t in turns if t.get("vessel")}
-    return names.pop() if len(names) == 1 else None
 
 
 # ---------------------------------------------------------------------------

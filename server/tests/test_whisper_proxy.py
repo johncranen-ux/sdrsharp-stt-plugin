@@ -250,41 +250,6 @@ def buffer(monkeypatch):
     return entries
 
 
-def test_session_includes_turns_within_the_gap(buffer):
-    buffer.extend([_turn(20, "WILSON DURNESS"), _turn(10, None, shore=True), _turn(2)])
-    assert len(proxy._session_turns("160,650")) == 3
-
-
-def test_session_stops_at_a_silence_longer_than_the_gap(buffer):
-    buffer.extend([_turn(400, "OLD VESSEL"), _turn(20, "WILSON DURNESS"), _turn(2)])
-    turns = proxy._session_turns("160,650")
-    assert [t["vessel"] for t in turns] == ["WILSON DURNESS", None]
-
-
-def test_session_is_scoped_to_one_channel(buffer):
-    buffer.extend([_turn(10, "OTHER", channel="161,650"), _turn(2, "WILSON DURNESS")])
-    assert [t["vessel"] for t in proxy._session_turns("160,650")] == ["WILSON DURNESS"]
-
-
-def test_session_vessel_counts_shore_turns_too():
-    """When shore speaks it addresses the vessel by name, so that turn identifies the
-    counterpart. Also, _is_maas_response flags a vessel *calling* Maas Approach as shore,
-    so filtering identity on that flag would discard the clearest identification there is."""
-    turns = [_turn(20, "WILSON DURNESS", "Maas Approach, Wilson Durness", shore=True),
-             _turn(10, "WILSON DURNESS", "Wilson Durness, Maas Approach", shore=True)]
-    assert proxy._session_vessel(turns) == "WILSON DURNESS"
-
-
-def test_session_vessel_is_none_when_no_turn_identified_anyone():
-    assert proxy._session_vessel([_turn(20), _turn(10, shore=True)]) is None
-
-
-def test_session_vessel_is_none_when_two_vessels_disagree():
-    turns = [_turn(20, "WILSON DURNESS"), _turn(10, "MSC PANTERA")]
-    assert proxy._session_vessel(turns) is None
-
-
-
 # ---------------------------------------------------------------------------
 # Conversation windowing
 # ---------------------------------------------------------------------------

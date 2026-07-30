@@ -33,7 +33,17 @@ ais_cache.json
 identified_vessels.html
 conversations.json
 
-# bench.py / stress.py output (generated locally, references.txt/captures are user data)
+# Reference transcripts built from your own recordings.
+#
+# Only references-sample.txt is tracked, and it is synthetic. Real transcripts are the
+# content of radio communications not addressed to you; recording and republishing them is
+# restricted in many countries (NL: Telecommunicatiewet art. 18.13, ITU RR 17.3), so they
+# must not end up in the repository. Build your own with make_references.py.
+references.txt
+references-*.txt
+!references-sample.txt
+
+# bench.py / stress.py output (generated locally; captures are user data)
 bench-results*.json
 bench-report*.html
 stress-*.json

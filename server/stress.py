@@ -14,8 +14,9 @@ matters is that we send the same fields the plugin does — see WhisperClient.Bu
 Close SDR# before running: it shares the GPU, so leaving it open changes the load between
 runs and makes before/after comparisons meaningless.
 
-Usage:
-    py stress.py --captures "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-07-28"
+Usage (point --captures at a directory of *_sent.wav clips recorded by the plugin's
+"Capture chunks" option; see docs/user-manual.md):
+    py stress.py --captures "<SDRSharp>/Plugins/SttPlugin/captures/<date>"
     py stress.py --captures ... --passes 2 --label baseline-rocm-6.1.3
 """
 

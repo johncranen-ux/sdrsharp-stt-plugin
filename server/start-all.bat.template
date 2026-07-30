@@ -40,8 +40,10 @@ set WHISPER_BACKEND_PORT=8080
 set PROXY_PORT=9000
 
 :: -- Paths ---------------------------------------------------
-:: Use an absolute path so this bat file works from any location (Desktop shortcut etc.)
-set PROXY_SCRIPT=d:\Claudecode\projects\SDRSharp-Plugin\server\whisper-proxy.py
+:: %~dp0 is this script's own directory, so the proxy is found wherever you cloned the
+:: repository and the file still works from a Desktop shortcut.
+set SCRIPT_DIR=%~dp0
+set PROXY_SCRIPT=%SCRIPT_DIR%whisper-proxy.py
 
 :: -- Start whisper-server in WSL2 Ubuntu-22.04 ---------------
 :: Only needed for the local backend — under groq there is nothing to start.
