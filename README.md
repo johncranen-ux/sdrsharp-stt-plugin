@@ -141,6 +141,79 @@ All of the above are env-overridable in `whisper-proxy.py` (`WHISPER_BEAM_SIZE`,
 Full per-clip results: `server/bench-report.html` (turbo, full config matrix) and
 `server/bench-report-large-v3.html` (large-v3, winning config).
 
+## Vessel identification on CH01 (2026-07-30)
+
+A single exchange between Maas Approach and *Wilson Durness* was reported showing three
+different vessels — `[NEPTUNE]`, `[GOOD WAY]`, `[Mettank]` — each with a real MMSI attached.
+Investigation found three independent causes, all now addressed, each behind its own switch:
+
+| Env var | Default | Turns off |
+|---|---|---|
+| `AIS_HINT_FILTER` | `on` | Hint tightening (restores the original matching exactly) |
+| `PROMPT_ECHO_FILTER` | `on` | Prompt-echo suppression |
+| `SESSION_CONTEXT` | **`off`** | (set `on` to enable — measured net-negative, see below) |
+
+**1. AIS hints were manufacturing vessels.** `_find_ais_hints` probed every word and
+word-pair against 7,313 AIS names with `WRatio` at `score_cutoff=65`. `WRatio` falls back to
+*partial* matching when lengths differ, so a short ordinary word scores ~90 against any long
+name containing it. Measured over 307 real transcripts it produced **2,334** distinct
+spurious probe→vessel pairs:
+
+```
+'GOOD DAY' -> 'GOOD WAY'   88     'THE'  -> 'SYNTHESE 11'   90
+'AND'      -> 'ALEXANDER-M' 90    'THIS' -> 'AMETHIST'      90
+```
+
+Those were handed to Claude with a rule telling it to *use them to correct vessel names* —
+so the pipeline suggested the phantoms rather than Claude inventing them. Now uses
+`fuzz.ratio` (whole-string, no substring reward) at `AIS_HINT_MIN_SCORE` (85), 4-character
+minimum tokens, and a stopword guard that skips probes made entirely of ordinary speech,
+numbers or NATO phonetics. **2,334 → 101 pairs (23×), with all 15 known real vessel names
+still probed.** Raising the old cutoff alone would not have worked — many spurious matches
+score exactly 90.
+
+**2. The decoding prompt was being transcribed back.** `DEFAULT_MARITIME_PROMPT` contains
+*"Motortanker Neptune, Maas Approach, roger…"*, and the reported `[NEPTUNE]` chunk is a
+literal substring of it — with "Neptune" scoring 100 against a real AIS vessel. Similarity
+alone cannot detect this (real traffic genuinely says "Maas Approach"; the 95th percentile of
+`partial_ratio` against the prompt across real transcripts is 91). `_is_prompt_echo` instead
+requires that *every* word came from the prompt **and** either ≥6 words or a word distinctive
+to the prompt. Flags **9 of 307** transcripts, all verifiably verbatim prompt fragments,
+while leaving real short transmissions such as *"This is Maas Approach."* alone.
+
+**3. Each chunk was identified in isolation — built, measured, and left OFF by default.**
+Turns within `SESSION_GAP_S` (120 s) form a conversation whose recent turns are shown to
+Claude; a turn identifying nobody inherits the exchange's vessel, a turn naming a *different*
+vessel without stating it is distrusted, and inherited identities display as `[~NAME]`.
+
+Replaying 249 real chunks with it on and off shows it is **not currently a net improvement**:
+
+| | filters off | filters on |
+|---|---|---|
+| phantom identifications dropped | — | 5 |
+| identifications replaced | — | 24 (several worse, e.g. `MSC PANTERA` → `RED`) |
+| identity inherited | — | 126 |
+| **text adds ≥3 words nobody said** | **18** | **32** |
+
+Two problems. It nearly doubles transcript fabrication — showing prior turns in the same
+message lets them bleed into the `text` field (`"Copy that, thank you."` came back as
+`"Gungor Star one three one five, correct."`); tightening the instruction reduced but did not
+stop it. And a wrong identity propagates across a whole exchange
+(`WILSON DURNESS` → `WILSON DUNDEE`).
+
+The fix is structural rather than another prompt rule: identification and transcription need
+to be separate calls, so conversation context can inform *who is speaking* without ever
+touching *what was said*. Until then this stays off; fixes 1 and 2 are independent of it and
+remain on.
+
+**Judging it:** `server/replay_sessions.py` replays a capture directory in original order and
+timing with the filters on and off and prints the diff. It deliberately reports **no accuracy
+score** — there is no ground truth for vessel identity — only what changed, for review:
+
+```
+py server/replay_sessions.py --captures "D:\SDR\...\captures\2026-07-28" --compare
+```
+
 ## Known limitations
 
 - **~36% pooled word error rate even in the best configuration** (35.9%, see the

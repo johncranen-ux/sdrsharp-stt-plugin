@@ -4,6 +4,7 @@ multipart parse/rebuild that lets the proxy own the whisper.cpp decoder paramete
 Run with: py -m pytest server/tests -v
 """
 
+import datetime
 import importlib.util
 import json
 import sys
@@ -70,6 +71,290 @@ def test_is_hallucination_false(text):
 def test_apply_sttt_corrections(raw, expected_substring):
     result = proxy._apply_sttt_corrections(raw)
     assert expected_substring in result
+
+
+# ---------------------------------------------------------------------------
+# AIS hint filtering
+#
+# The original settings (WRatio, cutoff 65, 3-char tokens) produced 1,993 distinct spurious
+# probe->vessel pairs over 307 real transcripts, because WRatio partial-matches a short word
+# into any long name containing it. Those hints were then offered to Claude as evidence.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("probe", [
+    "GOOD DAY",      # -> GOOD WAY (88 under WRatio): the reported false identification
+    "GOOD MORNING",
+    "SEVEN",         # -> STEVEN
+    "ECHO",          # phonetic alphabet, not a vessel here
+    "STARBOARD",
+])
+def test_all_stopword_phrases_are_not_probed(probe):
+    """The guard's job: a phrase made entirely of ordinary speech is never looked up."""
+    assert probe not in proxy._hint_probes(probe)
+
+
+def test_mixed_phrases_are_probed_but_stopped_by_the_scorer(ais_cache):
+    """'THE FOOT' contains a non-stopword so the guard passes it, and that is fine --
+    fuzz.ratio is what stops it, where the old WRatio scored it 86 against
+    'THE QUEEN JACQUELINE'. Both layers matter; this pins the second one."""
+    assert "THE FOOT" in proxy._hint_probes("walking on the foot area")
+    assert proxy._find_ais_hints("walking on the foot area") == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("WILSON DURNESS calling", "WILSON DURNESS"),
+    ("this is MSC PANTERA", "MSC PANTERA"),
+    ("Motortanker NEPTUNE here", "NEPTUNE"),
+])
+def test_real_vessel_names_are_still_probed(text, expected):
+    assert expected in proxy._hint_probes(text)
+
+
+def test_probe_guard_needs_every_token_to_be_common():
+    """'GOOD WAY' must survive even though 'GOOD' alone is a stopword -- otherwise a real
+    vessel whose name contains a common word could never be hinted."""
+    assert "GOOD WAY" in proxy._hint_probes("GOOD WAY calling")
+
+
+@pytest.mark.parametrize("text,pair", [
+    ("GOOD WAY calling", "GOOD WAY"),      # second word is 3 chars
+    ("this is NQ TULIPA", "NQ TULIPA"),    # first word is 2 chars
+])
+def test_pairs_survive_when_only_one_token_is_substantial(text, pair):
+    """Requiring *both* tokens to clear the length bar silently dropped real vessel
+    names -- a recall regression this pins down."""
+    assert pair in proxy._hint_probes(text)
+
+
+def test_short_tokens_are_not_probed():
+    assert "THE" not in proxy._hint_probes("THE")
+
+
+@pytest.fixture
+def ais_cache(monkeypatch):
+    cache = {
+        "GOOD WAY":       {"name": "GOOD WAY", "mmsi": "538010145"},
+        "WILSON DURNESS": {"name": "WILSON DURNESS", "mmsi": "314632000"},
+        "SYNTHESE 11":    {"name": "SYNTHESE 11", "mmsi": "111111111"},
+        "AFTER YOU":      {"name": "AFTER YOU", "mmsi": "222222222"},
+    }
+    monkeypatch.setattr(proxy, "_vessel_cache", cache)
+    return cache
+
+
+def test_hints_no_longer_surface_a_vessel_from_a_greeting(ais_cache):
+    """The whole reported bug in one assertion."""
+    assert proxy._find_ais_hints("Yes, good day sir, we are entering new area") == []
+
+
+def test_hints_still_surface_a_stated_vessel(ais_cache):
+    hits = proxy._find_ais_hints("Maas Approach, Wilson Durness, calling you")
+    assert [h["name"] for h in hits] == ["WILSON DURNESS"]
+
+
+def test_hint_filter_can_be_disabled(monkeypatch, ais_cache):
+    """AIS_HINT_FILTER=off must restore the old loose behaviour exactly, which is what
+    makes the revert trustworthy."""
+    monkeypatch.setattr(proxy, "AIS_HINT_FILTER", False)
+    assert proxy._find_ais_hints("Yes, good day sir, we are entering new area") != []
+
+
+def _legacy_probes(text: str) -> list[str]:
+    """The probe generation exactly as it was before this change, for equivalence checks."""
+    words = text.upper().split()
+    probes = []
+    for i, w in enumerate(words):
+        if len(w) >= 3:
+            probes.append(w)
+        if i < len(words) - 1 and len(words[i + 1]) >= 3:
+            probes.append(f"{w} {words[i + 1]}")
+    return probes
+
+
+@pytest.mark.parametrize("text", [
+    "Yes, good day sir, we are entering new area, over.",
+    "Maas Approach, Maas Approach, Wilson Durness, calling you.",
+    "Callsign Juliet Lima Sierra Romeo, this is NQ TULIPA.",
+    "",
+    "a",
+])
+def test_flag_off_reproduces_the_original_probe_generation(monkeypatch, text):
+    """The revert has to be exact, not approximate: with the flag off this must produce
+    byte-identical probes to the pre-change implementation."""
+    monkeypatch.setattr(proxy, "AIS_HINT_FILTER", False)
+    assert proxy._hint_probes(text) == _legacy_probes(text)
+
+
+# ---------------------------------------------------------------------------
+# Prompt echo
+# ---------------------------------------------------------------------------
+
+_PROMPT = proxy.DEFAULT_MARITIME_PROMPT
+
+
+@pytest.mark.parametrize("text", [
+    "Motortanker Neptune, Maas Approach.",                                   # the reported case
+    "Motortanker Neptune, over.",
+    "Motortanker Neptune, Maas Approach, roger.",
+    "Rotterdam VTS, be advised we are standing by on channel one six, over.",
+    "Motortanker Neptune, be advised we are standing by on channel one six, over.",
+])
+def test_prompt_echo_is_detected(text):
+    assert proxy._is_prompt_echo(text, _PROMPT) is True
+
+
+@pytest.mark.parametrize("text", [
+    "Maas Approach, Maas Approach, Wilson Durness, calling you.",
+    "Yes, good day sir, we are entering new area.",
+    "This is Maas Approach.",          # every word is in the prompt, but nothing distinctive
+    "VHF channel six, over.",
+    "Over, Maas Approach, over.",
+    "Maas Approach.",
+])
+def test_real_speech_is_not_flagged_as_echo(text):
+    assert proxy._is_prompt_echo(text, _PROMPT) is False
+
+
+def test_one_novel_word_is_enough_to_clear_a_transmission():
+    """A word the prompt cannot supply means the speaker said something real."""
+    assert proxy._is_prompt_echo("Motortanker Neptune, Maas Approach.", _PROMPT) is True
+    assert proxy._is_prompt_echo("Motortanker Neptune, Maas Approach, Botlek bound.", _PROMPT) is False
+
+
+def test_prompt_echo_filter_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(proxy, "PROMPT_ECHO_FILTER", False)
+    assert proxy._is_prompt_echo("Motortanker Neptune, over.", _PROMPT) is False
+
+
+def test_prompt_echo_handles_empty_input():
+    assert proxy._is_prompt_echo("", _PROMPT) is False
+    assert proxy._is_prompt_echo("anything", "") is False
+
+
+# ---------------------------------------------------------------------------
+# Conversation sessions
+# ---------------------------------------------------------------------------
+
+def _turn(seconds_ago, vessel=None, text="", shore=False, channel="160,650"):
+    return {
+        "time": datetime.datetime.now() - datetime.timedelta(seconds=seconds_ago),
+        "vessel": vessel, "raw_text": text, "shore": shore,
+        "channel": channel, "fuzzy": False, "result": {},
+    }
+
+
+@pytest.fixture
+def buffer(monkeypatch):
+    entries = []
+    monkeypatch.setattr(proxy, "_vessel_buffer", entries)
+    return entries
+
+
+def test_session_includes_turns_within_the_gap(buffer):
+    buffer.extend([_turn(20, "WILSON DURNESS"), _turn(10, None, shore=True), _turn(2)])
+    assert len(proxy._session_turns("160,650")) == 3
+
+
+def test_session_stops_at_a_silence_longer_than_the_gap(buffer):
+    buffer.extend([_turn(400, "OLD VESSEL"), _turn(20, "WILSON DURNESS"), _turn(2)])
+    turns = proxy._session_turns("160,650")
+    assert [t["vessel"] for t in turns] == ["WILSON DURNESS", None]
+
+
+def test_session_is_scoped_to_one_channel(buffer):
+    buffer.extend([_turn(10, "OTHER", channel="161,650"), _turn(2, "WILSON DURNESS")])
+    assert [t["vessel"] for t in proxy._session_turns("160,650")] == ["WILSON DURNESS"]
+
+
+def test_session_vessel_counts_shore_turns_too():
+    """When shore speaks it addresses the vessel by name, so that turn identifies the
+    counterpart. Also, _is_maas_response flags a vessel *calling* Maas Approach as shore,
+    so filtering identity on that flag would discard the clearest identification there is."""
+    turns = [_turn(20, "WILSON DURNESS", "Maas Approach, Wilson Durness", shore=True),
+             _turn(10, "WILSON DURNESS", "Wilson Durness, Maas Approach", shore=True)]
+    assert proxy._session_vessel(turns) == "WILSON DURNESS"
+
+
+def test_session_vessel_is_none_when_no_turn_identified_anyone():
+    assert proxy._session_vessel([_turn(20), _turn(10, shore=True)]) is None
+
+
+def test_session_vessel_is_none_when_two_vessels_disagree():
+    turns = [_turn(20, "WILSON DURNESS"), _turn(10, "MSC PANTERA")]
+    assert proxy._session_vessel(turns) is None
+
+
+def test_render_session_context_is_empty_without_turns():
+    assert proxy._render_session_context([]) == ""
+
+
+def test_render_session_context_labels_speakers():
+    out = proxy._render_session_context([
+        _turn(16, "WILSON DURNESS", "Maas Approach, Wilson Durness, calling you."),
+        _turn(13, None, "Wilson Durness, Maas Approach.", shore=True),
+        _turn(3, None, "Yes, good day sir."),
+    ])
+    assert "WILSON DURNESS:" in out and "(shore):" in out and "(unidentified):" in out
+
+
+# --- reconciliation: the actual behaviour change --------------------------
+
+_SESSION = [_turn(16, "WILSON DURNESS"), _turn(13, None, shore=True)]
+
+
+def test_unidentified_turn_inherits_the_conversation_vessel():
+    out = proxy._reconcile_with_session({"vessel": None, "text": "Yes, understood."}, _SESSION)
+    assert out["vessel"] == "WILSON DURNESS"
+    assert out["vessel_source"] == "inferred"
+    assert out["match_method"] == "session"
+
+
+def test_a_different_vessel_not_stated_is_rejected():
+    """'Yes, good day sir' -> GOOD WAY: exactly the reported false identification."""
+    out = proxy._reconcile_with_session(
+        {"vessel": "GOOD WAY", "mmsi": "538010145", "vessel_source": "inferred",
+         "text": "Yes, good day sir"}, _SESSION)
+    assert out["vessel"] == "WILSON DURNESS"
+    assert "mmsi" not in out, "stale AIS detail must not survive an inherited identity"
+
+
+def test_a_callsign_spoken_in_this_transmission_survives_inheritance():
+    """Found by replay: a spelled-out callsign is first-hand evidence from the audio, not
+    an attribute of the vessel match being discarded, so it must not be dropped."""
+    out = proxy._reconcile_with_session(
+        {"vessel": None, "callsign": "JLSR", "text": "Callsign Juliet Lima Sierra Romeo, over."},
+        _SESSION)
+    assert out["vessel"] == "WILSON DURNESS"
+    assert out["callsign"] == "JLSR"
+
+
+def test_a_stated_different_vessel_wins():
+    """This is how a new conversation legitimately begins."""
+    out = proxy._reconcile_with_session(
+        {"vessel": "MSC PANTERA", "vessel_source": "stated",
+         "text": "Maas Approach, this is MSC Pantera"}, _SESSION)
+    assert out["vessel"] == "MSC PANTERA"
+
+
+def test_the_same_vessel_restated_is_left_alone():
+    out = proxy._reconcile_with_session(
+        {"vessel": "WILSON DURNESS", "mmsi": "314632000", "vessel_source": "stated"}, _SESSION)
+    assert out["vessel"] == "WILSON DURNESS" and out["mmsi"] == "314632000"
+
+
+def test_nothing_is_inherited_from_an_ambiguous_session():
+    ambiguous = [_turn(20, "WILSON DURNESS"), _turn(10, "MSC PANTERA")]
+    out = proxy._reconcile_with_session({"vessel": None, "text": "Roger."}, ambiguous)
+    assert out["vessel"] is None
+
+
+@pytest.mark.parametrize("result,expected", [
+    ({"vessel": "WILSON DURNESS", "text": "hi"}, "[WILSON DURNESS] hi"),
+    ({"vessel": "WILSON DURNESS", "vessel_source": "inferred", "text": "hi"}, "[~WILSON DURNESS] hi"),
+    ({"vessel": "WILSON DURNESS", "vessel_source": "stated", "text": "hi"}, "[WILSON DURNESS] hi"),
+])
+def test_inherited_identities_are_marked_in_the_display(result, expected):
+    assert proxy.format_for_plugin(result) == expected
 
 
 # ---------------------------------------------------------------------------

@@ -90,7 +90,29 @@ ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
 AIS_CACHE_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ais_cache.json")
 VESSELS_LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identified_vessels.html")
 AIS_SAVE_INTERVAL   = 300
-VESSEL_BUFFER_TTL   = 60
+
+# Conversation sessions
+#
+# A VHF exchange is normally one vessel alternating with the shore station over a couple of
+# minutes. Identifying each chunk in isolation loses that, so a single weak name cue in a
+# mid-exchange reply can invent a second vessel. Turns closer together than SESSION_GAP_S
+# are treated as one conversation and shown to Claude as context.
+#
+# DEFAULT OFF, on measured evidence. Replaying 249 real chunks with and without it: it does
+# fix some identifications, but it also nearly doubles text fabrication (18 -> 32 chunks
+# where the returned "text" adds 3+ words nobody said, e.g. "Copy that, thank you." coming
+# back as "Gungor Star one three one five, correct."), and it can propagate a wrong identity
+# across a whole exchange (WILSON DURNESS -> WILSON DUNDEE). Showing prior turns in the same
+# message lets them bleed into the transcription, and tightening the instruction reduced but
+# did not stop it. Fixing that needs identification and transcription separated, not another
+# prompt rule -- see README. Set SESSION_CONTEXT=on to enable and judge for yourself.
+SESSION_CONTEXT     = os.environ.get("SESSION_CONTEXT", "off").strip().lower() == "on"
+SESSION_GAP_S       = int(os.environ.get("SESSION_GAP_S", "120"))
+SESSION_MAX_TURNS   = int(os.environ.get("SESSION_MAX_TURNS", "6"))
+
+# The identification buffer doubles as the session history, so it has to retain turns for at
+# least one session gap.
+VESSEL_BUFFER_TTL   = max(60, SESSION_GAP_S)
 
 # ---------------------------------------------------------------------------
 # Recent vessel identifications buffer
@@ -109,18 +131,74 @@ def _is_maas_response(raw_text: str) -> bool:
     return any(indicator in text_lower for indicator in maas_indicators)
 
 
-def _add_to_buffer(result: dict, raw_text: str) -> None:
+def _add_to_buffer(result: dict, raw_text: str, channel: str = "",
+                   when: datetime.datetime | None = None) -> None:
+    # `when` exists so replay_sessions.py can re-run captured traffic against its original
+    # timestamps; live callers leave it alone.
     with _buffer_lock:
-        now = datetime.datetime.now()
+        now = when or datetime.datetime.now()
         _vessel_buffer.append({
             "time": now,
             "vessel": result.get("vessel"),
             "fuzzy": result.get("match_method") == "name_fuzzy",
             "result": result,
             "raw_text": raw_text,
+            "channel": channel,
+            "shore": _is_maas_response(raw_text),
         })
         cutoff = now - datetime.timedelta(seconds=VESSEL_BUFFER_TTL)
         _vessel_buffer[:] = [e for e in _vessel_buffer if e["time"] > cutoff]
+
+
+def _session_turns(channel: str = "", now: datetime.datetime | None = None) -> list[dict]:
+    """Turns belonging to the conversation still in progress, oldest first.
+
+    Walks backwards from the most recent turn and stops at the first gap wider than
+    SESSION_GAP_S, so an exchange is bounded by silence rather than by a fixed window --
+    a long conversation stays whole, and an unrelated call after a quiet spell starts fresh.
+    """
+    now = now or datetime.datetime.now()
+    with _buffer_lock:
+        entries = [e for e in _vessel_buffer if not channel or e.get("channel", "") == channel]
+
+    turns: list[dict] = []
+    later = now
+    for entry in reversed(entries):
+        if (later - entry["time"]).total_seconds() > SESSION_GAP_S:
+            break
+        turns.append(entry)
+        later = entry["time"]
+        if len(turns) >= SESSION_MAX_TURNS:
+            break
+    return list(reversed(turns))
+
+
+def _session_vessel(turns: list[dict]) -> str | None:
+    """The vessel this conversation is with, if the turns agree on one.
+
+    Every turn counts, including shore-station ones: when Maas Approach speaks it addresses
+    the vessel by name ("Serenada, Maas Approach"), so that turn identifies the counterpart
+    just as well as the vessel's own call does. Note also that _is_maas_response flags any
+    transmission merely *containing* "maas approach", which includes a vessel calling in --
+    so the shore flag is too blunt to filter identity on.
+
+    If two different vessels appear the session is ambiguous and nothing is carried over.
+    """
+    names = {t["vessel"] for t in turns if t.get("vessel")}
+    return names.pop() if len(names) == 1 else None
+
+
+def _render_session_context(turns: list[dict], now: datetime.datetime | None = None) -> str:
+    """Compact transcript of the exchange so far, for the extraction prompt."""
+    if not turns:
+        return ""
+    now = now or datetime.datetime.now()
+    lines = []
+    for t in turns:
+        age = int((now - t["time"]).total_seconds())
+        who = "(shore)" if t.get("shore") else (t.get("vessel") or "(unidentified)")
+        lines.append(f"  -{age}s {who}: {t.get('raw_text', '')[:120]}")
+    return "[recent exchange on this channel, oldest first]\n" + "\n".join(lines)
 
 
 def _find_fuzzy_match_in_buffer(vessel_name: str) -> tuple:
@@ -422,25 +500,90 @@ def match_by_callsign(extracted_callsign: str) -> dict | None:
         return _callsign_cache.get(extracted_callsign.upper())
 
 
+# AIS hint matching
+#
+# Hints are candidate vessels shown to Claude alongside a transcript. The original
+# settings (WRatio, cutoff 65, 3-char tokens) were far too loose: measured over 307 real
+# transcripts they produced 1,993 distinct spurious probe->vessel pairs, because WRatio
+# falls back to partial matching when lengths differ, so an ordinary short word scores ~90
+# against any long name containing it -- 'THE'->'SYNTHESE 11', 'ONE'->'RIVER DRONE 1',
+# 'AND'->'ALEXANDER-M', 'GOOD DAY'->'GOOD WAY'. Claude was then told to use those hints to
+# correct vessel names, so the pipeline was inventing vessels and handing them over as
+# evidence.
+#
+# fuzz.ratio compares whole strings and does not reward a short substring, which is what
+# this needs. Measured on the same corpus: 1,993 -> 114 pairs, with all known real vessel
+# names still matched. The stopword guard below removes a further 19 (phonetic letters,
+# numbers and radio procedure words), giving 95 -- a 21x reduction with no loss of recall.
+#
+# Set AIS_HINT_FILTER=off to restore the original behaviour exactly.
+AIS_HINT_FILTER    = os.environ.get("AIS_HINT_FILTER", "on").strip().lower() != "off"
+AIS_HINT_MIN_SCORE = int(os.environ.get("AIS_HINT_MIN_SCORE", "85"))
+AIS_HINT_MIN_TOKEN = int(os.environ.get("AIS_HINT_MIN_TOKEN", "4"))
+
+# Words that are never a vessel name on their own here. Numbers and NATO phonetics are
+# how callsigns and positions get read out (callsigns have their own exact lookup in
+# match_by_callsign, so nothing is lost); the rest is ordinary speech and radio procedure.
+# A probe is skipped only when *every* token is in this set, so "MSC PANTERA" survives
+# while "GOOD DAY" does not.
+_HINT_STOPWORDS = frozenset("""
+ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE HUNDRED THOUSAND
+DECIMAL POINT
+ALPHA BRAVO CHARLIE DELTA ECHO FOXTROT GOLF HOTEL INDIA JULIET KILO LIMA MIKE NOVEMBER
+OSCAR PAPA QUEBEC ROMEO SIERRA TANGO UNIFORM VICTOR WHISKEY XRAY YANKEE ZULU
+OVER OUT ROGER WILCO COPY AFFIRM NEGATIVE STANDBY CHANNEL APPROACH PILOT PILOTS VESSEL
+SHIP TANKER MOTORTANKER BULKER CONTAINER TRAFFIC ANCHOR ANCHORAGE STARBOARD PORTSIDE
+BERTH BUOY BUOYS DRAUGHT CALLSIGN
+GOOD MORNING AFTERNOON EVENING DAY NIGHT THANK THANKS PLEASE SIR MADAM YEAH YES WELL OKAY
+NEW OLD NEXT LAST FIRST SECOND
+WATER AREA TIME READ VERY WILL ENTERING PROCEEDING UNDERSTOOD INFORMATION POSITION SPEED
+COURSE
+THAT THIS THESE THOSE THERE HERE WITH FROM YOUR OURS HAVE HAS BEEN WOULD SHALL SHOULD
+WHAT WHEN WHERE WHICH WHILE ABOUT ABOVE BELOW AFTER BEFORE
+""".split())
+
+
+def _hint_probes(text: str) -> list[str]:
+    """Single words and adjacent pairs worth looking up as vessel names."""
+    min_token = AIS_HINT_MIN_TOKEN if AIS_HINT_FILTER else 3
+    words = [w.strip(".,!?;:") for w in text.upper().split()] if AIS_HINT_FILTER \
+        else text.upper().split()
+
+    probes = []
+    for i, w in enumerate(words):
+        if len(w) >= min_token:
+            probes.append(w)
+        if i < len(words) - 1:
+            nxt = words[i + 1]
+            # A pair only needs ONE substantial token: real names routinely pair a short
+            # word with a long one ("NQ TULIPA", "GOOD WAY"), and requiring both to clear
+            # the bar silently drops them. Pairs are specific enough that the length guard
+            # matters far less than it does for a lone word.
+            if (max(len(w), len(nxt)) >= min_token if AIS_HINT_FILTER
+                    else len(nxt) >= min_token):
+                probes.append(f"{w} {nxt}")
+
+    if AIS_HINT_FILTER:
+        probes = [p for p in probes if not all(tok in _HINT_STOPWORDS for tok in p.split())]
+    return probes
+
+
 def _find_ais_hints(text: str, n: int = 5) -> list[dict]:
-    words = text.upper().split()
-    if not words:
+    if not text.strip():
         return []
     with _cache_lock:
         if not _vessel_cache:
             return []
         keys  = list(_vessel_cache.keys())
         cache = dict(_vessel_cache)
+
+    scorer = rf_fuzz.ratio if AIS_HINT_FILTER else rf_fuzz.WRatio
+    cutoff = AIS_HINT_MIN_SCORE if AIS_HINT_FILTER else 65
+
     seen:    set[str]  = set()
     results: list[dict] = []
-    probes = []
-    for i, w in enumerate(words):
-        if len(w) >= 3:
-            probes.append(w)
-        if i < len(words) - 1 and len(words[i + 1]) >= 3:
-            probes.append(f"{w} {words[i + 1]}")
-    for probe in probes:
-        hit = rf_process.extractOne(probe, keys, scorer=rf_fuzz.WRatio, score_cutoff=65)
+    for probe in _hint_probes(text):
+        hit = rf_process.extractOne(probe, keys, scorer=scorer, score_cutoff=cutoff)
         if hit:
             entry = cache[hit[0]]
             mmsi  = entry.get("mmsi", "")
@@ -469,6 +612,66 @@ _HALLUCINATION_PATTERNS = [
     re.compile(r'^\s*[\W\s]+\s*$'),                  # only punctuation
     re.compile(r'^(\w[\w\s]*?)\s*(\1\s*){3,}$', re.IGNORECASE),  # phrase repeated 4+ times
 ]
+
+
+# Prompt echo
+#
+# Whisper sometimes reproduces the decoding prompt instead of transcribing, and the shipped
+# prompt names a vessel ("Motortanker Neptune") that exists in AIS with a 100% match -- so an
+# echo becomes a confidently wrong vessel identification with a real MMSI attached.
+#
+# Similarity to the prompt alone does NOT discriminate: real traffic genuinely says "Maas
+# Approach" and "standing by on channel one six", and measured over 307 real transcripts the
+# 95th percentile of partial_ratio against the prompt is 91. What does discriminate is
+# (a) every word of the transmission coming from the prompt, plus (b) either enough words
+# that coincidence is implausible, or a word distinctive to the prompt.
+#
+# Measured on those 307 transcripts: this flags 11, all verifiably echoes (verbatim prompt
+# fragments, several repeated word-for-word), while leaving real short transmissions such as
+# "This is Maas Approach." and "VHF channel six, over." alone.
+#
+# Set PROMPT_ECHO_FILTER=off to disable.
+PROMPT_ECHO_FILTER    = os.environ.get("PROMPT_ECHO_FILTER", "on").strip().lower() != "off"
+PROMPT_ECHO_MIN_WORDS = int(os.environ.get("PROMPT_ECHO_MIN_WORDS", "6"))
+
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9']+")
+
+# Vocabulary that recurs naturally in Rotterdam VHF traffic. A prompt word outside this set
+# (e.g. the prompt's invented vessel name and callsign) is treated as distinctive: seeing it
+# in a transmission whose every word came from the prompt is strong evidence of an echo.
+_ECHO_GENERIC_WORDS = frozenset("""
+a an the this that is are be been am was were do does did have has had
+i we you he she it they me us them my your our their
+and or but if so then than to of in on at by for from with without over under
+maas approach rotterdam vts pilot pilots botlek traffic harbour port
+vhf channel one two three four five six seven eight nine zero
+over out roger wilco copy standing standby say again please thank thanks sir
+motortanker motorvessel tanker vessel ship boat barge tug
+good morning afternoon evening day night yes yeah no okay ok
+""".split())
+
+
+def _prompt_echo_tokens(prompt: str) -> tuple[set, set]:
+    """(all prompt words, distinctive prompt words) for echo detection."""
+    words = set(_WORD_TOKEN_RE.findall(prompt.lower()))
+    return words, words - _ECHO_GENERIC_WORDS
+
+
+def _is_prompt_echo(text: str, prompt: str) -> bool:
+    """True when `text` looks like the decoding prompt read back rather than speech."""
+    if not PROMPT_ECHO_FILTER or not prompt:
+        return False
+    words = _WORD_TOKEN_RE.findall(text.lower())
+    if not words:
+        return False
+
+    prompt_words, distinctive = _prompt_echo_tokens(prompt)
+    # Every single word must come from the prompt. One novel word (a real vessel name, a
+    # position, an instruction) means the speaker said something the prompt could not supply.
+    if any(w not in prompt_words for w in words):
+        return False
+
+    return len(words) >= PROMPT_ECHO_MIN_WORDS or any(w in distinctive for w in words)
 
 
 def _is_hallucination(text: str) -> bool:
@@ -578,21 +781,82 @@ def _get_claude() -> anthropic.Anthropic:
 SYSTEM_PROMPT = """\
 You analyse VHF marine radio transcriptions from Rotterdam harbour (Maas Approach / Rotterdam VTS area).
 Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdown:
-{"vessel": "<name or null>", "callsign": "<callsign or null>", "vessel_type": "<type or null>", "text": "<corrected text>"}
+{"vessel": "<name or null>", "callsign": "<callsign or null>", "vessel_type": "<type or null>", "vessel_source": "stated|inferred|null", "text": "<corrected text>"}
 
 Rules:
+0. If a [recent exchange ...] block is given, this transmission is most likely another turn
+   in that same conversation, which is normally ONE vessel alternating with the shore
+   station. Only report a different vessel when this transmission actually names one --
+   "this is X", "X calling", or the shore station addressing X. A passing resemblance to a
+   name is not naming a vessel. Set "vessel_source" to "stated" when the transmission names
+   the vessel itself, or "inferred" when you are carrying it over from the exchange.
+   The exchange block is for identification ONLY. Never let it change "text": do not copy
+   words from it, do not complete a sentence with it, do not add a vessel name that was not
+   spoken in THIS transmission. "text" is a transcription of this transmission alone.
 1. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are NOT vessels.
 2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station addresses a vessel.
 3. Always extract callsigns (4-letter codes, MMSI 9-digit, alphanumeric like 9HF5093).
 4. Correct STT errors: mass->maas, draft->draught, boys->buoys, motor tanker->Motortanker.
 5. vessel_type: tanker/bulker/container/tug/ferry/general_cargo/passenger/yacht/pilot/null.
-6. If [AIS: ...] hints are given, use them to correct vessel names (score>=80% match or 2+ shared tokens).
-7. In "text" field, return the full corrected transcription.
+6. [AIS: ...] hints are nearby vessels, NOT a list of who is speaking. Only use a hint to
+   fix the spelling of a name the speaker actually said. Never take a vessel name from the
+   hints alone: if the transmission does not name a vessel, return null even when hints
+   are present. "Yes, good day sir" names no vessel, whatever the hints say.
+7. "text" is a transcription of THIS transmission and nothing else. Fix mis-heard words,
+   but never add content: no vessel name that was not spoken here, nothing carried in from
+   the recent-exchange block, no completing of a half-finished sentence. If the whole
+   transmission was "Maas Approach." then "text" is "Maas Approach." -- NOT
+   "Maas Approach, <vessel>." Identifying the speaker is what the "vessel" field is for.
 """
 
 
-def extract_vessel(raw_text: str) -> dict:
+def _reconcile_with_session(result: dict, turns: list[dict]) -> dict:
+    """Reconcile a single-chunk identification against the conversation it sits in.
+
+    Two corrections, both for cases where a mid-exchange reply carries no real evidence of
+    a vessel but something in it resembled a name:
+      - nothing identified  -> carry over the vessel this exchange is with
+      - a *different* vessel identified without the transmission stating it -> distrust it
+        and keep the exchange's vessel (this is the "good day sir" -> GOOD WAY case)
+    A transmission that genuinely states a different vessel always wins: that is how a new
+    conversation legitimately starts.
+    """
+    session_vessel = _session_vessel(turns)
+    if not session_vessel:
+        return result
+
+    vessel = result.get("vessel")
+    stated = result.get("vessel_source") == "stated"
+
+    if not vessel or (vessel != session_vessel and not stated):
+        carried = dict(result)
+        carried["vessel"] = session_vessel
+        carried["vessel_source"] = "inferred"
+        carried["match_method"] = "session"
+        # AIS detail belonged to the vessel we just rejected, so it cannot travel with the
+        # carried-over identity. The callsign is deliberately NOT dropped: if this
+        # transmission spelled one out ("Callsign Juliet Lima Sierra Romeo"), that is
+        # first-hand evidence from the audio, not an attribute of the discarded match.
+        for stale in ("mmsi", "imo", "type", "vessel_type"):
+            carried.pop(stale, None)
+        return carried
+
+    return result
+
+
+def extract_vessel(raw_text: str, channel: str = "",
+                   now: datetime.datetime | None = None) -> dict:
     hints = _find_ais_hints(raw_text)
+    blocks = [raw_text]
+
+    if SESSION_CONTEXT:
+        turns   = _session_turns(channel, now)
+        context = _render_session_context(turns, now)
+        if context:
+            blocks.append(context)
+    else:
+        turns = []
+
     if hints:
         hint_parts = []
         for h in hints:
@@ -602,9 +866,9 @@ def extract_vessel(raw_text: str) -> dict:
             if h.get("type"):
                 parts.append(f"type:{_get_ship_type_name(h['type'])}")
             hint_parts.append(" ".join(parts))
-        user_content = f"{raw_text}\n[AIS: {', '.join(hint_parts)}]"
-    else:
-        user_content = raw_text
+        blocks.append(f"[AIS: {', '.join(hint_parts)}]")
+
+    user_content = "\n".join(blocks)
 
     try:
         client  = _get_claude()
@@ -622,7 +886,7 @@ def extract_vessel(raw_text: str) -> dict:
         result = json.loads(content)
         if result.get("text"):
             result["text"] = _apply_sttt_corrections(result["text"])
-        return result
+        return _reconcile_with_session(result, turns) if SESSION_CONTEXT else result
     except json.JSONDecodeError:
         return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
     except Exception as exc:
@@ -656,7 +920,10 @@ def format_for_plugin(result: dict) -> str:
     vessel = result.get("vessel")
     vtype  = result.get("vessel_type")
     if vessel:
-        parts.append(f"[{vessel}/{vtype}]" if vtype else f"[{vessel}]")
+        # "~" marks an identity carried over from the conversation rather than stated in
+        # this transmission, so an inherited name never reads as a confirmed one.
+        mark = "~" if result.get("vessel_source") == "inferred" else ""
+        parts.append(f"[{mark}{vessel}/{vtype}]" if vtype else f"[{mark}{vessel}]")
     if result.get("mmsi"):
         parts.append(f"(MMSI:{result['mmsi']})")
     elif result.get("callsign"):
@@ -681,6 +948,15 @@ DEFAULT_MARITIME_PROMPT = (
 )
 
 
+def _effective_prompt(client_prompt: str) -> str:
+    """The prompt actually sent to the decoder for this request.
+
+    Shared by the param builders and the echo filter, so the filter always compares against
+    the prompt that was really in force rather than a copy that can drift from it.
+    """
+    return client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT)
+
+
 def _env_bool(name: str, default: str) -> str:
     # whisper.cpp's form-field parser expects the literal strings "true"/"false".
     return "true" if os.environ.get(name, default).strip().lower() in ("1", "true", "yes") else "false"
@@ -694,7 +970,7 @@ def _build_whisper_params(client_language: str, client_prompt: str) -> dict:
         "suppress_nst": _env_bool("WHISPER_SUPPRESS_NST", "true"),
         "response_format": "json",
         "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
-        "prompt": client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT),
+        "prompt": _effective_prompt(client_prompt),
         "carry_initial_prompt": "true",
         # Off by default: server/bench.py on 49 real captures showed VAD-on configs
         # (48.5%/41.8% pooled WER) doing no better than, or worse than, the equivalent
@@ -741,9 +1017,7 @@ def _build_groq_fields(client_language: str, client_prompt: str) -> dict:
         "temperature": os.environ.get("WHISPER_TEMPERATURE", "0"),
         "response_format": "json",
         "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
-        "prompt": _truncate_prompt(
-            client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT)
-        ),
+        "prompt": _truncate_prompt(_effective_prompt(client_prompt)),
     }
 
 
@@ -1211,6 +1485,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     data["text"] = ""
                     resp_body = json.dumps(data).encode("utf-8")
 
+                elif _is_prompt_echo(raw_text, _effective_prompt(client_fields.get("prompt", ""))):
+                    # Logged separately from [filtered]: an echo means the decoder returned
+                    # the prompt instead of the audio, which is worth being able to spot in
+                    # the log rather than having it disappear into the hallucination count.
+                    print(f"[{ts}] [prompt-echo] '{raw_text[:60]}'", flush=True)
+                    data["text"] = ""
+                    resp_body = json.dumps(data).encode("utf-8")
+
                 elif mode == "airband":
                     corrected = _apply_sttt_corrections(raw_text, mode="airband")
                     channel_label = f"[{channel} MHz]" if channel else "[airband]"
@@ -1220,7 +1502,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 elif channel in ("160.650", "160,650"):
                     # Maas Approach CH 01: full Claude extraction + AIS enrichment
-                    result = extract_vessel(raw_text)
+                    result = extract_vessel(raw_text, channel)
                     result = enrich_with_ais(result)
 
                     # Maas response correlation
@@ -1234,7 +1516,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                     display_text = format_for_plugin(result)
                     _append_vessel_to_log(result, raw_text)
-                    _add_to_buffer(result, raw_text)
+                    _add_to_buffer(result, raw_text, channel)
 
                     vessel   = result.get("vessel") or "?"
                     vtype    = result.get("vessel_type") or "-"

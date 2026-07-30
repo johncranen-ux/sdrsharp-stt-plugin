@@ -21,6 +21,17 @@ set GROQ_API_KEY=gsk_YOUR_GROQ_KEY_HERE
 set STT_BACKEND=groq
 set GROQ_MODEL=whisper-large-v3
 
+:: -- Vessel-identification filters (all default on) ----------
+:: Uncomment one line to turn that fix off without touching code or git.
+:: AIS_HINT_FILTER    - stops ordinary speech ("good day") being matched to real ships
+:: PROMPT_ECHO_FILTER - drops transcriptions that are the decoding prompt read back
+:: set AIS_HINT_FILTER=off
+:: set PROMPT_ECHO_FILTER=off
+::
+:: SESSION_CONTEXT carries vessel identity across turns of one conversation. Built and
+:: measured, but OFF by default: it nearly doubles transcript fabrication (see README).
+:: set SESSION_CONTEXT=on
+
 :: -- Ports (defaults match whisper proxy settings) -----------
 :: Whisper-server listens on 8080 inside WSL (accessible as localhost:8080 from Windows)
 :: Proxy listens on 9000; under STT_BACKEND=whisper_cpp it forwards to 8080
