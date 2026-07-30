@@ -160,86 +160,24 @@ from stt_proxy.ais import (  # noqa: E402
 )
 
 
+# ---------------------------------------------------------------------------
+# Per-transmission identification and the vessels log
+#   see stt_proxy/identify.py and stt_proxy/vessel_log.py
+# ---------------------------------------------------------------------------
+
+from stt_proxy.identify import (  # noqa: E402
+    SYSTEM_PROMPT,
+    enrich_with_ais,
+    extract_vessel,
+    format_for_plugin,
+)
+from stt_proxy.vessel_log import (  # noqa: E402
+    VESSELS_LOG_FILE,
+    _append_vessel_to_log,
+    _init_vessels_log,
+)
 
 
-def _init_vessels_log() -> None:
-    if os.path.exists(VESSELS_LOG_FILE):
-        return
-    html = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Identified Vessels</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        h1 { color: #333; }
-        table { border-collapse: collapse; width: 100%; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        th { background: #2c3e50; color: white; padding: 12px; text-align: left; }
-        td { padding: 10px 12px; border-bottom: 1px solid #ddd; }
-        tr:hover { background: #f9f9f9; }
-        .match { background: #d4edda; }
-        .no-match { background: #fff3cd; }
-    </style>
-</head>
-<body>
-    <h1>Identified Vessels Log</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Timestamp</th><th>Vessel</th><th>MMSI</th><th>Callsign</th>
-                <th>Type</th><th>AIS Type</th><th>IMO</th><th>Length</th>
-                <th>Lat</th><th>Lon</th><th>Speed</th><th>Course</th><th>Transcription</th>
-            </tr>
-        </thead>
-        <tbody id="vessels">
-        </tbody>
-    </table>
-    <script>setInterval(() => location.reload(), 5000);</script>
-</body>
-</html>
-"""
-    try:
-        with open(VESSELS_LOG_FILE, "w", encoding="utf-8") as f:
-            f.write(html)
-    except Exception as exc:
-        print(f"[Vessels Log] init error: {exc}", flush=True)
-
-
-_log_lock = threading.Lock()
-
-
-def _append_vessel_to_log(result: dict, raw_text: str) -> None:
-    try:
-        vessel   = result.get("vessel") or "-"
-        mmsi     = result.get("mmsi") or "-"
-        callsign = result.get("callsign") or "-"
-        vtype    = result.get("vessel_type") or "-"
-        ais_type = _get_ship_type_name(result.get("type")) or "-"
-        imo      = result.get("imo") or "-"
-        length   = f"{result.get('length')}m" if result.get("length") else "-"
-        lat      = f"{result.get('latitude'):.4f}" if result.get("latitude") is not None else "-"
-        lon      = f"{result.get('longitude'):.4f}" if result.get("longitude") is not None else "-"
-        speed    = f"{result.get('sog'):.1f}" if result.get("sog") is not None else "-"
-        course   = f"{int(result.get('cog'))}" if result.get("cog") is not None else "-"
-        ts       = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row_class = "match" if result.get("mmsi") else "no-match"
-        preview   = raw_text[:80] + ("..." if len(raw_text) > 80 else "")
-
-        row = f"""        <tr class="{row_class}">
-            <td>{ts}</td><td><strong>{vessel}</strong></td><td>{mmsi}</td><td>{callsign}</td>
-            <td>{vtype}</td><td>{ais_type}</td><td>{imo}</td><td>{length}</td>
-            <td>{lat}</td><td>{lon}</td><td>{speed}</td><td>{course}°</td>
-            <td><em>{preview}</em></td>
-        </tr>
-"""
-        with _log_lock:
-            with open(VESSELS_LOG_FILE, "r", encoding="utf-8") as f:
-                content = f.read()
-            content = content.replace('        <tbody id="vessels">', '        <tbody id="vessels">\n' + row)
-            with open(VESSELS_LOG_FILE, "w", encoding="utf-8") as f:
-                f.write(content)
-    except Exception as exc:
-        print(f"[Vessels Log] append error: {exc}", flush=True)
 
 
 
@@ -269,129 +207,6 @@ from stt_proxy.corrections import (  # noqa: E402
 
 
 # Callsign verification
-#
-# The extractor used to be told to "always extract callsigns", and it obliged even when the
-# transmission contained none: "Gungor Star one three one five, correct." produced VRSQ4,
-
-
-SYSTEM_PROMPT = """\
-You analyse VHF marine radio transcriptions from Rotterdam harbour (Maas Approach / Rotterdam VTS area).
-Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdown:
-{"vessel": "<name or null>", "callsign": "<callsign or null>", "vessel_type": "<type or null>", "text": "<corrected text>"}
-
-Rules:
-1. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are NOT vessels.
-2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station addresses a vessel.
-3. Extract a callsign ONLY when the transmission spells one out -- phonetically
-   ("Juliet Lima Sierra Romeo"), as characters ("9 Hotel Alpha six one"), or verbatim
-   ("9HF5093"). If no callsign was spoken, return null. Do not guess one from the vessel
-   name, from the AIS hints, or from anything else: a callsign nobody said is worse than
-   no callsign, because it looks up to a real ship.
-4. Correct STT errors: mass->maas, draft->draught, boys->buoys, motor tanker->Motortanker.
-5. vessel_type: tanker/bulker/container/tug/ferry/general_cargo/passenger/yacht/pilot/null.
-6. [AIS: ...] hints are nearby vessels, NOT a list of who is speaking. Only use a hint to
-   fix the spelling of a name the speaker actually said. Never take a vessel name from the
-   hints alone: if the transmission does not name a vessel, return null even when hints
-   are present. "Yes, good day sir" names no vessel, whatever the hints say.
-7. "text" is a transcription of THIS transmission and nothing else. Fix mis-heard words,
-   but never add content: no vessel name that was not spoken here, no completing of a
-   half-finished sentence. If the whole transmission was "Maas Approach." then "text" is
-   "Maas Approach." -- NOT "Maas Approach, <vessel>." Identifying the speaker is what the
-   "vessel" field is for.
-"""
-
-
-def extract_vessel(raw_text: str, channel: str = "",
-                   now: datetime.datetime | None = None) -> dict:
-    """Identify the vessel in a single transmission, live.
-
-    Deliberately sees only this transmission: conversation context in this call bleeds into
-    the transcription it also produces. Cross-turn identity is settled afterwards by
-    resolve_conversation(), which cannot touch the text because its schema has no text field.
-    """
-    hints = _find_ais_hints(raw_text)
-    blocks = [raw_text]
-
-    if hints:
-        hint_parts = []
-        for h in hints:
-            parts = [f"{h['name']} (MMSI:{h['mmsi']})"]
-            if h.get("callsign"):
-                parts.append(f"cs:{h['callsign']}")
-            if h.get("type"):
-                parts.append(f"type:{_get_ship_type_name(h['type'])}")
-            hint_parts.append(" ".join(parts))
-        blocks.append(f"[AIS: {', '.join(hint_parts)}]")
-
-    user_content = "\n".join(blocks)
-
-    try:
-        client  = _get_claude()
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=256,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        content = message.content[0].text.strip()
-        if "```" in content:
-            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-            if m:
-                content = m.group(1)
-        result = json.loads(content)
-        if result.get("text"):
-            result["text"] = _apply_sttt_corrections(result["text"])
-
-        # Prompt rules alone have not held on this pipeline: verify the callsign is actually
-        # readable out of the transmission rather than trusting that it was.
-        callsign = result.get("callsign")
-        if callsign and not _callsign_supported_by_text(callsign, raw_text):
-            print(f"  [callsign] dropped {callsign!r}: not spelled out in the transmission", flush=True)
-            result["callsign"] = None
-
-        return result
-    except json.JSONDecodeError:
-        return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
-    except Exception as exc:
-        print(f"  [extract_vessel error] {exc}", flush=True)
-        return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
-
-
-def enrich_with_ais(result: dict) -> dict:
-    ais    = match_by_name(result.get("vessel"))
-    method = "name"
-    if not ais:
-        ais    = match_by_callsign(result.get("callsign"))
-        method = "callsign"
-    if not ais:
-        return result
-    enriched = dict(result)
-    enriched.update({
-        "vessel": ais["name"], "mmsi": ais["mmsi"], "match_method": method,
-        "type": ais.get("type"), "imo": ais.get("imo"),
-        "length": ais.get("length"), "beam": ais.get("beam"),
-        "latitude": ais.get("latitude"), "longitude": ais.get("longitude"),
-        "sog": ais.get("sog"), "cog": ais.get("cog"), "heading": ais.get("heading"),
-    })
-    if ais.get("callsign"):
-        enriched["callsign"] = ais["callsign"]
-    return enriched
-
-
-
-
-def format_for_plugin(result: dict) -> str:
-    parts = []
-    vessel = result.get("vessel")
-    vtype  = result.get("vessel_type")
-    if vessel:
-        parts.append(f"[{vessel}/{vtype}]" if vtype else f"[{vessel}]")
-    if result.get("mmsi"):
-        parts.append(f"(MMSI:{result['mmsi']})")
-    elif result.get("callsign"):
-        parts.append(f"({result['callsign']})")
-    parts.append(result.get("text", ""))
-    return " ".join(p for p in parts if p)
 
 
 # ---------------------------------------------------------------------------
@@ -472,8 +287,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path in ("/conversations", "/conversations/"):
             try:
-                with _resolved_lock:
-                    rows = list(_resolved)
+                with conversations._resolved_lock:
+                    rows = list(conversations._resolved)
                 data = render_conversations_page(rows).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -486,8 +301,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/conversations":
             try:
-                with _resolved_lock:
-                    data = json.dumps(list(_resolved)).encode("utf-8")
+                with conversations._resolved_lock:
+                    data = json.dumps(list(conversations._resolved)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")

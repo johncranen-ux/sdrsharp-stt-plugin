@@ -1042,3 +1042,46 @@ def test_transcribe_groq_gives_up_on_a_long_rate_limit(fake_groq, monkeypatch):
     assert status == 429
     assert slept == []
     assert len(fake_groq.instances) == 1
+
+
+# ---------------------------------------------------------------------------
+# HTTP routes
+#
+# Added after the package split shipped a broken /conversations: the handler referenced
+# names that were no longer imported, and every unit test passed because they all call the
+# render/resolve functions directly. These start a real server and fetch real URLs.
+# ---------------------------------------------------------------------------
+
+def _serve(handler_cls):
+    """Run the real handler on an ephemeral port for the duration of a test."""
+    import http.server, threading, urllib.request
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+@pytest.fixture
+def server():
+    srv, base = _serve(proxy.ProxyHandler)
+    yield base
+    srv.shutdown()
+
+
+@pytest.mark.parametrize("path,expect", [
+    ("/conversations", b"Resolved Conversations"),
+    ("/api/conversations", b"["),
+    ("/identified-vessels", b"<"),
+])
+def test_get_routes_respond(server, path, expect):
+    import urllib.request
+    with urllib.request.urlopen(server + path, timeout=10) as r:
+        assert r.status == 200
+        assert expect in r.read()
+
+
+def test_unknown_post_path_is_rejected(server):
+    import urllib.error, urllib.request
+    req = urllib.request.Request(server + "/nope", data=b"x", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=10)
+    assert e.value.code == 404
