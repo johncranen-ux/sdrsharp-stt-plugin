@@ -33,7 +33,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import ais, backends, corrections  # noqa: E402
+from stt_proxy import ais, backends, conversations, corrections  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def _turn(seconds_ago, vessel=None, text="", shore=False, channel="160,650"):
 @pytest.fixture
 def buffer(monkeypatch):
     entries = []
-    monkeypatch.setattr(proxy, "_vessel_buffer", entries)
+    monkeypatch.setattr(conversations, "_vessel_buffer", entries)
     return entries
 
 
@@ -275,7 +275,7 @@ def _chunk(seconds_ago, text="", channel="160,650", cid=None, callsign=None, ves
 @pytest.fixture
 def journal(monkeypatch):
     entries = []
-    monkeypatch.setattr(proxy, "_conversation_chunks", entries)
+    monkeypatch.setattr(conversations, "_conversation_chunks", entries)
     return entries
 
 
@@ -291,7 +291,7 @@ def test_split_windows_keeps_a_continuous_exchange_together():
 
 def test_split_windows_caps_window_size(monkeypatch):
     """Bounds the resolver prompt: a busy channel must not build one huge window."""
-    monkeypatch.setattr(proxy, "CONVERSATION_MAX_CHUNKS", 3)
+    monkeypatch.setattr(conversations, "CONVERSATION_MAX_CHUNKS", 3)
     windows = proxy._split_windows([_chunk(60 - i, cid=i) for i in range(7)])
     assert [len(w) for w in windows] == [3, 3, 1]
 
@@ -484,8 +484,8 @@ def test_resolver_input_says_so_when_there_are_no_candidates():
 def test_stored_turn_text_is_copied_verbatim_from_the_journal(monkeypatch):
     """The whole point of resolving afterwards: transcriptions must be untouched."""
     saved = []
-    monkeypatch.setattr(proxy, "_resolved", saved)
-    monkeypatch.setattr(proxy, "_save_conversations", lambda: None)
+    monkeypatch.setattr(conversations, "_resolved", saved)
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
     window = [_chunk(30, "Maas Approach, Selenada.", cid=1), _chunk(20, "Roger, over.", cid=2)]
     original = [c["text"] for c in window]
 

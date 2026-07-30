@@ -42,6 +42,10 @@ from make_references import strip_enrichment  # noqa: E402
 
 proxy = _load_proxy()
 
+# Mutable state lives in the module that owns it, so it must be reset there: clearing a
+# re-exported name on `proxy` would leave the real list untouched.
+from stt_proxy import conversations  # noqa: E402
+
 
 def load_chunks(captures: Path, limit: int | None) -> list[dict]:
     index = captures / "index.jsonl"
@@ -71,7 +75,7 @@ def run(chunks: list[dict], hints: bool, echo: bool) -> list[dict]:
     """Replay every chunk against a fresh buffer with the given filter settings."""
     proxy.AIS_HINT_FILTER     = hints
     proxy.PROMPT_ECHO_FILTER  = echo
-    proxy._vessel_buffer[:] = []
+    conversations._vessel_buffer[:] = []
 
     out = []
     for i, c in enumerate(chunks, 1):
@@ -132,7 +136,7 @@ def resolve_replay(chunks: list[dict]) -> None:
     Runs the live per-chunk pass first (that is where callsigns come from), then groups the
     results into windows and resolves each, exactly as the reaper does in production.
     """
-    proxy._conversation_chunks[:] = []
+    conversations._conversation_chunks[:] = []
     journal = []
     for i, c in enumerate(chunks, 1):
         result = proxy.enrich_with_ais(proxy.extract_vessel(c["text"], c["channel"], now=c["time"]))
