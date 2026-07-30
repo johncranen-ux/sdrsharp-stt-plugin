@@ -42,8 +42,18 @@ echo     Waiting 20 seconds for model to load into GPU VRAM...
 timeout /t 20 /nobreak >nul
 
 :start_proxy
+:: -- Free the proxy port before binding ----------------------
+:: Python's ThreadingHTTPServer sets allow_reuse_address (SO_REUSEADDR), so on Windows a
+:: second proxy binds %PROXY_PORT% alongside the first, silently takes the port over, and
+:: leaves the original running as a zombie -- so "restart it" quietly does nothing.
+:: start-whisper-server.sh self-cleans :8080 for the same reason; this is the :9000 half.
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PROXY_PORT%" ^| findstr "LISTENING"') do (
+    echo     Stopping existing proxy on port %PROXY_PORT% ^(pid %%p^)...
+    taskkill /f /pid %%p >nul 2>&1
+)
+
 :: -- Start the Python proxy ----------------------------------
-echo [2/2] Starting Whisper proxy (port 9000, backend=%STT_BACKEND%)...
+echo [2/2] Starting Whisper proxy (port %PROXY_PORT%, backend=%STT_BACKEND%)...
 start "Whisper Proxy" cmd /k py "%PROXY_SCRIPT%"
 
 echo.
