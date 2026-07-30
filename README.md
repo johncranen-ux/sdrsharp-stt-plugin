@@ -44,7 +44,7 @@ cd sdrsharp-stt-plugin
 py -m pip install -r server/requirements.txt
 
 dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release
-# copy the DLL into <SDRSharp>\Plugins\SttPlugin\ and register it
+# copy the DLL into <SDRSharp>\Plugins\SttPlugin\  (SDR# finds it automatically)
 
 cd server && copy start-all.bat.template start-all.bat   # add your Groq API key
 start-all.bat

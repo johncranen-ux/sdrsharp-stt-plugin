@@ -133,18 +133,32 @@ dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release
 
 ### 4. Deploy it into SDR#
 
-Copy the built DLL into a folder under your SDR# installation:
+Copy the built DLL into its own folder under your SDR# installation:
 
 ```
 <SDRSharp>\Plugins\SttPlugin\SDRSharp.SttPlugin.dll
 ```
 
-Then register it by adding this line to `<SDRSharp>\Plugins.xml` (or `MagicLine.txt`,
-depending on your SDR# version):
+**That is the whole installation.** Current SDR# versions discover plugins by scanning
+`Plugins\<Name>\` on startup — there is no registration file to edit. Restart SDR# and the
+**Speech to Text** panel appears in the left-hand list.
+
+<details>
+<summary>If you are on an older SDR# that needs a registration line</summary>
+
+Builds from before plugin auto-discovery required the plugin's type and assembly to be
+listed in `SDRSharp.exe.config`. If your SDR# has a `<sharpPlugins>` section in that file,
+add:
 
 ```xml
 <add key="SpeechToText" value="SDRSharp.SttPlugin.SttPlugin,SDRSharp.SttPlugin" />
 ```
+
+This line is also kept in `Plugins\SttPlugin\MagicLine.txt` for convenience. Many plugins
+still ship such a file out of habit; on a modern SDR# it is documentation, not
+configuration, and nothing reads it.
+
+</details>
 
 ### 5. Get a Groq API key
 
@@ -401,8 +415,19 @@ Check the `/conversations` page — the retrospective pass often corrects what t
 transcript guessed. If names are still poor, the `Initial prompt` is the biggest lever.
 
 **Plugin does not appear in SDR#**
-Check the DLL is in `<SDRSharp>\Plugins\SttPlugin\` and the registration line was added.
-SDR# silently skips plugins it cannot load.
+SDR# skips plugins it cannot load, silently in the UI — but it does record why. Check
+**`<SDRSharp>\PluginError.log`**, which names the failing type and gives a stack trace:
+
+```
+*** Plugin Load Error - 2026-07-30 11:41:10.978
+Config Key   'SDRSharp.TimeShift.TimeShiftPlugin,...'
+Message      'Method not found: 'Void SDRSharp.PanView.Waterfall.set_Zoom(Int32)'.'
+```
+
+A `Method not found` or assembly-load message there is almost always the .NET 8 runtime trap
+described in [CONTRIBUTING.md](../CONTRIBUTING.md). If the log has no entry for the plugin
+at all, SDR# never saw it — check the DLL really is at
+`<SDRSharp>\Plugins\SttPlugin\SDRSharp.SttPlugin.dll` and that you restarted SDR#.
 
 **`MissingMethodException` or an assembly load error on startup**
 The plugin targets `net9.0-windows` but SDR# hosts it on the **.NET 8** runtime. See
