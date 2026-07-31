@@ -550,6 +550,40 @@ def test_gulf_as_an_ordinary_word_still_yields_no_callsign(text):
     assert all(len(run) < 3 for run in proxy._spelled_out_runs(text))
 
 
+def test_partial_callsign_pattern_decodes_the_real_transmission():
+    """MSC TEMA VIII (5LRK9) went unidentified: Whisper heard Lima->'DEMA', Kilo->'clear'."""
+    text = ("Good afternoon, this is Motortanker MSC DEMA eight, "
+            "Callsign five DEMA Romeo, clear nine.")
+    assert proxy._partial_callsign_pattern(text) == ("5.R.9", 3)
+
+
+def test_partial_callsign_pattern_is_anchored_on_the_keyword():
+    """Unanchored, 'eight' from the vessel name leaks in and yields '8.5.R.9'."""
+    assert proxy._partial_callsign_pattern(
+        "Motortanker MSC DEMA eight, five DEMA Romeo, clear nine") is None
+
+
+# Each case must be rejected by the rule it names and no other, or it proves nothing.
+# "Callsign Oscar Whiskey" for instance is fully decoded, so it would be refused by the
+# all-decoded branch long before the minimum-known rule ever ran.
+@pytest.mark.parametrize("text,rejected_by", [
+    ("Callsign Oscar dema Whiskey",                     "2 known characters, floor is 3"),
+    ("Callsign five dema clear kilos Romeo nine",       "3 consecutive wildcards, max is 2"),
+    ("Callsign one two three dema four five six seven", "8 characters, ITU max is 7"),
+    ("Callsign Zulu Charlie Foxtrot seven, over",       "fully decoded: the exact path owns it"),
+    ("Maas Approach, Wilson Durness calling",           "no callsign keyword"),
+    ("", "empty"),
+    (None, "None"),
+])
+def test_partial_callsign_pattern_rejects_what_it_cannot_use(text, rejected_by):
+    assert proxy._partial_callsign_pattern(text) is None, rejected_by
+
+
+def test_partial_callsign_pattern_counts_one_wildcard_per_unreadable_word():
+    got, known = proxy._partial_callsign_pattern("Callsign five dema Romeo clear nine")
+    assert got == "5.R.9" and known == 3
+
+
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
     """Measured: the live pass emitted callsigns for transmissions containing none, and they
     hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""

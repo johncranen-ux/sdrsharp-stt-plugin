@@ -215,17 +215,23 @@ _SPOKEN_DIGITS = {
 _ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 
 
+def _decode_spoken_word(word: str) -> str | None:
+    """The characters a single spoken word stands for, or None if it is ordinary speech."""
+    char = _PHONETIC_LETTERS.get(word) or _SPOKEN_DIGITS.get(word)
+    if char is None and word.isalnum():
+        # Already-compact forms the decoder sometimes emits whole ("9HF5093"), and
+        # single spoken characters ("9 Hotel Alpha").
+        if len(word) == 1 or (len(word) <= 8 and any(c.isdigit() for c in word)
+                              and any(c.isalpha() for c in word)):
+            char = word.upper()
+    return char
+
+
 def _spelled_out_runs(text: str) -> list[str]:
     """Unbroken runs of spelled-out characters: phonetic letters, spoken digits, literals."""
     runs, current = [], []
     for word in re.findall(r"[A-Za-z0-9'-]+", (text or "").lower()):
-        char = _PHONETIC_LETTERS.get(word) or _SPOKEN_DIGITS.get(word)
-        if char is None and word.isalnum():
-            # Already-compact forms the decoder sometimes emits whole ("9HF5093"), and
-            # single spoken characters ("9 Hotel Alpha").
-            if len(word) == 1 or (len(word) <= 8 and any(c.isdigit() for c in word)
-                                  and any(c.isalpha() for c in word)):
-                char = word.upper()
+        char = _decode_spoken_word(word)
         if char:
             current.append(char)
         elif current:
@@ -244,3 +250,62 @@ def _callsign_supported_by_text(callsign: str, text: str) -> bool:
     if wanted in _ALNUM_RE.sub("", text or "").upper():
         return True
     return any(wanted in run for run in _spelled_out_runs(text))
+
+
+# Partial callsigns
+#
+# A callsign survives STT only partly: "five Lima Romeo Kilo nine" (5LRK9) came through as
+# "five DEMA Romeo, clear nine", so the exact lookup -- a dictionary hit, no fuzz -- could
+# never fire, and the vessel went unidentified with its callsign spelled out twice.
+#
+# What the decoder can still recover is an ordered set of known characters plus the gaps
+# between them, on the assumption that each unreadable word was one spoken character. That
+# yields "5.R.9", which matches exactly one cached callsign.
+#
+# The keyword anchor is what makes this safe. Scanning the whole transmission picks up the
+# "eight" in "MSC DEMA eight" and yields "8.5.R.9", which is wrong. Every spelled-out
+# callsign in the reference corpus says "callsign" first, so requiring it costs little and
+# bounds the span to something that really is a callsign.
+_CALLSIGN_ANCHOR_RE = re.compile(r"\bcall\s?signs?\b", re.IGNORECASE)
+
+PARTIAL_CALLSIGN_MIN_KNOWN = 3   # fewer characters than this does not discriminate
+PARTIAL_CALLSIGN_MAX_LEN   = 7   # ITU callsign maximum
+PARTIAL_CALLSIGN_MAX_GAP   = 2   # consecutive wildcards; beyond this the pattern is noise
+
+
+def _partial_callsign_pattern(text: str) -> tuple[str, int] | None:
+    """Regex for a partly-decodable spelled-out callsign, plus how many characters are known.
+
+    None when the text carries no usable callsign span. Returns None for a *fully* decoded
+    callsign too: that is the exact lookup's job, and this path exists only for the partial
+    case.
+    """
+    match = _CALLSIGN_ANCHOR_RE.search(text or "")
+    if not match:
+        return None
+
+    words   = re.findall(r"[A-Za-z0-9'-]+", text[match.end():].lower())
+    decoded = [_decode_spoken_word(w) for w in words]
+
+    first = next((i for i, c in enumerate(decoded) if c), None)
+    if first is None:
+        return None
+    last = max(i for i, c in enumerate(decoded) if c)
+    span = decoded[first:last + 1]
+
+    if all(c for c in span):          # nothing was garbled -- not this function's problem
+        return None
+
+    gap = worst_gap = 0
+    for char in span:
+        gap = 0 if char else gap + 1
+        worst_gap = max(worst_gap, gap)
+    if worst_gap > PARTIAL_CALLSIGN_MAX_GAP:
+        return None
+
+    known  = sum(len(c) for c in span if c)
+    length = sum(len(c) if c else 1 for c in span)
+    if known < PARTIAL_CALLSIGN_MIN_KNOWN or length > PARTIAL_CALLSIGN_MAX_LEN:
+        return None
+
+    return "".join(re.escape(c) if c else "." for c in span), known

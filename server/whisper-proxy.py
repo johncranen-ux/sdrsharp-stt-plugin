@@ -197,8 +197,10 @@ from stt_proxy.corrections import (  # noqa: E402
     _apply_sttt_corrections,
     _callsign_supported_by_text,
     _correct_maas_before_approach,
+    _decode_spoken_word,
     _is_hallucination,
     _is_prompt_echo,
+    _partial_callsign_pattern,
     _prompt_echo_tokens,
     _spelled_out_runs,
 )
