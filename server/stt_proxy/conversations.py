@@ -25,6 +25,8 @@ from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
                            match_by_callsign, match_by_callsign_pattern)
 from stt_proxy.claude import _get_claude
 from stt_proxy.corrections import _callsign_supported_by_text, _partial_callsign_pattern
+# Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
+from stt_proxy.markup import VESSELFINDER_URL, _html_escape, _vessel_link  # noqa: F401
 
 
 # Conversation sessions
@@ -508,9 +510,6 @@ def _resolve_window(window: list[dict]) -> None:
         print(f"[{ts}] [conv] {len(ex['chunk_ids'])} turns -> {who}{via} ({ex.get('confidence')})", flush=True)
 
 
-def _html_escape(text: str) -> str:
-    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def render_conversations_page(rows: list[dict]) -> str:
@@ -519,7 +518,7 @@ def render_conversations_page(rows: list[dict]) -> str:
     for row in reversed(rows):
         vessel = row.get("vessel")
         conf   = row.get("confidence", "low")
-        ident  = _html_escape(vessel) if vessel else "unidentified"
+        ident  = _vessel_link(vessel, row.get("mmsi")) if vessel else "unidentified"
         badge  = "via callsign" if row.get("via_callsign") else f"{_html_escape(conf)} confidence"
 
         meta = []

@@ -33,7 +33,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import ais, backends, conversations, corrections  # noqa: E402
+from stt_proxy import ais, backends, conversations, corrections, vessel_log  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +794,98 @@ def test_stored_turn_text_is_copied_verbatim_from_the_journal(monkeypatch):
 
 def test_page_renders_with_no_conversations():
     assert "No conversations resolved yet" in proxy.render_conversations_page([])
+
+
+def test_page_links_an_identified_vessel_to_vesselfinder():
+    """The MMSI, not the name: names are neither unique nor reliably heard, and the MMSI is
+    what the AIS match actually established."""
+    html = proxy.render_conversations_page([{
+        "vessel": "VISTA", "mmsi": "538009952", "confidence": "high",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+            'target="_blank" rel="noopener noreferrer">VISTA</a>') in html
+
+
+def test_page_does_not_link_a_vessel_with_no_mmsi():
+    """A name without an MMSI has nothing to look up -- render it plain, not as a dead link."""
+    html = proxy.render_conversations_page([{
+        "vessel": "MSC TEMA VIII", "mmsi": None, "confidence": "medium",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    assert "MSC TEMA VIII" in html
+    assert "vesselfinder.com" not in html
+
+
+def test_page_does_not_link_an_unidentified_conversation():
+    html = proxy.render_conversations_page([{
+        "vessel": None, "mmsi": None, "confidence": "low",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    assert "unidentified" in html
+    assert "vesselfinder.com" not in html
+
+
+def test_page_cannot_be_broken_out_of_by_a_hostile_mmsi():
+    """The MMSI comes off an external AIS feed, so it is never trusted into an href raw."""
+    html = proxy.render_conversations_page([{
+        "vessel": "EVIL", "mmsi": '" onmouseover="alert(1)', "confidence": "high",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    # The href must be exactly the encoded URL, so nothing escaped the attribute. The same
+    # value also appears further down as escaped text content, which is separately safe --
+    # hence asserting on the anchor specifically rather than on the whole page.
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels'
+            '?name=%22%20onmouseover%3D%22alert%281%29" '
+            'target="_blank" rel="noopener noreferrer">EVIL</a>') in html
+
+
+# ---------------------------------------------------------------------------
+# The per-transmission vessels log
+#
+# This module had no tests. It also interpolated every field into HTML unescaped, which
+# matters more than it looks: a vessel name arrives from the aisstream feed, and anyone
+# with a transmitter can broadcast AIS static data carrying whatever name they like.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def vessels_log(tmp_path, monkeypatch):
+    path = tmp_path / "identified_vessels.html"
+    monkeypatch.setattr(vessel_log, "VESSELS_LOG_FILE", str(path))
+    proxy._init_vessels_log()
+    return path
+
+
+def test_vessels_log_links_an_identified_vessel(vessels_log):
+    proxy._append_vessel_to_log(
+        {"vessel": "VISTA", "mmsi": "538009952", "callsign": "V7A5384"}, "Maas Approach, Vista.")
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+            'target="_blank" rel="noopener noreferrer">VISTA</a>') in vessels_log.read_text(
+                encoding="utf-8")
+
+
+def test_vessels_log_leaves_an_unmatched_row_unlinked(vessels_log):
+    proxy._append_vessel_to_log({"vessel": None, "mmsi": None}, "Maas Approach.")
+    html = vessels_log.read_text(encoding="utf-8")
+    assert "vesselfinder.com" not in html
+    assert 'class="no-match"' in html
+
+
+def test_vessels_log_escapes_a_hostile_ais_vessel_name(vessels_log):
+    """AIS static data is broadcast by anyone; the name reaches this page verbatim."""
+    proxy._append_vessel_to_log(
+        {"vessel": "<script>alert(1)</script>", "mmsi": "1", "callsign": "<img>"}, "hi")
+    html = vessels_log.read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<img>" not in html
+
+
+def test_vessels_log_escapes_the_transcription(vessels_log):
+    proxy._append_vessel_to_log({"vessel": "X", "mmsi": "1"}, "<b>not bold</b> & co")
+    html = vessels_log.read_text(encoding="utf-8")
+    assert "<b>not bold</b>" not in html
+    assert "&lt;b&gt;not bold&lt;/b&gt; &amp; co" in html
 
 
 def test_page_shows_the_resolved_identity_and_a_disagreeing_live_guess():
