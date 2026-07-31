@@ -195,6 +195,68 @@ def test_flag_off_reproduces_the_original_probe_generation(monkeypatch, text):
 
 
 # ---------------------------------------------------------------------------
+# Vessel name matching
+#
+# match_by_name kept the WRatio scorer after _find_ais_hints was moved off it, and hit the
+# same substring failure one layer further down: WRatio falls back to partial_ratio*0.9 when
+# the strings differ in length by 1.5x-8x, so a 2-letter vessel name scores 90 against any
+# longer name containing it. Measured over the live cache, that is 15.1% wrong matches.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def name_cache(monkeypatch):
+    """The cache as it stood when 'RA' was reported, plus a short name worth keeping."""
+    cache = {
+        "ORASUND": {"name": "ORASUND", "mmsi": "220514000", "callsign": "OXBU2"},
+        "RA":      {"name": "RA",      "mmsi": "244729064", "callsign": ""},
+        "AMY":     {"name": "AMY",     "mmsi": "244710116", "callsign": "PD2759"},
+        "NEPTUNE": {"name": "NEPTUNE", "mmsi": "205105000", "callsign": ""},
+    }
+    monkeypatch.setattr(ais, "_vessel_cache", cache)
+    return cache
+
+
+def test_mishearing_matches_the_vessel_not_a_short_name_inside_it(name_cache):
+    """The whole reported bug in one assertion: 'Motortanker Orason' was identified as RA
+    (MMSI 244729064) because 'RA' is a substring of o-RA-son, scoring 90 to ORASUND's 77."""
+    assert proxy.match_by_name("ORASON")["name"] == "ORASUND"
+
+
+@pytest.mark.parametrize("heard", ["ORASON", "ORASUN", "ORA SUND", "MOTORTANKER ORASON"])
+def test_orasund_survives_the_ways_it_gets_misheard(heard, name_cache):
+    assert proxy.match_by_name(heard)["name"] == "ORASUND"
+
+
+@pytest.mark.parametrize("heard", ["ORASON", "MARATHON", "GRACE", "RADAR"])
+def test_a_two_letter_name_is_never_reached_by_partial_match(heard, name_cache):
+    """'RA' must only match someone who actually said RA."""
+    got = proxy.match_by_name(heard)
+    assert got is None or got["name"] != "RA"
+
+
+@pytest.mark.parametrize("heard", ["RA", "ra", "AMY", "amy"])
+def test_short_names_still_match_when_actually_said(heard, name_cache):
+    """The guard is equality-based, not a ban: short vessels are real and do call in."""
+    assert proxy.match_by_name(heard)["name"] == heard.upper()
+
+
+def test_name_match_falls_back_to_word_windows(name_cache):
+    """The SKIP-word fallback path still finds a name buried in a longer phrase."""
+    assert proxy.match_by_name("MOTORTANKER NEPTUNE")["name"] == "NEPTUNE"
+
+
+def test_name_match_returns_nothing_for_ordinary_speech(name_cache):
+    assert proxy.match_by_name("YES GOOD DAY SIR") is None
+
+
+def test_name_filter_can_be_disabled(monkeypatch, name_cache):
+    """AIS_NAME_FILTER=off restores the old WRatio behaviour exactly -- including the bug,
+    which is what makes the revert trustworthy."""
+    monkeypatch.setattr(ais, "AIS_NAME_FILTER", False)
+    assert proxy.match_by_name("ORASON")["name"] == "RA"
+
+
+# ---------------------------------------------------------------------------
 # Prompt echo
 # ---------------------------------------------------------------------------
 
@@ -454,6 +516,40 @@ def test_spelled_out_runs_break_on_ordinary_words():
     assert runs == ["AB", "CD"]
 
 
+# A phonetic word the table does not know does not merely fail to decode -- it breaks the
+# run in half, so the letters either side are lost too. Both spellings below are real: "Gulf"
+# for Golf is how the letter is widely said on an international channel, and "X-ray" is the
+# ordinary written form. Each cost a full identification.
+@pytest.mark.parametrize("callsign,text,expected_runs", [
+    # MONA SWAN (MMSI 219624000, cs OWGJ2) went unidentified: runs were ['OW', 'J2'].
+    ("OWGJ2", "confirm your Callsign Oscar Whiskey Gulf Juliet two.", ["OWGJ2"]),
+    # From the 07-28 reference corpus, ground truth: runs were ['PBU', '1'].
+    ("PBUX", "this is Motor vessel Alaskaborg, Callsign, Papa, Bravo, Uniform, X-ray, "
+             "calling in channel one", None),
+])
+def test_alternate_phonetic_spellings_do_not_split_the_run(callsign, text, expected_runs):
+    assert proxy._callsign_supported_by_text(callsign, text) is True
+    if expected_runs:
+        assert proxy._spelled_out_runs(text) == expected_runs
+
+
+def test_golf_and_gulf_decode_alike():
+    assert (proxy._spelled_out_runs("Oscar Whiskey Golf Juliet two")
+            == proxy._spelled_out_runs("Oscar Whiskey Gulf Juliet two")
+            == ["OWGJ2"])
+
+
+@pytest.mark.parametrize("text", [
+    "we are in the Gulf of Mexico, over",           # the ordinary word, alone
+    "proceeding to the Persian Gulf next week",
+])
+def test_gulf_as_an_ordinary_word_still_yields_no_callsign(text):
+    """Adding a homophone widens the decoder, so pin that it cannot manufacture one: a
+    lone letter is not a callsign, and the length floor is what stops it."""
+    assert proxy._callsign_supported_by_text("G", text) is False
+    assert all(len(run) < 3 for run in proxy._spelled_out_runs(text))
+
+
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
     """Measured: the live pass emitted callsigns for transmissions containing none, and they
     hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
@@ -475,6 +571,64 @@ def test_resolver_input_lists_transmissions_and_candidates():
 def test_resolver_input_says_so_when_there_are_no_candidates():
     text = proxy._render_resolver_input([_chunk(30, "hello", cid=1)], [])
     assert "none" in text.lower()
+
+
+# resolve_conversation itself was never exercised -- only the helpers either side of it --
+# so `re`, used solely on the fenced-reply branch, went missing in the module split and
+# nothing failed. Haiku fences its JSON every time, so in production that branch was the
+# only branch: every conversation raised NameError, was swallowed by the broad `except
+# Exception`, and surfaced as the ordinary-looking "resolver unavailable".
+class _StubClaude:
+    def __init__(self, reply):
+        self._reply = reply
+        self.messages = self
+
+    def create(self, **kwargs):
+        text = self._reply
+        return type("R", (), {"content": [type("C", (), {"text": text})()]})()
+
+
+@pytest.fixture
+def stub_claude(monkeypatch):
+    def _install(reply):
+        monkeypatch.setattr(conversations, "_get_claude", lambda: _StubClaude(reply))
+    return _install
+
+
+_EXCHANGE = ('{"exchanges": [{"chunk_ids": [1, 2], "vessel": "SERENADA", '
+             '"mmsi": "275545000", "evidence": "callsign", "confidence": "high"}]}')
+
+
+@pytest.mark.parametrize("reply", [
+    _EXCHANGE,                                   # bare JSON
+    f"```json\n{_EXCHANGE}\n```",                # what Haiku actually returns
+    f"```\n{_EXCHANGE}\n```",
+    f"Here you go:\n```json\n{_EXCHANGE}\n```\n",
+])
+def test_resolve_conversation_reads_the_reply_however_it_is_wrapped(reply, stub_claude,
+                                                                    monkeypatch):
+    stub_claude(reply)
+    monkeypatch.setattr(ais, "_vessel_cache", {"SERENADA": {"name": "SERENADA",
+                                                            "mmsi": "275545000"}})
+    chunks = [_chunk(30, "Maas Approach, Serenada.", cid=1), _chunk(20, "Roger.", cid=2)]
+    result = proxy.resolve_conversation(chunks)
+    assert [e["vessel"] for e in result] == ["SERENADA"]
+    assert result[0]["evidence"] != "resolver unavailable"
+
+
+def test_resolve_conversation_still_degrades_when_the_reply_is_unusable(stub_claude):
+    """The fallback must stay reachable -- it just must not be the only outcome."""
+    stub_claude("I'm afraid I can't help with that.")
+    result = proxy.resolve_conversation([_chunk(30, "Maas Approach.", cid=1)])
+    assert result[0]["evidence"] == "resolver unavailable"
+
+
+def test_fuzzy_buffer_match_finds_a_restated_name(buffer):
+    """Also lost its import in the split, on a branch no test reached."""
+    buffer.append({"time": datetime.datetime.now(), "vessel": "SERENADA",
+                   "fuzzy": True, "result": {}})
+    entry, index = proxy._find_fuzzy_match_in_buffer("Selenada")
+    assert index == 0 and entry["vessel"] == "SERENADA"
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1225,9 @@ def server():
     ("/conversations", b"Resolved Conversations"),
     ("/api/conversations", b"["),
     ("/identified-vessels", b"<"),
+    # Missing from this list, and so still broken by the same split: the handler read
+    # _cache_lock/_vessel_cache as bare globals and answered 500.
+    ("/api/ais-cache", b"["),
 ])
 def test_get_routes_respond(server, path, expect):
     import urllib.request

@@ -188,9 +188,22 @@ def _apply_sttt_corrections(text: str, mode: str = "maritime") -> str:
 # A callsign is spoken by spelling it out, so a genuine one can be reconstructed from the
 # words. Anything that cannot be is discarded. The asymmetry is deliberate: dropping a real
 # callsign costs some enrichment, while keeping an invented one puts false identity on screen.
+# A spelling this table does not know is worse than it looks: the run breaks in half, so the
+# letters either side are lost too. "Oscar Whiskey Gulf Juliet two" decoded to ['OW', 'J2']
+# rather than ['OWGJ2'], and MONA SWAN (MMSI 219624000, cs OWGJ2) went unidentified with its
+# callsign spelled out twice in the conversation. "gulf" is how the letter is widely said on
+# an international channel, and "x-ray" is simply its ordinary written form -- the hyphen
+# alone was enough to break that one.
+#
+# Variants are added only where a real transmission produced them, because every addition
+# widens the decoder, and the guard below is the last thing standing between a mis-heard word
+# and a false identity on screen. Fuzzy-matching the whole table was measured and rejected:
+# against the 07-28 corpus, no threshold separates "gulf"/"golf" (ratio 75) from "the"/"three"
+# and "to"/"two", which score the same.
 _PHONETIC_LETTERS = {
     "alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C", "delta": "D", "echo": "E",
-    "foxtrot": "F", "golf": "G", "hotel": "H", "india": "I", "juliet": "J", "juliett": "J",
+    "foxtrot": "F", "golf": "G", "gulf": "G", "hotel": "H", "india": "I", "juliet": "J",
+    "juliett": "J", "x-ray": "X",
     "kilo": "K", "lima": "L", "mike": "M", "november": "N", "oscar": "O", "papa": "P",
     "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T", "uniform": "U", "victor": "V",
     "whiskey": "W", "whisky": "W", "xray": "X", "yankee": "Y", "zulu": "Z",

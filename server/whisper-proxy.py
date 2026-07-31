@@ -315,8 +315,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/ais-cache":
             try:
-                with _cache_lock:
-                    entries = list(_vessel_cache.values())
+                # Through the module, not `from ais import _vessel_cache`: the feed thread
+                # rebinds these, so an imported name would freeze a snapshot (see ais.py).
+                with ais._cache_lock:
+                    entries = list(ais._vessel_cache.values())
                 data = json.dumps(entries).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

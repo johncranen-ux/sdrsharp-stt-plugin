@@ -24,8 +24,11 @@ set GROQ_MODEL=whisper-large-v3
 :: -- Vessel-identification filters (all default on) ----------
 :: Uncomment one line to turn that fix off without touching code or git.
 :: AIS_HINT_FILTER    - stops ordinary speech ("good day") being matched to real ships
+:: AIS_NAME_FILTER    - stops a mis-heard name matching a short vessel spelled inside it
+::                      ("Orason" -> RA); off restores the old WRatio scorer at cutoff 80
 :: PROMPT_ECHO_FILTER - drops transcriptions that are the decoding prompt read back
 :: set AIS_HINT_FILTER=off
+:: set AIS_NAME_FILTER=off
 :: set PROMPT_ECHO_FILTER=off
 ::
 :: CONVERSATION_RESOLVER decides vessel identity after each exchange ends, from the whole

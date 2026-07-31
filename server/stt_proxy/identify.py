@@ -10,6 +10,7 @@ never a source of names; and a callsign is only accepted if it can be read back 
 transmission, since an invented one looks up to a real ship.
 """
 
+import datetime
 import json
 import re
 

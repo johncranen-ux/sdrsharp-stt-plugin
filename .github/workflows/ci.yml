@@ -27,7 +27,24 @@ jobs:
         # installable) here, so the runtime requirements are installed explicitly.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install rapidfuzz anthropic websockets certifi pytest
+          python -m pip install rapidfuzz anthropic websockets certifi pytest pyflakes
+
+      - name: Check for undefined names
+        # Splitting whisper-proxy.py into stt_proxy/ left three names used but never
+        # imported. Two sat on branches no test reached (`re` on the fenced-reply path in
+        # resolve_conversation, `rf_fuzz` in the buffer match) and broke the resolver for
+        # every conversation in production. The third, `datetime` in identify.py, is an
+        # import-time error here but invisible on Python 3.14, where PEP 649 defers
+        # annotation evaluation -- so the developer's runtime cannot be relied on to show it.
+        #
+        # Only 'undefined name' fails the build: whisper-proxy.py re-exports a long list of
+        # names purely so the tests can reach them, and pyflakes calls every one of those an
+        # unused import.
+        run: |
+          if python -m pyflakes server/ | grep -E 'undefined name'; then
+            echo "::error::pyflakes found undefined name(s) -- see above"
+            exit 1
+          fi
 
       - name: Run tests
         # No API keys, no GPU, no network: everything external is stubbed in the tests.

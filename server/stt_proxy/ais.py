@@ -187,6 +187,73 @@ def _cache_size() -> int:
         return len(_vessel_cache)
 
 
+# Vessel name matching
+#
+# This carried WRatio long after _find_ais_hints was moved off it, and failed the same way
+# one layer down. WRatio switches to partial_ratio*0.9 when the strings differ in length by
+# 1.5x-8x, so a short cache name scores 90 against any longer name containing it. The
+# reported case: 'Motortanker Orason' was identified as 'RA' (MMSI 244729064), because RA is
+# a substring of o-RA-son and scored 90, while the ship actually being called -- ORASUND,
+# in the cache the whole time -- scored 76.9 and fell under the cutoff. The same path reaches
+# RA from MARATHON, GRACE and RADAR. There are ~85 names of three characters or fewer in the
+# live cache, each a substring landmine.
+#
+# Measured over the 7,640-name live cache by corrupting real names the way STT does and
+# checking whether the matcher recovers the ship that was said (percentages are end-to-end
+# through match_by_name, so they include the fallback path):
+#
+#                            one edit (n=3000)          two edits (n=2893)
+#   WRatio 80 (before)       84.6% right, 14.8% wrong   63.0% right, 30.1% wrong
+#   ratio 76 + guard (now)   91.9% right,  6.7% wrong   80.9% right, 11.1% wrong
+#
+# The two-edit corpus is the class the reported case belongs to, and where the old scorer was
+# losing outright: a single edit to a long name still scores 85+, so the damage concentrates
+# where STT garbles a name twice.
+#
+# 76 is the floor, not a preference: on the two-edit corpus, going from 80 down to 76 gains
+# 163 correct matches for 13 wrong ones, and the next step to 75 costs 42 wrong for 23 right
+# while the one-edit corpus turns bad at exactly the same point. A confident wrong
+# identification is worse here than none, which is what picks the last favourable step rather
+# than the highest recall.
+#
+# The word-window fallback below now shares that cutoff instead of holding its own stricter
+# 88. Measured separately on 2,500 "<type word> <misheard name>" queries -- the shape that
+# actually reaches the fallback, and which the corpus above barely exercised -- every step
+# from 88 down to 76 pays (+555 right for +191 wrong in total) and 74 turns bad at the same
+# point the main cutoff does. Once the type words are stripped, the candidate is an ordinary
+# name query, so there was never a reason for it to face a higher bar than one.
+#
+# Set AIS_NAME_FILTER=off to restore the original behaviour exactly.
+AIS_NAME_FILTER    = os.environ.get("AIS_NAME_FILTER", "on").strip().lower() != "off"
+AIS_NAME_MIN_SCORE = int(os.environ.get("AIS_NAME_MIN_SCORE", "76"))
+AIS_NAME_MIN_TOKEN = int(os.environ.get("AIS_NAME_MIN_TOKEN", "4"))
+
+_NAME_SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
+              "BULKER", "VESSEL", "CONTAINER", "MOTORTANKER", "MOTORVESSEL"}
+
+
+def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
+    """Highest-scoring cache name for `query`, with short names held to equality.
+
+    A name of three characters or fewer is a substring of much of the corpus, so it is
+    accepted only when the speaker said exactly that -- which keeps the real short vessels
+    (AMY, RED, P99...) reachable while removing the class of match that produced 'RA'.
+    """
+    if not AIS_NAME_FILTER:
+        hit = rf_process.extractOne(query, keys, scorer=rf_fuzz.WRatio, score_cutoff=cutoff)
+        return hit[0] if hit else None
+
+    hits = rf_process.extract(query, keys, scorer=rf_fuzz.ratio,
+                              limit=None, score_cutoff=cutoff)
+    best = None
+    for name, score, _ in hits:
+        if len(name.replace(" ", "")) < AIS_NAME_MIN_TOKEN and name != query:
+            continue
+        if best is None or score > best[1]:
+            best = (name, score)
+    return best[0] if best else None
+
+
 def match_by_name(extracted_name: str) -> dict | None:
     if not extracted_name:
         return None
@@ -196,20 +263,19 @@ def match_by_name(extracted_name: str) -> dict | None:
             return None
         keys  = list(_vessel_cache.keys())
         cache = dict(_vessel_cache)
-    hit = rf_process.extractOne(query, keys, scorer=rf_fuzz.WRatio, score_cutoff=80)
+    cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
+    hit = _best_name_match(query, keys, cutoff)
     if hit:
-        return cache[hit[0]]
-    SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
-            "BULKER", "VESSEL", "CONTAINER", "MOTORTANKER", "MOTORVESSEL"}
-    words = [w for w in query.split() if w not in SKIP and len(w) >= 3]
+        return cache[hit]
+    words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
     candidates = []
     for length in range(len(words), 0, -1):
         for start in range(len(words) - length + 1):
             candidates.append(" ".join(words[start:start + length]))
     for candidate in candidates:
-        hit = rf_process.extractOne(candidate, keys, scorer=rf_fuzz.WRatio, score_cutoff=88)
+        hit = _best_name_match(candidate, keys, cutoff if AIS_NAME_FILTER else 88)
         if hit:
-            return cache[hit[0]]
+            return cache[hit]
     return None
 
 
