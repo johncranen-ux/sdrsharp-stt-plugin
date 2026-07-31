@@ -16,6 +16,7 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import threading
 import time
 
@@ -284,6 +285,29 @@ def match_by_callsign(extracted_callsign: str) -> dict | None:
         return None
     with _cache_lock:
         return _callsign_cache.get(extracted_callsign.upper())
+
+
+def match_by_callsign_pattern(pattern: str) -> dict | None:
+    """The one cached vessel whose callsign matches `pattern`, or None.
+
+    Returns None when several match: a pattern that fits more than one ship carries no
+    identification, and picking any of them would be a guess wearing evidence's clothes.
+    """
+    if not pattern:
+        return None
+    try:
+        matcher = re.compile(f"^{pattern}$")
+    except re.error:
+        return None
+    with _cache_lock:
+        entries = list(_callsign_cache.items())
+    found = None
+    for callsign, entry in entries:
+        if matcher.match(callsign):
+            if found is not None:
+                return None
+            found = entry
+    return found
 
 
 # AIS hint matching

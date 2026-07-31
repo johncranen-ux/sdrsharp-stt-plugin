@@ -584,6 +584,37 @@ def test_partial_callsign_pattern_counts_one_wildcard_per_unreadable_word():
     assert got == "5.R.9" and known == 3
 
 
+@pytest.fixture
+def pattern_cache(monkeypatch):
+    cache = {
+        "5LRK9": {"name": "MSC TEMA VIII", "mmsi": "636024193", "callsign": "5LRK9"},
+        "5LCP9": {"name": "SIKINOS",       "mmsi": "111111111", "callsign": "5LCP9"},
+        "PABC":  {"name": "SERENADA",      "mmsi": "275545000", "callsign": "PABC"},
+    }
+    monkeypatch.setattr(ais, "_callsign_cache", cache)
+    return cache
+
+
+def test_pattern_match_returns_the_only_vessel_that_fits(pattern_cache):
+    assert proxy.match_by_callsign_pattern("5.R.9")["name"] == "MSC TEMA VIII"
+
+
+def test_pattern_match_refuses_when_several_vessels_fit(pattern_cache):
+    """Ambiguity is not an identification -- 5L..9 fits both 5LRK9 and 5LCP9."""
+    assert proxy.match_by_callsign_pattern("5L..9") is None
+
+
+@pytest.mark.parametrize("pattern", ["9.Z.4", "", None, "["])
+def test_pattern_match_returns_nothing_when_it_cannot_match(pattern, pattern_cache):
+    """Includes a malformed pattern: never raise into the resolver."""
+    assert proxy.match_by_callsign_pattern(pattern) is None
+
+
+def test_pattern_match_is_anchored_at_both_ends(pattern_cache):
+    """'PAB' must not match 'PABC' -- a callsign is matched whole or not at all."""
+    assert proxy.match_by_callsign_pattern("PAB") is None
+
+
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
     """Measured: the live pass emitted callsigns for transmissions containing none, and they
     hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""
