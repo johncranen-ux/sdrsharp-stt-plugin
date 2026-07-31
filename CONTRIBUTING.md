@@ -55,7 +55,7 @@ A `/conversations` outage caused by exactly this is what prompted the route test
 ## Running the tests
 
 ```bash
-py -m pytest server/tests -q                                              # 275 tests
+py -m pytest server/tests -q                                              # 281 tests
 dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj      # 38 tests
 ```
 

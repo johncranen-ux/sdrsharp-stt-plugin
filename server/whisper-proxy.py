@@ -157,6 +157,7 @@ from stt_proxy.ais import (  # noqa: E402
     _save_cache,
     match_by_callsign,
     match_by_callsign_pattern,
+    match_by_mmsi,
     match_by_name,
 )
 

@@ -32,6 +32,7 @@ set GROQ_MODEL=whisper-large-v3
 :: set AIS_HINT_FILTER=off
 :: set AIS_NAME_FILTER=off
 :: set AIS_PARTIAL_CALLSIGN=off
+:: set RESOLVER_LIVE_CANDIDATES=off
 :: set PROMPT_ECHO_FILTER=off
 ::
 :: CONVERSATION_RESOLVER decides vessel identity after each exchange ends, from the whole

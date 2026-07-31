@@ -313,6 +313,7 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CONVERSATION_RESOLVER` | `on` | Retrospective identification and `/conversations` |
+| `RESOLVER_LIVE_CANDIDATES` | `on` | Offers the resolver the vessel the live pass already matched |
 | `CONVERSATION_GAP_S` | `60` | Silence that closes a window |
 | `CONVERSATION_MAX_CHUNKS` | `40` | Hard cap on window size |
 | `ANTHROPIC_API_KEY` | — | Unset disables identification entirely |

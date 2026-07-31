@@ -22,7 +22,7 @@ import threading
 from rapidfuzz import fuzz as rf_fuzz
 
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
-                           match_by_callsign, match_by_callsign_pattern)
+                           match_by_callsign, match_by_callsign_pattern, match_by_mmsi)
 from stt_proxy.claude import _get_claude
 from stt_proxy.corrections import _callsign_supported_by_text, _partial_callsign_pattern
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
@@ -249,10 +249,56 @@ Rules:
 5. A candidate marked "partial callsign" was matched on the characters that survived a
    garbled spelling, and separately on a name spoken in the exchange. Two weak signals that
    agree: weaker than an exact callsign, stronger than name resemblance alone.
-6. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are never the vessel.
-7. "evidence" is a short quote from the transmissions, or a one-line reason. Keep it factual.
-8. Do NOT return transcriptions. You are identifying speakers, not transcribing.
+6. A candidate marked "live pass" is what the per-transmission pass matched for a single
+   turn, before the rest of the exchange was known. Treat it as a lead, not as evidence: it
+   is often wrong on a garbled opening call, which is why this pass exists. Weigh it against
+   the transmissions like any other candidate.
+7. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are never the vessel.
+8. "evidence" is a short quote from the transmissions, or a one-line reason. Keep it factual.
+9. Do NOT return transcriptions. You are identifying speakers, not transcribing.
 """
+
+
+# Candidates from the live pass
+#
+# The live pass already matched a vessel against the whole AIS cache using the complete
+# extracted name. This function ignored that and rebuilt its list from unigram and bigram
+# probes, which is strictly less information -- a three-word name cannot even be probed
+# whole. "Santa Isabel Maas" hinted ISABEL at 100, an exact match on one substring word,
+# while SANTA ISABEL MAERSK -- the ship actually calling, cached the whole time -- reached
+# only 77.4 as the bigram "SANTA ISABEL", under a cutoff of 85. The resolver was handed a
+# list without the right ship on it and, told to choose only from the list, picked ISABEL
+# and called it high confidence. It was right to; the list was wrong.
+#
+# Measured over 24 stored conversations that had a live match, that vessel was missing from
+# the candidate list in 9: 7 resolved to nobody, 2 resolved to a different ship. (Counted
+# after discarding live values of three characters or fewer, which are artifacts of the
+# WRatio bug fixed the same day and would no longer be produced.)
+#
+# This adds a candidate, never a verdict. A live guess is frequently wrong on a garbled
+# opening call -- that is the entire reason this pass exists -- so it is marked as a lead
+# and weighed against the exchange like anything else.
+#
+# Set RESOLVER_LIVE_CANDIDATES=off to restore the previous behaviour.
+RESOLVER_LIVE_CANDIDATES = os.environ.get("RESOLVER_LIVE_CANDIDATES", "on").strip().lower() != "off"
+
+
+def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
+    """Vessels the per-transmission pass already matched against AIS in this window."""
+    found: dict[str, dict] = {}
+    if not RESOLVER_LIVE_CANDIDATES:
+        return found
+    for chunk in chunks:
+        mmsi = chunk.get("live_mmsi")
+        if not mmsi or mmsi in found:
+            continue
+        entry = match_by_mmsi(mmsi)
+        if not entry:
+            continue
+        marked = dict(entry)
+        marked["via_live_match"] = True
+        found[mmsi] = marked
+    return found
 
 
 # Partial-callsign corroboration
@@ -332,6 +378,12 @@ def _resolver_candidates(chunks: list[dict]) -> list[dict]:
             entry["via_callsign"] = True
             candidates[ais["mmsi"]] = entry
 
+    # Ahead of the hints: the live pass matched a complete extracted name against the whole
+    # cache, where a hint is only a one- or two-word probe.
+    for mmsi, entry in _live_match_candidates(chunks).items():
+        if mmsi not in candidates:
+            candidates[mmsi] = entry
+
     for chunk in chunks:
         for hint in _find_ais_hints(chunk.get("text", "")):
             mmsi = hint.get("mmsi")
@@ -364,6 +416,8 @@ def _render_resolver_input(chunks: list[dict], candidates: list[dict]) -> str:
                 bits.append("** via callsign, exact match **")
             elif c.get("via_partial_callsign"):
                 bits.append(f"** partial callsign {c['partial_pattern']}, name corroborated **")
+            elif c.get("via_live_match"):
+                bits.append("** live pass matched this name **")
             lines.append("  - " + " ".join(bits))
     else:
         lines.append("  (none -- every vessel must then be null)")

@@ -325,12 +325,13 @@ def buffer(monkeypatch):
 # Conversation windowing
 # ---------------------------------------------------------------------------
 
-def _chunk(seconds_ago, text="", channel="160,650", cid=None, callsign=None, vessel=None):
+def _chunk(seconds_ago, text="", channel="160,650", cid=None, callsign=None, vessel=None,
+           live_mmsi=None):
     return {
         "id": cid if cid is not None else seconds_ago,
         "time": datetime.datetime.now() - datetime.timedelta(seconds=seconds_ago),
         "channel": channel, "text": text, "callsign": callsign,
-        "live_vessel": vessel, "live_mmsi": None,
+        "live_vessel": vessel, "live_mmsi": live_mmsi,
     }
 
 
@@ -689,6 +690,69 @@ def test_partial_callsign_does_not_override_an_exact_match(monkeypatch, partial_
 def test_partial_callsign_can_be_disabled(monkeypatch, partial_caches):
     monkeypatch.setattr(conversations, "AIS_PARTIAL_CALLSIGN", False)
     assert proxy._resolver_candidates([_chunk(30, _REAL_CALL, cid=1)]) == []
+
+
+# The live pass already matched a vessel against the whole AIS cache using the complete
+# extracted name. _resolver_candidates never looked at it, and rebuilt its list from
+# unigram/bigram probes instead -- strictly less information. Measured over 24 stored
+# conversations that had a live match, that vessel was missing from the candidate list in 9
+# of them: 7 resolved to nobody, 2 resolved to a different ship.
+
+_SANTA = {"name": "SANTA ISABEL MAERSK", "mmsi": "219077000", "callsign": "OXWU2", "type": 71}
+_ISABEL = {"name": "ISABEL", "mmsi": "244700279", "callsign": "PB7708", "type": 79}
+
+
+@pytest.fixture
+def santa_caches(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {"SANTA ISABEL MAERSK": _SANTA,
+                                               "ISABEL": _ISABEL})
+    monkeypatch.setattr(ais, "_callsign_cache", {"OXWU2": _SANTA, "PB7708": _ISABEL})
+
+
+def test_the_live_match_becomes_a_candidate(santa_caches):
+    """The reported miss: 'Santa Isabel Maas' hinted ISABEL at 100 (an exact substring word)
+    while the real ship reached only 77.4 as a bigram, under a cutoff of 85."""
+    chunks = [_chunk(30, "this is Santa Isabel Maas, Santa Isabel Maas.", cid=1,
+                     vessel="SANTA ISABEL MAERSK", live_mmsi="219077000")]
+    cands = proxy._resolver_candidates(chunks)
+    by_mmsi = {c["mmsi"]: c for c in cands}
+    assert "219077000" in by_mmsi, "the vessel the live pass matched must be offered"
+    assert by_mmsi["219077000"]["via_live_match"] is True
+
+
+def test_live_candidate_does_not_displace_an_exact_callsign(santa_caches):
+    """An exact callsign is stronger; the live guess must not overwrite its mark."""
+    chunks = [_chunk(30, "callsign oscar xray whiskey uniform two", cid=1, callsign="OXWU2",
+                     vessel="ISABEL", live_mmsi="244700279")]
+    cands = proxy._resolver_candidates(chunks)
+    exact = [c for c in cands if c["mmsi"] == "219077000"]
+    assert exact and exact[0]["via_callsign"] is True
+    assert "via_live_match" not in exact[0]
+
+
+def test_live_candidate_is_skipped_without_an_mmsi(santa_caches):
+    """A live guess that never matched AIS is a bare string -- nothing to offer."""
+    chunks = [_chunk(30, "Maas Approach, over.", cid=1, vessel="SOMETHING", live_mmsi=None)]
+    assert [c for c in proxy._resolver_candidates(chunks) if c.get("via_live_match")] == []
+
+
+def test_live_candidate_is_skipped_when_the_mmsi_left_the_cache(santa_caches):
+    chunks = [_chunk(30, "Maas Approach, over.", cid=1, vessel="GONE", live_mmsi="999999999")]
+    assert [c for c in proxy._resolver_candidates(chunks) if c.get("via_live_match")] == []
+
+
+def test_live_candidates_can_be_disabled(monkeypatch, santa_caches):
+    monkeypatch.setattr(conversations, "RESOLVER_LIVE_CANDIDATES", False)
+    chunks = [_chunk(30, "this is Santa Isabel Maas.", cid=1,
+                     vessel="SANTA ISABEL MAERSK", live_mmsi="219077000")]
+    assert [c for c in proxy._resolver_candidates(chunks) if c.get("via_live_match")] == []
+
+
+def test_live_candidate_is_marked_in_the_resolver_prompt():
+    text = proxy._render_resolver_input(
+        [_chunk(30, "this is Santa Isabel Maas.", cid=1)],
+        [dict(_SANTA, via_live_match=True)])
+    assert "live pass matched this name" in text
 
 
 def test_the_reported_conversation_now_yields_a_candidate(monkeypatch):
@@ -1449,7 +1513,14 @@ def _serve(handler_cls):
 
 
 @pytest.fixture
-def server():
+def server(tmp_path, monkeypatch):
+    # /identified-vessels serves a file from disk. Left pointing at the real one, this test
+    # raced a running proxy rewriting it and timed out roughly one run in three. Patched on
+    # `proxy`, not on vessel_log: do_GET reads the name imported into whisper-proxy's own
+    # namespace, so patching the owning module would not be seen (see CONTRIBUTING.md).
+    log = tmp_path / "identified_vessels.html"
+    log.write_text("<html><body><table id='vessels'></table></body></html>", encoding="utf-8")
+    monkeypatch.setattr(proxy, "VESSELS_LOG_FILE", str(log))
     srv, base = _serve(proxy.ProxyHandler)
     yield base
     srv.shutdown()

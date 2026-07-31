@@ -287,6 +287,45 @@ adds a *candidate*; Claude still adjudicates.
 
 Design and measurement method: `docs/superpowers/specs/2026-07-31-partial-callsign-corroboration-design.md`.
 
+### The resolver ignored what the live pass already knew (2026-07-31)
+
+*Santa Isabel Maas* was resolved as **ISABEL** — a 90 m Dutch coaster — while the live pass
+had already matched **SANTA ISABEL MAERSK** correctly. The resolver, whose purpose is to
+*correct* unreliable live guesses, replaced a right answer with a wrong one.
+
+`_hint_probes` generates only unigrams and bigrams, so a three-word name cannot be probed
+whole:
+
+| probe | vs `ISABEL` | vs `SANTA ISABEL MAERSK` |
+|---|---|---|
+| `ISABEL` | **100.0** | 48.0 |
+| `SANTA ISABEL` | 66.7 | 77.4 (cutoff is 85) |
+
+The real ship never entered the candidate list; `ISABEL` matched one substring word exactly.
+Prompt rule 2 forbids choosing a vessel that is not on the list, so Claude picked the only
+vessel-shaped option and marked it high confidence. It was right to — the list was wrong.
+
+`_resolver_candidates` built its list from callsigns and hint probes and **never read
+`live_mmsi`**, which the journal stores on every chunk. The live pass runs `match_by_name`
+over the whole cache with the complete extracted name — strictly more information than a
+bigram probe. It now seeds the candidate list, ahead of hints and behind exact callsigns.
+
+Measured over 24 stored conversations that had a live match, that vessel was absent from the
+candidate list in **9**: 7 resolved to nobody, 2 to a different ship. (Counted after
+discarding live values of ≤3 characters, which are artifacts of the `WRatio` bug fixed the
+same day.) It adds a candidate, never a verdict — a live guess is often wrong on a garbled
+opening call, which is the whole reason this pass exists, so it is marked as a lead.
+Switch: `RESOLVER_LIVE_CANDIDATES`.
+
+**Trigram probes were measured and not adopted.** Over 366 real transmissions they add 20
+distinct probe→vessel pairs (131 → 151, +15%) and make only 4 additional three-word names
+reachable. They do fix this case (`SANTA ISABEL MAAS` → `SANTA ISABEL MAERSK` scores 88.9)
+and produce some genuine corrections (`JOHN P ESBERGER` → `JOHN T. ESSBERGER`,
+`LADY MARY FISHER` → `LADY MARIA FISHER`), but also clear errors — `COSTCO SHIPPING GEMINI`
+→ `COSCO SHIPPING SEINE` is a different ship. Seeding from the live match fixes the same case
+with no new fuzzy surface, so it was preferred. Trigrams remain a reasonable second step if
+three-word names keep being missed, but would need the widening measured properly first.
+
 ### Both pages link out (2026-07-31)
 
 `/conversations` and `/identified-vessels` render an identified vessel as a link to

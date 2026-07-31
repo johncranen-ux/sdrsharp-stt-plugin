@@ -287,6 +287,23 @@ def match_by_callsign(extracted_callsign: str) -> dict | None:
         return _callsign_cache.get(extracted_callsign.upper())
 
 
+def match_by_mmsi(mmsi: str) -> dict | None:
+    """The cached vessel with this MMSI, or None.
+
+    A scan rather than a dict lookup: the cache is keyed by name because that is what every
+    other path searches by, and 7,000-odd entries is nothing next to the fuzzy matching
+    happening either side of this call.
+    """
+    if not mmsi:
+        return None
+    wanted = str(mmsi)
+    with _cache_lock:
+        for entry in _vessel_cache.values():
+            if entry.get("mmsi") == wanted:
+                return entry
+    return None
+
+
 def match_by_callsign_pattern(pattern: str) -> dict | None:
     """The one cached vessel whose callsign matches `pattern`, or None.
 
