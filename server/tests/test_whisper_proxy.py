@@ -691,6 +691,22 @@ def test_partial_callsign_can_be_disabled(monkeypatch, partial_caches):
     assert proxy._resolver_candidates([_chunk(30, _REAL_CALL, cid=1)]) == []
 
 
+def test_the_reported_conversation_now_yields_a_candidate(monkeypatch):
+    """12:09 on 2026-07-31: MSC TEMA VIII spelled its callsign out and the resolver was
+    handed an empty candidate list, so 'unidentified' was the only answer available."""
+    monkeypatch.setattr(ais, "_callsign_cache", {"5LRK9": _TEMA})
+    monkeypatch.setattr(ais, "_vessel_cache", {"MSC TEMA VIII": _TEMA})
+    window = [
+        _chunk(60, "Maas Approach, Maas Approach, MST, FEMA 8, good afternoon sir.", cid=1),
+        _chunk(50, _REAL_CALL, cid=2),
+        _chunk(40, "Maas Approach, bring your message.", cid=3),
+    ]
+    rendered = proxy._render_resolver_input(window, proxy._resolver_candidates(window))
+    assert "MSC TEMA VIII (MMSI:636024193)" in rendered
+    assert "partial callsign 5.R.9" in rendered
+    assert "(none" not in rendered
+
+
 def test_partial_candidate_is_marked_in_the_resolver_prompt():
     text = proxy._render_resolver_input(
         [_chunk(30, _REAL_CALL, cid=1)],
