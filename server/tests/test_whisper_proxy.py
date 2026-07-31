@@ -638,6 +638,67 @@ def test_resolver_input_says_so_when_there_are_no_candidates():
     assert "none" in text.lower()
 
 
+# Partial-callsign corroboration
+#
+# MSC TEMA VIII spelled 5LRK9 out as "five Lima Romeo Kilo nine"; Whisper heard "five DEMA
+# Romeo, clear nine". The exact lookup could not fire, so the resolver was handed an empty
+# candidate list and "unidentified" was the only answer available to it.
+
+_TEMA = {"name": "MSC TEMA VIII", "mmsi": "636024193", "callsign": "5LRK9", "type": 91}
+_REAL_CALL = ("Good afternoon, this is Motortanker MSC DEMA eight, "
+              "Callsign five DEMA Romeo, clear nine.")
+
+
+@pytest.fixture
+def partial_caches(monkeypatch):
+    monkeypatch.setattr(ais, "_callsign_cache", {"5LRK9": _TEMA})
+    monkeypatch.setattr(ais, "_vessel_cache", {"MSC TEMA VIII": _TEMA})
+    return _TEMA
+
+
+def test_partial_callsign_becomes_a_candidate_when_the_name_agrees(partial_caches):
+    """The reported miss: MSC TEMA VIII was in the cache and offered as no candidate."""
+    cands = proxy._resolver_candidates([_chunk(30, _REAL_CALL, cid=1)])
+    assert [c["name"] for c in cands] == ["MSC TEMA VIII"]
+    assert cands[0]["via_partial_callsign"] is True
+    assert cands[0]["partial_pattern"] == "5.R.9"
+
+
+def test_partial_callsign_is_refused_when_no_name_corroborates(partial_caches):
+    """The pattern alone is a guess. Without a name that agrees, offer nothing."""
+    text = "Maas Approach, this is Wilson Durness, Callsign five DEMA Romeo, clear nine."
+    assert proxy._resolver_candidates([_chunk(30, text, cid=1)]) == []
+
+
+def test_partial_callsign_does_not_override_an_exact_match(monkeypatch, partial_caches):
+    """An exact callsign is stronger evidence and must keep its mark.
+
+    Both spellings must reach the same MMSI for this to test anything: one turn spells the
+    callsign cleanly, a later one garbles it, and the vessel must stay marked exact.
+    """
+    monkeypatch.setattr(ais, "_callsign_cache", {"5LRK9": _TEMA, "PABC": _TEMA})
+    cands = proxy._resolver_candidates([
+        _chunk(40, "callsign papa alpha bravo charlie", cid=1, callsign="PABC"),
+        _chunk(30, _REAL_CALL, cid=2),
+    ])
+    assert len(cands) == 1
+    assert cands[0]["via_callsign"] is True
+    assert "via_partial_callsign" not in cands[0]
+
+
+def test_partial_callsign_can_be_disabled(monkeypatch, partial_caches):
+    monkeypatch.setattr(conversations, "AIS_PARTIAL_CALLSIGN", False)
+    assert proxy._resolver_candidates([_chunk(30, _REAL_CALL, cid=1)]) == []
+
+
+def test_partial_candidate_is_marked_in_the_resolver_prompt():
+    text = proxy._render_resolver_input(
+        [_chunk(30, _REAL_CALL, cid=1)],
+        [{"name": "MSC TEMA VIII", "mmsi": "636024193", "callsign": "5LRK9",
+          "via_partial_callsign": True, "partial_pattern": "5.R.9"}])
+    assert "partial callsign 5.R.9, name corroborated" in text
+
+
 # resolve_conversation itself was never exercised -- only the helpers either side of it --
 # so `re`, used solely on the fenced-reply branch, went missing in the module split and
 # nothing failed. Haiku fences its JSON every time, so in production that branch was the
