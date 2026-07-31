@@ -209,6 +209,97 @@ score** — there is no ground truth for vessel identity — only what changed, 
 py server/replay_sessions.py --captures "D:\SDR\...\captures\2026-07-28" --compare
 ```
 
+## Vessel identification, second pass (2026-07-31)
+
+One report — a transmission naming *Motortanker Orason* displayed as `[RA]` — turned up four
+independent faults on the same path. Each is behind its own switch where it changes matching.
+
+| Env var | Default | Turns off |
+|---|---|---|
+| `AIS_NAME_FILTER` | `on` | Name-match tightening (restores `WRatio` at cutoff 80 exactly) |
+| `AIS_PARTIAL_CALLSIGN` | `on` | Partial-callsign corroboration |
+
+**1. `WRatio` again, one layer down.** The 07-30 work moved `_find_ais_hints` off `WRatio`
+but left `match_by_name` on it, where it failed identically: `WRatio` falls back to
+`partial_ratio * 0.9` when lengths differ by 1.5×–8×, so a two-letter cache name scores 90
+against any longer name containing it. `RA` is a substring of o-**RA**-son and beat `ORASUND`
+— the ship actually being called, cached the whole time — which scored 76.9. The same path
+reached `RA` from `MARATHON`, `GRACE` and `RADAR`; the live cache holds around a hundred names
+of three characters or fewer at any time, each a substring landmine.
+
+Now `fuzz.ratio` at cutoff 76, with names of ≤3 characters accepted only on equality. Measured
+end-to-end over the live cache by corrupting real names the way STT does:
+
+| | one edit (n=3000) | two edits (n=2893) |
+|---|---|---|
+| `WRatio` 80 (before) | 84.6% right, 14.8% wrong | 63.0% right, 30.1% wrong |
+| `ratio` 76 + guard | **91.9% right, 6.7% wrong** | **80.9% right, 11.1% wrong** |
+
+76 is the floor, not a preference: 80→76 gains 163 correct for 13 wrong on the two-edit
+corpus, and the next step to 75 costs 42 wrong for 23 right while the one-edit corpus turns
+bad at the same point.
+
+**2. An unknown phonetic word splits the run.** `Oscar Whiskey Gulf Juliet two` decoded to
+`['OW', 'J2']` rather than `['OWGJ2']`, because `gulf` was not in the table — and an unreadable
+word does not merely fail, it breaks the run and loses the letters either side. MONA SWAN
+(MMSI 219624000, cs OWGJ2) went unidentified with its callsign spelled out twice. `X-ray` was
+broken identically by its hyphen. Only these two spellings were added: every addition widens
+the guard, and no fuzzy threshold separates `gulf`/`golf` from `the`/`three`, which score the
+same (75) against the corpus.
+
+**3. The resolver had never run.** Splitting `whisper-proxy.py` into `stt_proxy/` left five
+names used but never imported. `re` sits on the fenced-reply branch of `resolve_conversation`,
+and Haiku fences its JSON every time, so *every* conversation raised `NameError`, was
+swallowed by the broad `except Exception`, and surfaced as the innocuous-looking "resolver
+unavailable". `rf_fuzz` and the `/api/ais-cache` globals sat on branches no test reached.
+`datetime` in `identify.py` is an import-time error on Python ≤3.13 but invisible on 3.14,
+where PEP 649 defers annotation evaluation — so CI could not collect the suite at all while
+everything looked green locally.
+
+Two lessons, both now enforced: `resolve_conversation` itself had no test (only the helpers
+either side of it), and CI has no linter. Both fixed — the resolver is covered across bare,
+fenced and prose-wrapped replies, and CI fails on any `pyflakes` **undefined name**. This was
+the third time the split shipped a missing name; the route tests were themselves added after
+it broke `/conversations`.
+
+**4. Partial-callsign corroboration.** MSC TEMA VIII spelled `5LRK9` as *five Lima Romeo Kilo
+nine*; Whisper heard *five DEMA Romeo, clear nine*. `match_by_callsign` is an exact dictionary
+lookup, so two wrong characters of five meant no match and the vessel went unidentified —
+`_resolver_candidates` returned an empty list, leaving the resolver no answer but null.
+
+The surviving characters still carry information: anchored on the word "callsign", they decode
+to the pattern `5.R.9`, which fits exactly one of the 7,000-odd cached callsigns. Anchoring is
+what makes it safe — scanning the whole transmission picks up the `eight` in "MSC DEMA eight"
+and yields `8.5.R.9`, which is wrong.
+
+Uniqueness alone is *not* sufficient. Measured by garbling real callsigns at 20% per spoken
+character (n=2000): unique-match-only gives 916 right / 1 wrong, but fires on an unrelated
+ship **8.0%** of the time when the true vessel is not in the callsign table at all — roughly
+500 cached vessels carry none. That is a confident false identity, the failure this pipeline
+weighs most heavily. Requiring the vessel's *name* to corroborate independently
+(`fuzz.ratio ≥ 60` against the `_hint_probes` of the window) takes wrong matches to **0** and
+the uncached case to **0.0%**. The threshold is 60 because the reported transmission scores
+66.7 (`MSC DEMA` vs `MSC TEMA VIII`) and 75 would have rejected it.
+
+It runs last of the three candidate passes, never displaces a stronger match, and is marked in
+the prompt so the resolver ranks it below an exact callsign and above name resemblance. It
+adds a *candidate*; Claude still adjudicates.
+
+Design and measurement method: `docs/superpowers/specs/2026-07-31-partial-callsign-corroboration-design.md`.
+
+### Both pages link out (2026-07-31)
+
+`/conversations` and `/identified-vessels` render an identified vessel as a link to
+VesselFinder, keyed on **MMSI** rather than name — names are neither unique nor reliably
+heard, and the MMSI is what the AIS match actually established. A vessel with no MMSI renders
+as plain text rather than a link that would go nowhere.
+
+Escaping and the link live in `stt_proxy/markup.py`, shared by both pages because
+`vessel_log.py` is presentation-only and must not import the resolver to reach a helper. That
+module previously interpolated every field into HTML unescaped, which matters more than it
+looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
+anyone with a transmitter in the Rotterdam box.
+
 ## Known limitations
 
 - **~36% pooled word error rate even in the best configuration** (35.9%, see the

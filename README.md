@@ -26,11 +26,14 @@ works on any voice channel.
 - **Two interchangeable backends** — Groq's hosted Whisper (default, **no GPU required**) or
   a local whisper.cpp server, switched by one environment variable
 - **Domain corrections** for terms the decoder reliably mishears
-- **Vessel identification** from speech, matched against a live AIS feed for MMSI and type
+- **Vessel identification** from speech, matched against a live AIS feed for MMSI and type,
+  and linked out to VesselFinder
 - **Retrospective conversation resolution** — exchanges are identified after they end, so a
   garbled opening call is resolved by a clearer later turn or a spelled-out callsign
+- **Partial-callsign matching** — a callsign half-lost to STT still identifies the ship when
+  the surviving characters fit exactly one vessel and a spoken name agrees
 - **Benchmark and replay tooling** for measuring accuracy on your own recordings
-- **254 tests** covering the DSP, the proxy pipeline and the identification logic
+- **275 tests** covering the DSP, the proxy pipeline and the identification logic
 
 ## Getting started
 

@@ -250,6 +250,13 @@ was, the evidence it used, and every transmission verbatim. Where the live trans
 guessed a different vessel, that guess is shown alongside — so corrections are visible
 rather than silently applied.
 
+On both HTML pages an identified vessel's name is a link to its
+[VesselFinder](https://www.vesselfinder.com/) page, looked up by MMSI. A vessel matched by
+name alone, with no MMSI, is shown as plain text — there is nothing reliable to look up.
+
+`/identified-vessels` is an append-only file, so rows written before this was added stay
+unlinked; new transmissions get links as they arrive.
+
 Also available:
 
 | URL | What |
@@ -290,8 +297,16 @@ All are environment variables, normally set in `start-all.bat`.
 |---|---|---|
 | `AIS_HINT_FILTER` | `on` | Stops ordinary speech being matched to real ships |
 | `AIS_HINT_MIN_SCORE` | `85` | Similarity needed for an AIS name hint |
+| `AIS_NAME_FILTER` | `on` | Stops a misheard name matching a short vessel spelled inside it ("Orason" → `RA`) |
+| `AIS_NAME_MIN_SCORE` | `76` | Similarity needed to match a spoken name to an AIS vessel |
+| `AIS_PARTIAL_CALLSIGN` | `on` | Identifies a vessel from a partly-garbled spelled-out callsign when a spoken name agrees |
+| `PARTIAL_CALLSIGN_MIN_NAME_SCORE` | `60` | Name similarity required to accept a partial-callsign match |
 | `PROMPT_ECHO_FILTER` | `on` | Drops transcriptions that are the prompt read back |
 | `MAAS_FUZZ_THRESHOLD` | `70` | Fuzzy matching for "Maas" before "Approach" |
+
+Turning `AIS_NAME_FILTER` or `AIS_PARTIAL_CALLSIGN` off restores the previous behaviour
+exactly, which is what makes them a usable rollback rather than a rough approximation. The
+defaults were measured, not chosen — see `docs/design-notes.md`.
 
 ### Conversation resolution
 

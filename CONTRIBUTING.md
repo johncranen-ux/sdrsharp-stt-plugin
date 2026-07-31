@@ -28,6 +28,7 @@ server/
     identify.py            identifying the vessel in one transmission
     conversations.py       journal, windowing, retrospective resolver, page
     vessel_log.py          the /identified-vessels HTML log
+    markup.py              escaping and the VesselFinder link, shared by both pages
     claude.py              shared Anthropic client
   bench.py, stress.py, replay_sessions.py, make_references.py   tooling
   tests/                   pytest suite
@@ -54,7 +55,7 @@ A `/conversations` outage caused by exactly this is what prompted the route test
 ## Running the tests
 
 ```bash
-py -m pytest server/tests -q                                              # 216 tests
+py -m pytest server/tests -q                                              # 275 tests
 dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj      # 38 tests
 ```
 
