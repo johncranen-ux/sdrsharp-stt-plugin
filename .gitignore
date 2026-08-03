@@ -48,6 +48,12 @@ bench-report*.html
 stress-*.json
 captures/
 
+# bench_correct.py output. Both carry transcript text and fall under the same restriction
+# as references*.txt above: the results files embed every corrected transcript per clip,
+# and the cache holds each model's raw reply verbatim.
+bench-correct-results*.json
+bench-correct-cache/
+
 # Secrets — never commit API keys
 start-all.bat
 

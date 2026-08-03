@@ -82,10 +82,20 @@ jobs:
           echo "no credential-shaped literals found"
 
       - name: Fail if any reference transcript is committed
+        # Every pattern here is a file family that carries received radio traffic verbatim.
+        # references*.txt was the original; the bench_correct.py artefacts were added after a
+        # correction bake-off produced two more -- the results files embed each corrected
+        # transcript per clip, and the cache stores every model reply raw. The gate is a list
+        # of known-bad names rather than a content scan, so it must grow whenever a new kind
+        # of output starts holding transcripts.
         run: |
-          bad=$(git ls-files 'server/references*.txt' || true)
+          bad=$(git ls-files \
+                  'server/references*.txt' \
+                  'server/bench-results*.json' \
+                  'server/bench-correct-results*.json' \
+                  'server/bench-correct-cache/*' || true)
           if [ -n "$bad" ]; then
-            echo "::error::Reference transcripts committed: $bad"
+            echo "::error::Files containing received radio traffic are committed: $bad"
             echo "No transcript file belongs in the repository. See docs/user-manual.md."
             exit 1
           fi
