@@ -31,24 +31,76 @@ Correct fuzzy STT errors using maritime context. Return ONLY raw JSON, no markdo
 
 Rules:
 1. Shore stations (Maas Approach, Rotterdam VTS, Pilot) are NOT vessels.
-2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station addresses a vessel.
+2. Extract vessel names: after "this is", "calling", vessel type words, or when shore station
+   addresses a vessel. A type word is a marker for where the name starts, not part of it:
+   "this is Motor Vessel GH Nightingale" gives the vessel "GH Nightingale", not "Motor Vessel
+   GH Nightingale". The type belongs in "vessel_type".
 3. Extract a callsign ONLY when the transmission spells one out -- phonetically
    ("Juliet Lima Sierra Romeo"), as characters ("9 Hotel Alpha six one"), or verbatim
    ("9HF5093"). If no callsign was spoken, return null. Do not guess one from the vessel
    name, from the AIS hints, or from anything else: a callsign nobody said is worse than
    no callsign, because it looks up to a real ship.
-4. Correct STT errors: mass->maas, draft->draught, boys->buoys, motor tanker->Motortanker.
-5. vessel_type: tanker/bulker/container/tug/ferry/general_cargo/passenger/yacht/pilot/null.
-6. [AIS: ...] hints are nearby vessels, NOT a list of who is speaking. Only use a hint to
+4. vessel_type: tanker/bulker/container/tug/ferry/general_cargo/passenger/yacht/pilot/null.
+5. [AIS: ...] hints are nearby vessels, NOT a list of who is speaking. Only use a hint to
    fix the spelling of a name the speaker actually said. Never take a vessel name from the
    hints alone: if the transmission does not name a vessel, return null even when hints
    are present. "Yes, good day sir" names no vessel, whatever the hints say.
-7. "text" is a transcription of THIS transmission and nothing else. Fix mis-heard words,
+6. "text" is a transcription of THIS transmission and nothing else. Fix mis-heard words,
    but never add content: no vessel name that was not spoken here, no completing of a
    half-finished sentence. If the whole transmission was "Maas Approach." then "text" is
    "Maas Approach." -- NOT "Maas Approach, <vessel>." Identifying the speaker is what the
    "vessel" field is for.
+
+Correcting "text":
+The audio is noisy FM and the speakers are mostly non-native English speakers (Dutch,
+Greek, Filipino, Russian, Indian, Turkish). Correct only what is clearly mis-recognised:
+- Rotterdam names: Maas Approach, Maas Center, Rotterdam VTS, Pilot Rotterdam, Botlek,
+  Europoort, Maasvlakte, Steenbank, Hoek van Holland, Caland, Beneluxhaven, Scheveningen,
+  Recon buoy, Echo 1 / Echo 3 buoys, Deepwater Route.
+- Procedure words: over, out, roger, wilco, standing by, stand by, copy, understood,
+  say again, this is.
+- NATO phonetic alphabet: Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliet
+  Kilo Lima Mike November Oscar Papa Quebec Romeo Sierra Tango Uniform Victor Whiskey
+  X-ray Yankee Zulu.
+- Maritime vocabulary: draught (not draft), buoy (not boy), anchor, heave up, pilot ladder,
+  starboard, port side, inbound, outbound, southbound, motor vessel, Motortanker, callsign,
+  ETA, pilot boarding ground.
+
+Then:
+a. Make the smallest edit that fixes a clear error. If a word is merely unusual, or you are
+   unsure what was meant, leave it exactly as it is.
+b. Never remove content. Every utterance in the transmission must survive into "text", even
+   if it is garbled, redundant or a filler. "Okay, understood. One five zero zero, Pilot."
+   keeps its "Okay, understood." -- dropping a phrase is as wrong as inventing one.
+c. Keep the speaker's own words, word order, grammar and disfluencies. You are not
+   rewriting or improving the English.
+d. Numbers stay in exactly the form they were transcribed, in both directions: do not turn
+   "one eight zero zero" into "1800", and do not turn "4.7" into "four point seven".
+e. The channels here are "zero one" (channel 01, the Maas Approach working channel) and
+   "one six" (channel 16, the calling channel). Vessels are routinely told to stand by on
+   both and say so as "zero one, one six" or "one and one six". That is correct as
+   transcribed: never rewrite it to "channel one six", never drop the "zero one", and never
+   insert the word "channel" where it was not spoken. Only read digits as a channel when the
+   transmission is about standing by or switching -- a time, a draught or an ETA containing
+   similar digits ("one five zero zero, pilot") is not a channel and must be left alone.
+f. A transmission may be a single word, a fragment, or badly garbled. Correct it as given
+   and return it anyway; never ask for input and never comment on the transmission.
 """
+
+
+# The schema asks for "<name or null>", and the model sometimes answers with the *string*
+# "null" rather than a JSON null. A string is truthy, so it survives every `or` fallback
+# downstream and reaches the display as a real value -- "[GH NIGHTINGALE/null]" in the plugin,
+# and a vessel literally named "None" would be looked up against AIS. Coerced here, at the one
+# point every field passes through, rather than guarded at each use.
+_PLACEHOLDER_VALUES = {"null", "none", "n/a", "unknown", "-", ""}
+
+
+def _null_out_placeholders(result: dict) -> None:
+    for field in ("vessel", "callsign", "vessel_type"):
+        value = result.get(field)
+        if isinstance(value, str) and value.strip().lower() in _PLACEHOLDER_VALUES:
+            result[field] = None
 
 
 def extract_vessel(raw_text: str, channel: str = "",
@@ -80,6 +132,12 @@ def extract_vessel(raw_text: str, channel: str = "",
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=256,
+            # Without this the call runs at the API default of 1.0, and this call rewrites
+            # the transcript the plugin displays. Measured: two runs of a byte-identical
+            # prompt over the same 49 clips scored 38.8% and 39.7% pooled WER -- nearly a
+            # point of variation from sampling alone, enough to swamp a real difference
+            # between two candidate prompts.
+            temperature=0,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -89,6 +147,7 @@ def extract_vessel(raw_text: str, channel: str = "",
             if m:
                 content = m.group(1)
         result = json.loads(content)
+        _null_out_placeholders(result)
         if result.get("text"):
             result["text"] = _apply_sttt_corrections(result["text"])
 

@@ -33,7 +33,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import ais, backends, conversations, corrections, vessel_log  # noqa: E402
+from stt_proxy import ais, backends, conversations, corrections, identify, vessel_log  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +549,29 @@ def test_gulf_as_an_ordinary_word_still_yields_no_callsign(text):
     lone letter is not a callsign, and the length floor is what stops it."""
     assert proxy._callsign_supported_by_text("G", text) is False
     assert all(len(run) < 3 for run in proxy._spelled_out_runs(text))
+
+
+@pytest.mark.parametrize("placeholder", ["null", "None", "N/A", "unknown", "-", " ", ""])
+def test_placeholder_strings_become_real_nulls(placeholder):
+    """The schema asks for "<name or null>" and the model sometimes sends the word instead.
+
+    A string is truthy, so it survives every `or` fallback downstream and reaches the plugin
+    as a real value -- "[GH NIGHTINGALE/null]" -- and a vessel named "unknown" would be looked
+    up against AIS.
+    """
+    result = {"vessel": placeholder, "callsign": placeholder,
+              "vessel_type": placeholder, "text": "Maas Approach."}
+    identify._null_out_placeholders(result)
+    assert result["vessel"] is None
+    assert result["callsign"] is None
+    assert result["vessel_type"] is None
+    assert result["text"] == "Maas Approach.", "text must never be nulled by this pass"
+
+
+def test_real_values_survive_the_placeholder_pass():
+    result = {"vessel": "MSC Athens", "callsign": "5LKV5", "vessel_type": "container"}
+    identify._null_out_placeholders(result)
+    assert result == {"vessel": "MSC Athens", "callsign": "5LKV5", "vessel_type": "container"}
 
 
 def test_partial_callsign_pattern_decodes_the_real_transmission():

@@ -339,6 +339,81 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## LLM transcript correction (2026-08-03)
+
+`CLAUDE.md` proposes a local LLM to clean up poor transcriptions. The local GPU is failing
+hardware, so the question became whether a hosted model — free if possible — can do the job,
+and how it compares to the regex list already running.
+
+Measured with `server/bench_correct.py`, which re-scores hypotheses already captured by
+`bench.py` rather than re-transcribing: no GPU, no SDR#, no audio. Two independent corpora,
+the 49 hand-checked clips of 2026-07-27 and 89 newly hand-checked clips (0000–0099) of
+2026-07-28. Absolute WER is not comparable between them — different audio, the second set is
+easier — so only within-set rankings mean anything.
+
+**Free models are a supply problem before they are a quality problem.** OpenRouter's roster
+churns (14 `:free` models the day this was run; trackers listed 15–27 the month before), and
+`google/gemma-4-31b-it:free` — the model chosen on paper — answered **3 of 49 attempts in 15
+minutes** before being abandoned, hard rate-limited upstream by Google AI Studio. The two
+Nemotron endpoints ignored `reasoning: {"exclude": true}` on a minority of clips and returned
+raw chain-of-thought, sometimes collapsing into thousands of `<unk>` tokens; one such reply
+against a ten-word reference contributes more insertions than the whole corpus has words, and
+pooled WER read 877%. Hence `is_malformed()` and a well-formed subset in the report: a model
+that answered 45 of 49 clips has no honest pooled WER next to one that answered all 49.
+
+**The prompt outweighed the model.** Every model regressed on `"zero one, one six"` →
+`"channel one six"`: Rotterdam works channel 01 and calls on 16, and generic maritime
+knowledge overrode local reality. That single error was a third of all regressions. Adding one
+rule about it, and delimiting the input so a two-word transmission is not mistaken for an empty
+request, moved every model more than the choice between models did:
+
+| | before | after | regressions |
+|---|---|---|---|
+| gemma-4-26b:free | 39.1% | 34.7% | 10 → 3 |
+| haiku-4.5 | 38.5% | 35.6% | 6 → 3 |
+| gpt-oss-120b | 38.3% | 37.4% | 11 → 5 |
+
+**Chaining the regex list after an LLM is corpus-dependent, and worth keeping.** On 07-27 it
+added ≤0.2 points and looked useless; on 07-28 it added 0.6–1.3 and was the best configuration
+for every model. The reason is visible directly: the regex list alone fixes 23 clips on 07-28
+against 3 on 07-27, because that set is dense with garbled *Maas Approach* hails. The list is
+free, instant, and across both corpora has now regressed **0 of 138 clips** — the only
+contender of which that is true.
+
+**What shipped.** Not a new provider: channel 01 already sent every transmission to Claude
+Haiku 4.5 in `identify.py` and already applied the regex pass to what came back. The
+correction was a by-product of a vessel-extraction prompt, and it showed — it beat plain regex
+on one corpus and lost on the other. Giving that same call a correction-focused prompt, and
+`temperature=0`:
+
+| | 07-27 (49) | 07-28 (89) |
+|---|---|---|
+| uncorrected | 41.1% | 33.0% |
+| regex only | 39.4% | 27.0% |
+| CH01 before | 38.8% / 39.7%* | 27.6% |
+| **CH01 after** | **34.9%** | **24.9%** |
+
+\* the same prompt, twice — that spread is what `temperature=0` removed. The call ran at the
+API default of 1.0 while rewriting the transcript the plugin displays, so ~1 point of the
+gap between any two candidate prompts was sampling noise. Regressions fell 5 → 1 and 10 → 2.
+
+Two defects surfaced only by running the thing against real transmissions, neither caught by
+the suite: the new prompt silently **dropped** content (`"Okay, understood. One five zero
+zero, Pilot."` lost its opening) because "never add content" had been carried across and
+"never remove content" had not; and `vessel_type` came back as the *string* `"null"`, which is
+truthy and would have reached the plugin as `[GH NIGHTINGALE/null]`. The second predates this
+work — the schema has always said `"<name or null>"` — and was merely made deterministic by
+fixing the temperature. `_null_out_placeholders()` now coerces it at the single point every
+field passes through.
+
+**Not adopted.** A free model as the correction pass. `gemma-4-26b:free` was the WER leader on
+both corpora, but within ~0.5 points of Haiku, which was already in the pipeline and paid for;
+it wins partly by guessing boldly (`Marsh Bridgerton` → `Maas Approach` — right; `start a
+private airplane` → an invented `stand by on zero one, one six` — wrong), it is 8× slower, and
+free endpoints proved to be the least reliable component measured. Extending correction to
+non-CH01 maritime and to airband is deferred until there is an external antenna and real
+traffic on those channels.
+
 ## Known limitations
 
 - **~36% pooled word error rate even in the best configuration** (35.9%, see the
