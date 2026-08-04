@@ -339,6 +339,36 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## "ladder" → "letter" / "leather" (2026-08-04)
+
+*Ports are leather two meters above the waterline* — the pilot boarding arrangement is read
+out in almost every CH01 exchange, and "ladder" was the single most-mangled word in it after
+the place names.
+
+Measured over every benchmarked transmission carrying a reference (636 rows, 293 clips): the
+decoder produced `ladder` 38 times, `letter` 14 and `leather` once, while the ground truth
+held `ladder` 15 times and `letter` **exactly once** — and that one turned out to be a typo
+in the reference (clip 0143, *"pilot  letter port side"*, corrected with this change). In
+this traffic the words are never anything but a mis-heard "ladder", which is what makes an
+unguarded substitution safe; the existing `boy` → `buoy` rule is the same bet on the same
+grounds. Pooled WER **36.84% → 36.67%**, correcting 14 transmissions and damaging none.
+
+The `letter of ...` guard is precautionary rather than measured — no such phrase occurs in
+the corpus, but a letter of protest and a letter of credit are real ship's business and
+excluding them costs nothing on the cases that do occur. The rule is maritime-only: aircraft
+have no pilot ladders and "letter" is ordinary speech on the airband.
+
+**Why the CH01 Claude pass did not already fix it.** Its prompt lists "pilot ladder" in the
+maritime vocabulary, but its own rule (a) — *make the smallest edit that fixes a clear error;
+if a word is merely unusual, leave it exactly as it is* — holds it back, because "leather" is
+a perfectly ordinary English word in a sentence that parses. A deterministic rule runs after
+that pass, costs nothing, and does not depend on model behaviour.
+
+**`Ports are` → `Port side` was considered and rejected.** The phrase does not occur once in
+the corpus, so there is no evidence to derive a rule from, and `port side` / `portside` both
+appear in the ground truth as legitimate forms. Guessing at it is exactly what the
+substitution-frequency method exists to avoid.
+
 ## A spelled-out callsign outranks name similarity (2026-08-04)
 
 *Motortanker Ikora Star, callsign nine Hotel Alpha two seven eight eight* resolved to
@@ -469,8 +499,9 @@ traffic on those channels.
   nautical-term-corrections row in the table above). This is genuinely hard audio —
   accented non-native English, real radio noise, dense maritime jargon, proper nouns not
   in Whisper's vocabulary. Not something further parameter tuning fixes.
-- **Nautical-term and vessel-name errors** ("ladder" → "letter", the same vessel name
-  transcribed differently across nearby clips) are a distinct, known category.
+- **Nautical-term and vessel-name errors** (the same vessel name transcribed differently
+  across nearby clips) are a distinct, known category. "ladder" → "letter"/"leather" was
+  the worst instance and is now corrected — see below.
   A first pass of evidence-backed regex corrections now runs in the proxy (see "Current
   configuration" above — a ~5.7-point pooled WER improvement, though ~4.2 of those points
   come from rules that predate this pass and only ~1.3 from the rules added in it);

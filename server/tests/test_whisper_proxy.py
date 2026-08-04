@@ -76,10 +76,45 @@ def test_is_hallucination_false(text):
     ("mars approach, over", "Maas Approach"),
     ("this is mars control", "Maas control"),
     ("watch out for the boy", "watch out for the buoy"),
+    # "ladder" is mis-heard 14 times across the 636 benchmarked transmissions and never once
+    # transcribed correctly as "letter"/"leather" -- see the block below.
+    ("pilot letter in the starboard side", "pilot ladder in the starboard side"),
+    ("Ports are leather two meters above the waterline.", "ladder"),
+    ("Portside Leather to me, that's above the water", "Portside ladder"),
+    ("Pilot Letter, port side two meters", "Pilot ladder"),
 ])
 def test_apply_sttt_corrections(raw, expected_substring):
     result = proxy._apply_sttt_corrections(raw)
     assert expected_substring in result
+
+
+# "ladder" -> "letter"/"leather"
+#
+# Measured over every benchmarked transmission carrying a reference (636 rows, 293 clips):
+# the decoder produces "ladder" 38 times, "letter" 14 and "leather" once, while the ground
+# truth contains "ladder" 15 times and "letter" exactly once -- and that one is a typo in the
+# reference itself (clip 0143, "pilot  letter port side", corrected with this change). So in
+# this traffic the words are never anything but a mis-heard "ladder", which is what makes an
+# unguarded substitution safe -- the same shape as the existing "boy" -> "buoy" rule.
+#
+# The CH01 Claude pass already lists "pilot ladder" in its vocabulary and still leaves these
+# alone: "leather" is an ordinary English word, so its own instruction to make only the
+# smallest clearly-correct edit holds it back. A deterministic rule after that pass costs
+# nothing and does not depend on model behaviour.
+
+def test_ladder_correction_is_not_applied_to_airband():
+    """Aircraft have no pilot ladders, and "letter" is ordinary speech there."""
+    assert "letter" in proxy._apply_sttt_corrections("say again the letter", mode="airband")
+
+
+@pytest.mark.parametrize("raw", [
+    "letter of protest",
+    "a letter of credit for the agent",
+])
+def test_a_letter_of_something_is_left_alone(raw):
+    """Precautionary rather than measured: no such phrase occurs in the corpus, but these are
+    real maritime documents and the guard costs nothing on the 14 cases that do occur."""
+    assert proxy._apply_sttt_corrections(raw) == raw
 
 
 # ---------------------------------------------------------------------------
