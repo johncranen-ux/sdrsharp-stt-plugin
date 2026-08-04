@@ -24,7 +24,8 @@ from rapidfuzz import fuzz as rf_fuzz
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
                            match_by_callsign, match_by_callsign_pattern, match_by_mmsi)
 from stt_proxy.claude import _get_claude
-from stt_proxy.corrections import _callsign_supported_by_text, _partial_callsign_pattern
+from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern,
+                                   _spelled_out_runs)
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
 from stt_proxy.markup import VESSELFINDER_URL, _html_escape, _vessel_link  # noqa: F401
 
@@ -357,6 +358,43 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
     return found
 
 
+# Spelled-out callsigns, read from the transmissions rather than from the journal
+#
+# This pass used to read only chunk["callsign"], which the live pass wrote -- so a live pass
+# that recorded the wrong callsign, or none, took the exact lookup down with it. That is how
+# PECHORA STAR was lost: the journal held VIKTORIA's DB6442, the guard below correctly refused
+# it, and 9HA2788 was sitting in the transmission text the whole time. MONA SWAN was lost the
+# other way, with no callsign extracted at all. The text is the primary source and is stored
+# verbatim, so decode from that and the retrospective pass stops depending on the live guess
+# it exists to second-guess.
+#
+# Whole runs only, never substrings. Measured over the 435 stored transmissions, whole-run
+# matching finds all seven real callsigns (PECHORA STAR, MONA SWAN, ECO ROYALTY, CENTURIUS,
+# COSCO HOPE, VENETIA, CORAL METHANE) with nothing spurious, three of them in transmissions
+# that never say the word "callsign" -- "this is Cosco Hope, nine Victor eight seven eight
+# six". Substring search adds no real vessel and opens a real hole: 239 of the 380 runs are
+# times, draughts, channels and positions, and the cache holds all-digit transponder junk
+# ('2503', '2603', '303') that a long spoken number would eventually hit. All-digit runs are
+# skipped for the same reason, and four characters is the floor because the only shorter
+# entries in the cache are junk ('AAA', '@L<').
+CALLSIGN_RUN_MIN_LEN = 4
+
+
+def _spoken_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
+    """Vessels whose callsign was spelled out in the transmissions themselves."""
+    found: dict[str, dict] = {}
+    for chunk in chunks:
+        for run in _spelled_out_runs(chunk.get("text", "")):
+            if len(run) < CALLSIGN_RUN_MIN_LEN or run.isdigit():
+                continue
+            ais = match_by_callsign(run)
+            if ais and ais.get("mmsi") and ais["mmsi"] not in found:
+                entry = dict(ais)
+                entry["via_callsign"] = True
+                found[ais["mmsi"]] = entry
+    return found
+
+
 def _resolver_candidates(chunks: list[dict]) -> list[dict]:
     """AIS vessels plausibly involved in this window.
 
@@ -365,7 +403,7 @@ def _resolver_candidates(chunks: list[dict]) -> list[dict]:
     callsign out. Otherwise the "exactness" is just an invented string that happened to
     exist, and the mark would launder a guess into evidence.
     """
-    candidates: dict[str, dict] = {}
+    candidates: dict[str, dict] = dict(_spoken_callsign_candidates(chunks))
 
     for chunk in chunks:
         # Belt and braces: the live pass now drops unsupported callsigns, but a journal

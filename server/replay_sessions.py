@@ -84,7 +84,7 @@ def run(chunks: list[dict], hints: bool, echo: bool) -> list[dict]:
             continue
 
         result = proxy.extract_vessel(c["text"], c["channel"], now=c["time"])
-        result = proxy.enrich_with_ais(result)
+        result = proxy.enrich_with_ais(result, c["text"])
         proxy._add_to_buffer(result, c["text"], c["channel"], when=c["time"])
         out.append({
             **c,
@@ -139,7 +139,8 @@ def resolve_replay(chunks: list[dict]) -> None:
     conversations._conversation_chunks[:] = []
     journal = []
     for i, c in enumerate(chunks, 1):
-        result = proxy.enrich_with_ais(proxy.extract_vessel(c["text"], c["channel"], now=c["time"]))
+        result = proxy.enrich_with_ais(
+            proxy.extract_vessel(c["text"], c["channel"], now=c["time"]), c["text"])
         journal.append({
             "id": i, "time": c["time"], "channel": c["channel"], "text": c["text"],
             "live_vessel": result.get("vessel"), "live_mmsi": result.get("mmsi"),

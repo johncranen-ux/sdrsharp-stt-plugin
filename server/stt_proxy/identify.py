@@ -166,12 +166,35 @@ def extract_vessel(raw_text: str, channel: str = "",
         return {"vessel": None, "callsign": None, "text": _apply_sttt_corrections(raw_text)}
 
 
-def enrich_with_ais(result: dict) -> dict:
-    ais    = match_by_name(result.get("vessel"))
-    method = "name"
+# A verified callsign outranks name similarity
+#
+# This tried match_by_name first and fell back to the callsign only when the name matched
+# nothing, which inverts the evidence. PECHORA STAR (10:03 on 2026-08-04) spelled 9HA2788 out
+# cleanly and was cached the whole time, but "Ikora Star" reached the word-window fallback,
+# probed "IKORA" alone, and hit VIKTORIA at 76.9 -- one point over the cutoff. Because that
+# returned something, the exact lookup never ran. ECO ROYALTY lost V7LA9 the same way to ELKA.
+#
+# The overwrite below was the more damaging half. Enriching a name match with the matched
+# vessel's callsign replaced the spoken one, and _record_chunk journals this result, so the
+# conversation store held DB6442 where 9HA2788 was said. _resolver_candidates then correctly
+# refused DB6442 -- nothing in the transmission reads that way -- and the retrospective pass,
+# whose whole purpose is to second-guess a bad live match, was never offered the ship at all.
+# The spoken callsign is evidence and is now kept; AIS only fills one in when none was said.
+#
+# `raw_text` is what makes the promotion safe: a callsign is preferred only when it can still
+# be read out of the transmission. Without it there is nothing to verify against, so the old
+# order stands -- unverifiable is not the same as refuted.
+def enrich_with_ais(result: dict, raw_text: str = "") -> dict:
+    spoken   = result.get("callsign") or ""
+    verified = bool(spoken) and _callsign_supported_by_text(spoken, raw_text)
+
+    ais, method = None, None
+    if verified:
+        ais, method = match_by_callsign(spoken), "callsign"
     if not ais:
-        ais    = match_by_callsign(result.get("callsign"))
-        method = "callsign"
+        ais, method = match_by_name(result.get("vessel")), "name"
+    if not ais and spoken and not raw_text:
+        ais, method = match_by_callsign(spoken), "callsign"
     if not ais:
         return result
     enriched = dict(result)
@@ -182,7 +205,7 @@ def enrich_with_ais(result: dict) -> dict:
         "latitude": ais.get("latitude"), "longitude": ais.get("longitude"),
         "sog": ais.get("sog"), "cog": ais.get("cog"), "heading": ais.get("heading"),
     })
-    if ais.get("callsign"):
+    if ais.get("callsign") and not spoken:
         enriched["callsign"] = ais["callsign"]
     return enriched
 

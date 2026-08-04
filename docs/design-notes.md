@@ -339,6 +339,55 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## A spelled-out callsign outranks name similarity (2026-08-04)
+
+*Motortanker Ikora Star, callsign nine Hotel Alpha two seven eight eight* resolved to
+**nobody**, with the vessel — **PECHORA STAR**, callsign `9HA2788` — in the AIS cache the
+whole time and its callsign spelled out perfectly. Two defects in `enrich_with_ais`, and the
+second is why the retrospective pass could not rescue it.
+
+**Name similarity was tried first.** `match_by_name("Ikora Star")` fell through to the
+word-window fallback, probed `IKORA` alone, and reached `VIKTORIA` at **76.9** — one point
+over the cutoff. Because it returned *something*, `match_by_callsign("9HA2788")` — an exact
+dictionary hit on a callsign already verified as spoken — never ran. The weakest evidence in
+the system outranked the strongest.
+
+**The spoken callsign was then overwritten.** Enriching a name match copied the matched
+vessel's callsign over the extracted one, so `9HA2788` became `DB6442` (VIKTORIA's).
+`_record_chunk` journals this result, so the conversation store held a callsign nobody said.
+`_resolver_candidates` then correctly refused `DB6442` — nothing in the transmission reads
+that way — and PECHORA STAR was never offered as a candidate at all. The resolver returned
+null and its evidence line, *"'Ikora Star' does not match any candidate name"*, was literally
+true. The guard was doing its job on data corrupted upstream.
+
+A verified callsign now wins the lookup, and AIS only supplies a callsign when none was
+spoken. `raw_text` is what makes the promotion safe — a callsign is preferred only when it
+can still be read out of the transmission — so an invented one cannot be laundered into an
+identity. Without text there is nothing to verify against and the old order stands.
+
+**The resolver now decodes callsigns from the transmissions, not the journal.** Depending on
+`chunk["callsign"]` meant a live pass that recorded the wrong callsign, or none, took the
+exact lookup down with it — MONA SWAN (`OWGJ2`) was lost the second way, with the shore
+station *asking* for the callsign and the vessel spelling it out. The text is the primary
+source and is stored verbatim, so `_spoken_callsign_candidates` reads it directly and the
+retrospective pass stops depending on the live guess it exists to second-guess.
+
+Whole runs only, never substrings. Measured over the 435 stored transmissions, whole-run
+matching finds all seven real callsigns with nothing spurious — three of them in
+transmissions that never say the word "callsign" (*"this is Cosco Hope, nine Victor eight
+seven eight six"*), which is why this is not anchored on the keyword the way
+`_partial_callsign_pattern` is. Substring search adds no real vessel and opens a hole: 239 of
+the 380 runs are times, draughts, channels and positions, and the cache holds all-digit
+transponder junk (`2503`, `2603`, `303`) that a long spoken number would eventually hit.
+All-digit runs are skipped for the same reason; four characters is the floor because the only
+shorter cache entries are junk (`AAA`, `@L<`).
+
+Of the six spelled-out, cache-resolvable callsigns in the 300-conversation store, three were
+being lost. Two — PECHORA STAR and ECO ROYALTY (`V7LA9`, lost to **ELKA** on a turn whose
+neighbours resolved correctly) — failed on the inverted ordering; the third was MONA SWAN.
+Re-running candidate assembly over all 104 stored windows: **0 candidates lost, 6 added**,
+across five vessels previously invisible to the resolver.
+
 ## LLM transcript correction (2026-08-03)
 
 `CLAUDE.md` proposes a local LLM to clean up poor transcriptions. The local GPU is failing

@@ -406,7 +406,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 elif channel in ("160.650", "160,650"):
                     # Maas Approach CH 01: full Claude extraction + AIS enrichment
                     result = extract_vessel(raw_text, channel)
-                    result = enrich_with_ais(result)
+                    result = enrich_with_ais(result, raw_text)
 
                     # Maas response correlation
                     if _is_maas_response(raw_text) and result.get("vessel"):

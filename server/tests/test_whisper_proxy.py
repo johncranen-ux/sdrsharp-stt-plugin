@@ -802,6 +802,139 @@ def test_partial_candidate_is_marked_in_the_resolver_prompt():
     assert "partial callsign 5.R.9, name corroborated" in text
 
 
+# ---------------------------------------------------------------------------
+# Exact callsign outranks name similarity
+#
+# 10:03 on 2026-08-04: PECHORA STAR spelled 9HA2788 out cleanly and was in the AIS cache the
+# whole time, yet the exchange resolved to nobody. enrich_with_ais tried match_by_name first,
+# and the word-window fallback probed "IKORA" alone into VIKTORIA at 76.9 -- one point over
+# the cutoff. Because that returned something, the exact callsign lookup never ran; then the
+# matched vessel's callsign overwrote the spoken one, so the journal recorded DB6442.
+# _resolver_candidates then correctly refused DB6442 (not readable out of the transmission)
+# and the retrospective pass -- which exists to recover exactly this -- was never offered the
+# ship at all.
+#
+# Two of the three lost callsigns in the 300-conversation store failed this way; ECO ROYALTY
+# (V7LA9) lost the same way to ELKA, on a turn whose neighbours resolved correctly.
+# ---------------------------------------------------------------------------
+
+_PECHORA = {"name": "PECHORA STAR", "mmsi": "215760000", "callsign": "9HA2788", "type": 89}
+_VIKTORIA = {"name": "VIKTORIA", "mmsi": "211522860", "callsign": "DB6442", "type": 80}
+
+_PECHORA_CALL = ("Maaas Approach, Maaas Approach, this is Motortanker, Ikora Star, "
+                 "callsign nine, Hotel Alpha, two seven eight eight, calling on channel "
+                 "zero one, over. Ikora Star, this is Motortanker.")
+
+
+@pytest.fixture
+def pechora_caches(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {"PECHORA STAR": _PECHORA, "VIKTORIA": _VIKTORIA})
+    monkeypatch.setattr(ais, "_callsign_cache", {"9HA2788": _PECHORA, "DB6442": _VIKTORIA})
+
+
+def test_a_spoken_callsign_outranks_a_fuzzy_name_match(pechora_caches):
+    """The reported miss. An exact hit on a callsign that was verifiably spelled out is the
+    strongest evidence here; a 76-point name ratio is the weakest."""
+    result = proxy.enrich_with_ais(
+        {"vessel": "Ikora Star", "callsign": "9HA2788"}, _PECHORA_CALL)
+    assert result["vessel"] == "PECHORA STAR"
+    assert result["mmsi"] == "215760000"
+    assert result["match_method"] == "callsign"
+
+
+def test_the_spoken_callsign_survives_enrichment(pechora_caches):
+    """What blinded the resolver: the matched vessel's callsign replaced the spoken one, so
+    the journal no longer held anything readable out of the transmission."""
+    result = proxy.enrich_with_ais(
+        {"vessel": "Ikora Star", "callsign": "9HA2788"}, _PECHORA_CALL)
+    assert result["callsign"] == "9HA2788"
+
+
+def test_enrichment_still_supplies_a_callsign_nobody_spoke(pechora_caches):
+    """Enrichment of a name-only match is unchanged -- that is where AIS adds detail."""
+    result = proxy.enrich_with_ais({"vessel": "Viktoria", "callsign": None}, "this is Viktoria")
+    assert result["vessel"] == "VIKTORIA"
+    assert result["callsign"] == "DB6442"
+    assert result["match_method"] == "name"
+
+
+def test_an_unspoken_callsign_never_wins_the_lookup(pechora_caches):
+    """A callsign that cannot be read out of the transmission is a guess that happens to hit
+    the table. Promoting it above the name would launder that guess into an identity."""
+    result = proxy.enrich_with_ais(
+        {"vessel": "Viktoria", "callsign": "9HA2788"}, "Maas Approach, this is Viktoria, over.")
+    assert result["vessel"] == "VIKTORIA"
+    assert result["match_method"] == "name"
+
+
+def test_enrichment_falls_back_to_the_name_when_the_callsign_is_unknown(pechora_caches):
+    """Spelled out, verified, but not in the cache: the name is all that is left."""
+    result = proxy.enrich_with_ais(
+        {"vessel": "Viktoria", "callsign": "PABC"},
+        "this is Viktoria, callsign papa alpha bravo charlie, over.")
+    assert result["vessel"] == "VIKTORIA"
+    assert result["match_method"] == "name"
+
+
+def test_enrichment_without_the_transmission_keeps_the_old_order(pechora_caches):
+    """No text means no way to verify the callsign was spoken, so it stays a fallback."""
+    result = proxy.enrich_with_ais({"vessel": "Ikora Star", "callsign": "9HA2788"})
+    assert result["vessel"] == "VIKTORIA"
+
+
+def test_enrichment_returns_the_result_untouched_when_nothing_matches(pechora_caches):
+    result = proxy.enrich_with_ais({"vessel": "Nobody At All", "callsign": None}, "hello")
+    assert result == {"vessel": "Nobody At All", "callsign": None}
+
+
+# The resolver read the journalled callsign, so a live pass that recorded the wrong one (or
+# none) took the exact lookup down with it. The transmission text is the primary source and
+# is already stored verbatim -- decode from that instead, and the retrospective pass stops
+# depending on the live guess it exists to second-guess.
+
+def test_the_resolver_decodes_the_callsign_from_the_transmission(pechora_caches):
+    """The journal holds VIKTORIA's callsign, exactly as the reported conversation recorded
+    it. The spelled-out 9HA2788 is still right there in the text."""
+    chunks = [_chunk(30, _PECHORA_CALL, cid=1, callsign="DB6442",
+                     vessel="VIKTORIA", live_mmsi="211522860")]
+    exact = [c for c in proxy._resolver_candidates(chunks) if c.get("via_callsign")]
+    assert [c["name"] for c in exact] == ["PECHORA STAR"]
+
+
+def test_the_resolver_finds_a_callsign_the_live_pass_never_extracted(monkeypatch):
+    """MONA SWAN, the third lost callsign: the shore station asked for it and the vessel
+    spelled it out, but no callsign reached the journal at all."""
+    mona = {"name": "MONA SWAN", "mmsi": "219624000", "callsign": "OWGJ2"}
+    monkeypatch.setattr(ais, "_callsign_cache", {"OWGJ2": mona})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    chunks = [_chunk(30, "Monaas one, good afternoon, this is Maas Approach, confirm your "
+                         "callsign, Oscar Whiskey, Gulf Juliet two.", cid=1, callsign=None)]
+    exact = [c for c in proxy._resolver_candidates(chunks) if c.get("via_callsign")]
+    assert [c["name"] for c in exact] == ["MONA SWAN"]
+
+
+def test_the_resolver_still_refuses_a_callsign_nobody_spoke(monkeypatch):
+    """Unchanged: decoding from the text must not weaken the guard that keeps an invented
+    callsign from being marked as evidence."""
+    monkeypatch.setattr(ais, "_callsign_cache", {"VRSQ4": {"name": "COSCO SHIPPING STAR", "mmsi": "1"}})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    assert proxy._resolver_candidates(
+        [_chunk(10, "Gungor Star one three one five, correct.", callsign="VRSQ4")]) == []
+
+
+def test_the_reported_pechora_conversation_now_yields_the_candidate(pechora_caches):
+    """10:03 on 2026-08-04, end to end: the window that resolved to nobody."""
+    window = [
+        _chunk(60, _PECHORA_CALL, cid=1, callsign="DB6442", vessel="VIKTORIA",
+               live_mmsi="211522860"),
+        _chunk(50, "Can you please confirm our pilot boarding time?", cid=2),
+        _chunk(40, "Bekoa Star, yes, correct, pilot line up, both sides, two meters.", cid=3),
+    ]
+    rendered = proxy._render_resolver_input(window, proxy._resolver_candidates(window))
+    assert "PECHORA STAR (MMSI:215760000)" in rendered
+    assert "via callsign, exact match" in rendered
+
+
 # resolve_conversation itself was never exercised -- only the helpers either side of it --
 # so `re`, used solely on the fenced-reply branch, went missing in the module split and
 # nothing failed. Haiku fences its JSON every time, so in production that branch was the
