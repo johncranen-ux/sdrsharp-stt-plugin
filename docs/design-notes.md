@@ -689,6 +689,35 @@ traffic on those channels.
   fuzzy/LLM-based correction for cases the regex pass can't catch is still planned for a
   later phase per `CLAUDE.md`'s "Additional Features" section (vessel-name AIS matching is
   already built and working, see below).
+- **The AIS cache is never pruned, and matching ignores where a vessel actually is**
+  (noted 2026-08-04, not yet acted on). `match_by_name`, `match_by_callsign` and
+  `_find_ais_hints` all scan every cached entry. Nothing is ever removed, nothing expires,
+  and **no entry carries a timestamp**, so staleness is not merely unfiltered — it is not
+  even knowable. `ROTTERDAM_BBOX` constrains what *enters* the cache via the aisstream
+  subscription, never what is eligible to match, and at `[[51.0, 2.95], [52.85, 6.0]]` it
+  spans roughly 205 × 210 km — Amsterdam, the IJsselmeer and most of the Dutch coast.
+
+  Measured over the 8,464-vessel cache, by distance from Maas Center (52.02 N, 3.88 E):
+  **505 vessels (6%) within 25 km**, 1,699 (20%) within 50 km, 5,794 (68%) within 100 km,
+  and 1,356 (16%) with no position ever received. So ~94% of the candidate pool cannot
+  plausibly be talking on this working channel.
+
+  Both misidentifications diagnosed that day picked a distant ship over a near one:
+  VIKTORIA (**111 km**) took PECHORA STAR's identity (17 km), and GOOILAND (**141 km**) took
+  THULELAND's (35 km). Of 104 stored identifications, 5 named a vessel last seen beyond
+  100 km — including, twice, a vessel literally named **MAAS** sitting 164 km away, against
+  a channel where "Maas Approach" is said in nearly every transmission.
+
+  Not fixed yet, and deliberately not fixed blind. Three things stop it being a one-line
+  distance filter: position is *last known* rather than current, so distance is a
+  plausibility proxy and not proof; 16% of entries have no position at all, and excluding
+  them would break callsign matches for ships that never broadcast one; and 34% of
+  identifications fall in the 50–100 km band, which is genuinely ambiguous because the VTS
+  area reaches well offshore and vessels call in while still approaching. A hard cut would
+  destroy more than it fixes. This is the first real change queued behind
+  `bench_identify.py` having corrected labels. The prerequisite, and pure instrumentation
+  that changes no behaviour, is recording a `last_seen` timestamp on every cache write.
+
 - **whisper.cpp/ROCm has a real, unresolved GPU driver hang** on this hardware
   (RX 7900 XTX / gfx1100 / ROCm 6.1.3 under WSL2) — this is why `groq` is now the default
   backend; everything in this bullet applies only under `STT_BACKEND=whisper_cpp`.
