@@ -275,15 +275,30 @@ PATH_MAP = frozenset({
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
+    # Everything served here is live state that changes second to second, and none of it was
+    # sending a cache directive -- no Cache-Control, no Expires, no ETag, no Last-Modified.
+    # A response carrying no freshness information at all may be cached heuristically, and
+    # /conversations self-refreshes with <meta http-equiv="refresh">, which is an ordinary
+    # navigation and so consults the HTTP cache. Observed directly: the server answering 157
+    # exchanges while the browser sat on 156, having reloaded on schedule and been handed its
+    # own cached copy -- indistinguishable, from the outside, from a page that never reloads.
+    # Pragma is there because this server still speaks HTTP/1.0.
+    def _send_live_headers(self, content_type: str, length: int, cors: bool = False) -> None:
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
     def do_GET(self):
         if self.path in ("/", "/identified-vessels"):
             try:
                 with open(VESSELS_LOG_FILE, "r", encoding="utf-8") as f:
                     data = f.read().encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
+                self._send_live_headers("text/html; charset=utf-8", len(data))
                 self.wfile.write(data)
             except Exception as exc:
                 self.send_error(500, str(exc))
@@ -295,9 +310,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     rows = list(conversations._resolved)
                 data = render_conversations_page(rows).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
+                self._send_live_headers("text/html; charset=utf-8", len(data))
                 self.wfile.write(data)
             except Exception as exc:
                 self.send_error(500, str(exc))
@@ -308,10 +321,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 with conversations._resolved_lock:
                     data = json.dumps(list(conversations._resolved)).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
+                self._send_live_headers("application/json", len(data), cors=True)
                 self.wfile.write(data)
             except Exception as exc:
                 self.send_error(500, str(exc))
@@ -325,10 +335,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     entries = list(ais._vessel_cache.values())
                 data = json.dumps(entries).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
+                self._send_live_headers("application/json", len(data), cors=True)
                 self.wfile.write(data)
             except Exception as exc:
                 self.send_error(500, str(exc))

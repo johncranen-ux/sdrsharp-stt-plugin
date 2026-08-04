@@ -341,6 +341,36 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## The live pages were cacheable (2026-08-04)
+
+`/conversations` self-refreshes with `<meta http-equiv="refresh" content="30">`, and it looked
+like the refresh was not firing: the page sat on 156 exchanges while the server, queried at
+the same moment, answered **157** — with the newer exchange already rendered. The refresh was
+firing on schedule and the browser was handing it a cached copy, which from the outside is
+indistinguishable from a page that never reloads.
+
+None of the live routes sent a single cache directive — no `Cache-Control`, no `Expires`, no
+`ETag`, no `Last-Modified`:
+
+```
+HTTP/1.0 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 169695
+```
+
+A response carrying no freshness information at all may be cached heuristically, and a meta
+refresh is an ordinary navigation, so it consults the HTTP cache like any other. All four
+live routes (`/conversations`, `/api/conversations`, `/identified-vessels`, `/api/ais-cache`)
+now send `Cache-Control: no-store, must-revalidate` plus `Pragma: no-cache`, the last because
+this server still speaks HTTP/1.0. Asserted by route tests rather than by inspection, since
+the failure is invisible from inside the process — the server was serving correct, fresh
+bytes the entire time.
+
+**Worth noting how this presented**, because two unrelated things looked identical to it. The
+same "page is not updating" symptom was also produced by the proxy still running pre-restart
+code, and by a busy channel keeping a conversation window open (below). Only comparing what
+the server returned against what the browser displayed separated them.
+
 ## Vessel particulars on /conversations, and three AIS fields that never parsed (2026-08-04)
 
 `/conversations` is where identity is actually settled, but it showed only the name, MMSI,

@@ -2018,6 +2018,21 @@ def test_get_routes_respond(server, path, expect):
         assert expect in r.read()
 
 
+# Every one of these is live state that changes second to second, and none of them carried
+# a single cache directive -- no Cache-Control, no Expires, no ETag, no Last-Modified. A
+# response with no freshness information at all may be cached heuristically, and /conversations
+# self-refreshes with <meta http-equiv="refresh">, which is an ordinary navigation and so
+# consults the HTTP cache. Observed directly: the server was serving 157 exchanges while the
+# browser sat on 156, having reloaded on schedule and been handed its own cached copy.
+@pytest.mark.parametrize("path", [
+    "/conversations", "/api/conversations", "/identified-vessels", "/api/ais-cache",
+])
+def test_live_routes_forbid_caching(server, path):
+    import urllib.request
+    with urllib.request.urlopen(server + path, timeout=10) as r:
+        assert "no-store" in r.headers.get("Cache-Control", "")
+
+
 def test_unknown_post_path_is_rejected(server):
     import urllib.error, urllib.request
     req = urllib.request.Request(server + "/nope", data=b"x", method="POST")
