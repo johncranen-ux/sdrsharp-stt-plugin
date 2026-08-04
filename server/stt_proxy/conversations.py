@@ -499,7 +499,8 @@ def _unresolved(chunks: list[dict]) -> list[dict]:
 
 # What the AIS match knows about the ship beyond its name, kept in one place so the snapshot
 # below and the renderer cannot drift apart.
-_PARTICULARS = ("imo", "length", "beam", "latitude", "longitude", "sog", "cog", "heading")
+_PARTICULARS = ("imo", "length", "beam", "draught", "destination",
+                "latitude", "longitude", "sog", "cog", "heading")
 
 
 def _format_particulars(row: dict) -> str:
@@ -515,6 +516,12 @@ def _format_particulars(row: dict) -> str:
         bits.append(f"{int(row['length'])} &times; {int(row['beam'])} m")
     elif row.get("length"):
         bits.append(f"{int(row['length'])} m")
+    if row.get("draught") is not None:
+        bits.append(f"draught {row['draught']:.1f} m")
+    # Free text off the radio, so the most attacker-controllable field on the feed: anyone
+    # with a transmitter in the Rotterdam box can set it to whatever they like.
+    if row.get("destination"):
+        bits.append(f"&rarr; {_html_escape(row['destination'])}")
     if row.get("sog") is not None:
         bits.append(f"{row['sog']:.1f} kn")
     if row.get("cog") is not None:

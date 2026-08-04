@@ -154,6 +154,35 @@ def test_ship_static_data_is_parsed(ais_caches):
     assert callsigns["9HA2788"] is entry, "one object, so a position report updates both"
 
 
+def test_draught_and_destination_are_parsed(ais_caches):
+    """The two fields the traffic actually asks about: "what is your maximum draught" and
+    where you are bound opens most CH01 exchanges."""
+    vessels, _ = ais_caches
+    ais._process_ais({
+        "MessageType": "ShipStaticData", "MetaData": {"MMSI": 1},
+        "Message": {"ShipStaticData": {"Name": "ANOUK", "MaximumStaticDraught": 4.5,
+                                       "Destination": "ROTTERDAM@@@@@@@@@@@"}},
+    })
+    assert vessels["ANOUK"]["draught"] == 4.5, "metres as a double, not tenths"
+    assert vessels["ANOUK"]["destination"] == "ROTTERDAM"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("ROTTERDAM@@@@@@@@@@@", "ROTTERDAM"),
+    ("COASTGUARD@@@@@@@@H", "COASTGUARD"),   # the documented example: padding, then noise
+    ("NL RTM", "NL RTM"),                    # no padding at all
+    ("  EUROPOORT  ", "EUROPOORT"),
+    ("@@@@@@@@@@", None),                    # nothing but padding
+    ("", None),
+])
+def test_destination_padding_is_stripped(raw, expected, ais_caches):
+    """'@' is the AIS null character, so everything from the first one is padding."""
+    vessels, _ = ais_caches
+    ais._process_ais({"MessageType": "ShipStaticData", "MetaData": {"MMSI": 1},
+                      "Message": {"ShipStaticData": {"Name": "X", "Destination": raw}}})
+    assert vessels["X"]["destination"] == expected
+
+
 def test_position_report_is_parsed(ais_caches):
     vessels, _ = ais_caches
     ais._process_ais({
@@ -1161,6 +1190,28 @@ def test_validate_leaves_particulars_empty_when_nobody_was_identified():
         [{"chunk_ids": [1], "vessel": None}], [_chunk(30, cid=1)], {})
     assert out[0]["imo"] is None and out[0]["length"] is None
     assert out[0]["latitude"] is None and out[0]["sog"] is None
+
+
+def test_page_shows_draught_and_destination():
+    html = proxy.render_conversations_page([{
+        "vessel": "ANOUK", "mmsi": "1", "confidence": "high",
+        "length": 110, "beam": 11, "draught": 3.3, "destination": "ROTTERDAM",
+        "start": "2026-08-04 12:17:01", "end": "2026-08-04 12:17:51", "turns": [],
+    }])
+    assert "draught 3.3 m" in html
+    assert "ROTTERDAM" in html
+
+
+def test_a_hostile_destination_cannot_break_the_page():
+    """Destination is free text off the radio -- the most attacker-controllable field on
+    the feed, since anyone with a transmitter can set it to whatever they like."""
+    html = proxy.render_conversations_page([{
+        "vessel": "EVIL", "mmsi": "1", "confidence": "high",
+        "destination": "<img src=x onerror=alert(1)>",
+        "start": "2026-08-04 12:00:00", "end": "2026-08-04 12:00:30", "turns": [],
+    }])
+    assert "<img" not in html
+    assert "&lt;img" in html
 
 
 def test_page_shows_the_vessel_particulars():

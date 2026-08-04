@@ -375,6 +375,21 @@ whole risk here.
 Note that the cached entries only fill in as each ship re-broadcasts its static data, so IMO,
 speed and course appear gradually rather than at once.
 
+**Draught and destination are pulled in too**, because they are what CH01 actually asks about
+— *"what is your maximum draught"* and where the ship is bound open most exchanges, so having
+the broadcast answer next to the transcript is worth more here than the dimensions are.
+`MaximumStaticDraught` is metres as a double; `Destination` is free text padded out to its
+fixed width with `@`, the null character in AIS's 6-bit alphabet, so everything from the first
+one is padding — including the stray trailing character in aisstream's own example,
+`"COASTGUARD@@@@@@@@H"`. Destination is also the most attacker-controllable field on the feed,
+being free text set by whoever is transmitting, so it is escaped like everything else here.
+
+A full line now reads:
+
+```
+IMO 9421663 · 129 × 21 m · draught 8.4 m · → ROTTERDAM · 8.2 kn · 43° · 51.9801, 4.0727
+```
+
 ## The fuzzy Maas rule was firing on well under half the cases (2026-08-04)
 
 Running the substitution-frequency sweep again — this time over all 636 benchmarked

@@ -202,6 +202,7 @@ def enrich_with_ais(result: dict, raw_text: str = "") -> dict:
         "vessel": ais["name"], "mmsi": ais["mmsi"], "match_method": method,
         "type": ais.get("type"), "imo": ais.get("imo"),
         "length": ais.get("length"), "beam": ais.get("beam"),
+        "draught": ais.get("draught"), "destination": ais.get("destination"),
         "latitude": ais.get("latitude"), "longitude": ais.get("longitude"),
         "sog": ais.get("sog"), "cog": ais.get("cog"), "heading": ais.get("heading"),
     })

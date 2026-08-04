@@ -51,6 +51,18 @@ AIS_SHIP_TYPES = {
     103: "Bulk carrier", 104: "Bulk carrier", 105: "Bulk carrier",
 }
 
+def _clean_destination(raw: str) -> str | None:
+    """The destination a ship broadcasts, with its AIS padding removed.
+
+    '@' is the null character in AIS's 6-bit alphabet, so the field arrives padded out to its
+    fixed width with them and everything from the first one is padding -- including the stray
+    trailing character in aisstream's own example, "COASTGUARD@@@@@@@@H". Never a real part of
+    a destination, so splitting on it is safe rather than merely convenient.
+    """
+    cleaned = (raw or "").split("@")[0].strip()
+    return cleaned or None
+
+
 def _get_ship_type_name(type_code) -> str | None:
     if type_code is None:
         return None
@@ -160,8 +172,12 @@ def _process_ais(msg: dict) -> None:
                 stype  = ship.get("Type")
                 length = (dim.get("A", 0) + dim.get("B", 0)) or None
                 beam   = (dim.get("C", 0) + dim.get("D", 0)) or None
+                # Draught and destination are what CH01 actually asks about, on nearly every
+                # call: "what is your maximum draught" and where the ship is bound.
                 entry  = {"name": name, "callsign": callsign, "mmsi": mmsi,
-                          "type": stype, "imo": imo, "length": length, "beam": beam}
+                          "type": stype, "imo": imo, "length": length, "beam": beam,
+                          "draught": ship.get("MaximumStaticDraught"),
+                          "destination": _clean_destination(ship.get("Destination", ""))}
                 with _cache_lock:
                     _vessel_cache[name.upper()] = entry
                     if callsign:
