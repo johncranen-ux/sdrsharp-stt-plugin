@@ -39,6 +39,10 @@ _SERVER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SERVER_DIR))
 
 DEFAULT_CONVERSATIONS = _SERVER_DIR / "stt_proxy" / "conversations.json"
+# Where the plugin writes its captures. Only days that still have audio can be labelled by
+# ear, which is the whole reason to prefer them over correcting the resolver's own guesses.
+DEFAULT_CAPTURES = os.environ.get(
+    "STT_CAPTURES_DIR", r"D:\SDR\SdrSharp\Plugins\SttPlugin\captures")
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -59,8 +63,29 @@ class Label:
         return self.mmsi is not None
 
 
-def parse_labels(path) -> list[Label]:
-    """Read a ground-truth file: '#' comments, then <start> TAB <end> TAB <mmsi|-> [TAB note].
+def _resolve_expected(value: str, lookup: dict | None, where: str) -> str | None:
+    """Turn the third field into an MMSI. Accepts an MMSI or a vessel name.
+
+    A name is what you hear on the recording; an MMSI is a number you would have to go and
+    look up for every line. The name is resolved by EXACT cache key and never fuzzily -- a
+    fuzzy resolution here would build the matcher being measured into its own ground truth.
+    """
+    if value in ("-", ""):
+        return None
+    if value.isdigit():
+        return value
+    if lookup is None:
+        raise ValueError(f"{where}: {value!r} is a vessel name, which needs the AIS cache to "
+                         f"resolve -- run bench_identify.py rather than calling parse_labels bare")
+    mmsi = lookup.get(value.upper())
+    if not mmsi:
+        raise ValueError(f"{where}: {value!r} is not in the AIS cache. Use its MMSI directly, "
+                         f"or check the spelling against /api/ais-cache")
+    return mmsi
+
+
+def parse_labels(path, lookup: dict | None = None) -> list[Label]:
+    """Read a ground-truth file: '#' comments, then <start> TAB <end> TAB <mmsi|name|-> [TAB note].
 
     A malformed line raises rather than being skipped. Dropping one silently would shrink
     the corpus and flatter every score computed from it, which is the failure mode a
@@ -75,40 +100,84 @@ def parse_labels(path) -> list[Label]:
         if len(parts) < 3:
             raise ValueError(f"{path}:{lineno}: expected at least 3 tab-separated fields, "
                              f"got {len(parts)}: {raw!r}")
-        start_s, end_s, mmsi_s = (p.strip() for p in parts[:3])
+        start_s, end_s, expected_s = (p.strip() for p in parts[:3])
         note = parts[3].strip() if len(parts) > 3 else ""
         try:
             start = datetime.datetime.strptime(start_s, _TS_FMT)
             end   = datetime.datetime.strptime(end_s, _TS_FMT)
         except ValueError as exc:
             raise ValueError(f"{path}:{lineno}: {exc}") from exc
-        labels.append(Label(start, end, None if mmsi_s in ("-", "") else mmsi_s, note))
+        mmsi = _resolve_expected(expected_s, lookup, f"{path}:{lineno}")
+        labels.append(Label(start, end, mmsi, note))
     return labels
 
 
-def make_labels(exchanges: list[dict]) -> list[str]:
+def load_capture_index(captures_dir, day: str) -> list[tuple[str, str, str]]:
+    """(timestamp, clip id, channel) for one capture day, so a label can name its audio.
+
+    The plugin writes index.jsonl with a UTF-8 BOM, hence utf-8-sig.
+    """
+    path = Path(captures_dir) / day / "index.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            stamp = entry["timestamp"][:19].replace("T", " ")
+        except (json.JSONDecodeError, KeyError):
+            continue
+        out.append((stamp, f"{int(entry.get('index', 0)):04d}", entry.get("channel", "")))
+    return out
+
+
+def make_labels(exchanges: list[dict], days: set | None = None,
+                clips: list[tuple[str, str, str]] | None = None) -> list[str]:
     """A draft labels file built from what the resolver currently believes.
 
     Same principle as make_references.py: correcting a draft while listening beats typing
     one from scratch. Every line still has to be checked -- a draft that is simply accepted
     scores the resolver against itself and reports 100%.
+
+    The vessel is drafted as a NAME rather than an MMSI so a wrong line is corrected by
+    typing what you hear, and `clips` names the wav files covering each conversation so
+    there is something to hear.
     """
     lines = [
         "# Identification ground truth. One line per REAL conversation, not per stored",
-        "# exchange -- if the resolver split one conversation in three, that is one line here",
+        "# exchange -- if the resolver split one conversation in three, that is ONE line here",
         "# and the split is what gets measured.",
         "#",
-        "# <start>\t<end>\t<mmsi or - >\t<note>",
+        "# <start>\t<end>\t<vessel name, MMSI, or - >\t<note>",
         "#",
-        "# '-' means nobody was identifiable from the audio, and asserts that naming anyone",
-        "# is wrong. Drafted from the resolver's own verdicts, so CHECK EVERY LINE: accepting",
-        "# it unread scores the resolver against itself.",
+        "# HOW TO CORRECT A LINE",
+        "#   1. Play the wav files named at the end of the line, in order.",
+        "#   2. Decide who was actually speaking across the WHOLE conversation.",
+        "#   3. Put that in field 3: the vessel name as AIS spells it, or its MMSI.",
+        "#      Use '-' when nobody could be identified from the audio -- that is a real",
+        "#      answer, and it asserts that naming anyone at all is wrong.",
+        "#   4. Delete any line you are not sure about. An unlabelled conversation is simply",
+        "#      not scored; a guessed one corrupts every number computed from this file.",
+        "#",
+        "# Field 3 is drafted from the resolver's own verdict, so CHECK EVERY LINE: a draft",
+        "# accepted unread scores the resolver against itself and reports 100%.",
     ]
     for ex in sorted(exchanges, key=lambda e: e.get("start", "")):
+        start, end = ex.get("start", ""), ex.get("end", "")
+        if days and start[:10] not in days:
+            continue
         turns = ex.get("turns") or []
-        first = (turns[0].get("text") or "")[:60].replace("\t", " ") if turns else ""
-        note  = f"{ex.get('vessel') or 'unidentified'} | {first}"
-        lines.append(f"{ex.get('start','')}\t{ex.get('end','')}\t{ex.get('mmsi') or '-'}\t{note}")
+        first = (turns[0].get("text") or "")[:55].replace("\t", " ") if turns else ""
+        wavs  = ""
+        if clips:
+            ids = [cid for stamp, cid, _ch in clips if start <= stamp <= end]
+            if ids:
+                wavs = "  [" + " ".join(f"{i}_sent.wav" for i in ids) + "]"
+        note = f"{ex.get('vessel') or 'unidentified'} | {first}{wavs}"
+        lines.append(f"{start}\t{end}\t{ex.get('vessel') or '-'}\t{note}")
     return lines
 
 
@@ -297,6 +366,12 @@ def main() -> int:
     ap.add_argument("--make-labels", action="store_true",
                     help="write a draft labels file from the current verdicts and exit")
     ap.add_argument("--out", help="where --make-labels writes (default: stdout)")
+    ap.add_argument("--day", action="append", metavar="YYYY-MM-DD",
+                    help="only draft conversations from this day; repeatable. Worth using: "
+                         "only days whose capture audio still exists can be labelled by ear")
+    ap.add_argument("--captures", default=DEFAULT_CAPTURES,
+                    help="capture root, so each drafted line names the wav files to play "
+                         f"(default: {DEFAULT_CAPTURES})")
     ap.add_argument("--resolve", action="store_true",
                     help="re-run the resolver and score that instead of the stored verdicts "
                          "(makes API calls)")
@@ -309,18 +384,28 @@ def main() -> int:
         return _fail(f"no conversation store at {args.conversations}")
 
     if args.make_labels:
-        text = "\n".join(make_labels(exchanges)) + "\n"
+        days = set(args.day) if args.day else None
+        clips: list[tuple[str, str, str]] = []
+        for day in sorted(days or {e.get("start", "")[:10] for e in exchanges if e.get("start")}):
+            clips.extend(load_capture_index(args.captures, day))
+        lines = make_labels(exchanges, days=days, clips=clips)
+        text = "\n".join(lines) + "\n"
+        drafted = sum(1 for ln in lines if not ln.startswith("#"))
         if args.out:
             Path(args.out).write_text(text, encoding="utf-8")
-            print(f"wrote {len(exchanges)} draft labels to {args.out} -- correct them before use",
-                  file=sys.stderr)
+            print(f"wrote {drafted} draft labels to {args.out} "
+                  f"({len(clips)} clips indexed) -- correct them before use", file=sys.stderr)
         else:
             print(text, end="")
         return 0
 
     if not args.labels:
         return _fail("--labels is required (build one with --make-labels first)")
-    labels = parse_labels(args.labels)
+    # Labels may name a vessel rather than an MMSI, which needs the cache to resolve.
+    from stt_proxy import ais
+    ais._load_cache()
+    lookup = {name: entry.get("mmsi") for name, entry in ais._vessel_cache.items()}
+    labels = parse_labels(args.labels, lookup=lookup)
     if not labels:
         return _fail(f"no labels in {args.labels}")
 

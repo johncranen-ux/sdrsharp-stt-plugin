@@ -69,6 +69,42 @@ def test_a_malformed_label_is_rejected_loudly(bad, tmp_path):
         bi.parse_labels(_write(tmp_path, bad))
 
 
+# A name is what you hear on the recording; an MMSI is a number you would have to go and
+# look up for every line. Both are accepted, and a name is resolved by EXACT cache key --
+# never fuzzily, or the ground truth would inherit the very matching it exists to measure.
+
+_LOOKUP = {"THULELAND": "266248000", "PECHORA STAR": "215760000"}
+
+
+def test_a_vessel_name_can_be_used_instead_of_an_mmsi(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-04 13:58:14\t2026-08-04 13:59:08\tTHULELAND\theard it\n"),
+        lookup=_LOOKUP)
+    assert labels[0].mmsi == "266248000"
+
+
+def test_a_name_is_matched_case_insensitively(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-04 13:58:14\t2026-08-04 13:59:08\tPechora Star\tx\n"),
+        lookup=_LOOKUP)
+    assert labels[0].mmsi == "215760000"
+
+
+def test_an_unknown_vessel_name_is_rejected(tmp_path):
+    """Better to stop than to score against a vessel that is not in the cache: the label
+    would silently never match and quietly depress recall."""
+    with pytest.raises(ValueError, match="NOT A SHIP"):
+        bi.parse_labels(
+            _write(tmp_path, "2026-08-04 13:58:14\t2026-08-04 13:59:08\tNOT A SHIP\tx\n"),
+            lookup=_LOOKUP)
+
+
+def test_a_name_without_a_lookup_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="AIS cache"):
+        bi.parse_labels(
+            _write(tmp_path, "2026-08-04 13:58:14\t2026-08-04 13:59:08\tTHULELAND\tx\n"))
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 #
@@ -181,8 +217,8 @@ def test_labels_are_bootstrapped_from_current_verdicts():
     lines = bi.make_labels([_exchange("THULELAND", "266248000", ["13:58:14", "13:58:25"])])
     body = [ln for ln in lines if not ln.startswith("#")]
     assert len(body) == 1
-    assert "266248000" in body[0]
-    assert body[0].count("\t") >= 2
+    assert body[0].startswith("2026-08-04 13:58:14\t2026-08-04 13:58:25\t")
+    assert body[0].count("\t") >= 3
 
 
 def test_an_unidentified_exchange_is_bootstrapped_as_a_dash():
@@ -191,10 +227,40 @@ def test_an_unidentified_exchange_is_bootstrapped_as_a_dash():
     assert "\t-\t" in body[0]
 
 
+def test_only_the_requested_days_are_drafted():
+    """Only 07-31 and 08-04 have both stored conversations and their capture audio, so those
+    are the only days worth labelling by ear."""
+    stored = [_exchange("A", "1", ["13:58:14"], start="2026-07-31 13:58:14"),
+              _exchange("B", "2", ["10:03:36"], start="2026-08-03 10:03:36")]
+    body = [ln for ln in bi.make_labels(stored, days={"2026-07-31"}) if not ln.startswith("#")]
+    assert len(body) == 1 and body[0].startswith("2026-07-31")
+
+
+def test_the_draft_names_the_clips_to_listen_to():
+    """The whole point of labelling these two days: the audio is still on disk, so ground
+    truth comes from the recording rather than from the resolver's own guess."""
+    stored = [_exchange("THULELAND", "266248000", ["13:58:14", "13:58:25"],
+                        start="2026-08-04 13:58:14", end="2026-08-04 13:58:25")]
+    clips = [("2026-08-04 13:58:14", "0231", "160,650"),
+             ("2026-08-04 13:58:25", "0232", "160,650"),
+             ("2026-08-04 15:00:00", "0299", "160,650")]
+    body = [ln for ln in bi.make_labels(stored, clips=clips) if not ln.startswith("#")]
+    assert "0231_sent.wav" in body[0]
+    assert "0232_sent.wav" in body[0]
+    assert "0299" not in body[0], "a clip outside the conversation must not be listed"
+
+
+def test_the_draft_uses_the_vessel_name_not_the_mmsi():
+    """So a correct line needs no edit, and a wrong one is corrected by typing what you hear."""
+    body = [ln for ln in bi.make_labels(
+        [_exchange("THULELAND", "266248000", ["13:58:14"])]) if not ln.startswith("#")]
+    assert "\tTHULELAND\t" in body[0]
+
+
 def test_bootstrapped_labels_round_trip(tmp_path):
     """What --make-labels emits must parse back, or the corrected file will not load."""
     stored = [_exchange("THULELAND", "266248000", ["13:58:14", "13:58:25"]),
               _exchange(None, None, ["14:00:00"])]
     p = _write(tmp_path, "\n".join(bi.make_labels(stored)) + "\n")
-    labels = bi.parse_labels(p)
+    labels = bi.parse_labels(p, lookup=_LOOKUP)
     assert [l.mmsi for l in labels] == ["266248000", None]
