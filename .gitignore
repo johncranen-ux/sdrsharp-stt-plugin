@@ -42,6 +42,11 @@ conversations.json
 references.txt
 references-*.txt
 
+# bench_identify.py ground truth, and its output. Drafted from conversations.json, so the
+# note field carries transcript text and it falls under exactly the restriction above.
+identification-labels*.txt
+bench-identify-results*.json
+
 # bench.py / stress.py output (generated locally; captures are user data)
 bench-results*.json
 bench-report*.html

@@ -341,6 +341,57 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## Identification is now measurable (2026-08-04)
+
+Transcription has had `bench.py` and a pooled WER figure since the beginning, and every
+change to it was argued with numbers — split-half validated, in-sample figures marked as
+such. Identification had none of that. The AIS matcher, the hint filter, the resolver and
+its prompt were all changed on the strength of one-off scripts written to chase whatever had
+just gone wrong, then thrown away.
+
+Two bugs found by hand on the same day made the case. **PECHORA STAR** spelled its callsign
+out cleanly and resolved to nobody, because a fuzzy name match at 76.9 pre-empted an exact
+callsign lookup. **THULELAND** held one 5-turn conversation that came back as three
+exchanges naming three different ships. Both were diagnosed with throwaway code, and neither
+would have shown up in any number the project tracked.
+
+`server/bench_identify.py` scores identification the way `bench.py` scores transcription.
+
+**Scored per transmission, not per stored exchange**, because over-segmentation is one of the
+failures being measured. A per-exchange score calls the THULELAND case "one right, two
+wrong"; per transmission it is 1 of 5, plus a conversation split three ways — which is what
+actually happened. Run against the two known failures:
+
+```
+  transmissions scored   9
+    correct              1
+    wrong                4
+    missed               4   (identifiable, named nobody)
+  precision              20.0%
+  recall                 11.1%
+  exchanges/conversation 2.00   (1 conversation(s) split across more than one)
+```
+
+Three distinctions the metric keeps apart, because they have different consequences on
+screen: a **wrong** name is a confident false identity, a **miss** is an honest "unidentified",
+and **correctly naming nobody** is a success that a naive accuracy figure would punish. A
+label of `-` asserts that naming *anyone* is wrong, which is what stops the benchmark
+rewarding bold guessing — the specific failure mode the hint filter and the callsign guard
+were both built against.
+
+**`--resolve` is the mode that makes a change measurable.** It re-runs the resolver over the
+same conversations and scores that, so a prompt edit can be A/B'd instead of argued about.
+Conversations are handed back whole rather than as their stored exchanges — otherwise a
+rerun inherits the very segmentation it is being measured on. It costs API calls, so it is
+opt-in; the default mode reads the store and is free.
+
+Labels are bootstrapped from the resolver's own verdicts (`--make-labels`), the same way
+`make_references.py` drafts transcripts from the plugin's output: correcting a draft while
+listening beats typing from scratch. The header says to check every line, because a draft
+accepted unread scores the resolver against itself and reports 100%. `identification-labels*.txt`
+is gitignored — the note field carries transcript text and falls under the same restriction
+as `references*.txt`.
+
 ## The live pages were cacheable (2026-08-04)
 
 `/conversations` self-refreshes with `<meta http-equiv="refresh" content="30">`, and it looked
@@ -659,6 +710,9 @@ traffic on those channels.
 - End-to-end accuracy: `py server/bench.py --captures <dir> --references <file> --matrix full`
   (see `server/bench.py`'s docstring; `server/references.txt` documents the ground-truth
   format, including conventions for uncertain/inaudible audio)
+- Identification accuracy: `py server/bench_identify.py --labels identification-labels.txt`
+  (draft the labels with `--make-labels` first, then correct them; add `--resolve` to
+  re-run the resolver and score that, which is how a resolver or prompt change is A/B'd)
 
 ## Deployment
 
