@@ -99,6 +99,52 @@ def test_an_unknown_vessel_name_is_rejected(tmp_path):
             lookup=_LOOKUP)
 
 
+# Tabs turned out to be the single biggest obstacle to actually labelling: an editor that
+# inserts spaces silently breaks every line touched, and the whole file then fails to parse.
+# The two timestamps have a fixed shape, so they can be recognised whatever separates them,
+# which leaves the vessel unambiguous even when it contains spaces.
+
+def test_space_separated_fields_are_accepted(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-07-31 12:39:48 2026-07-31 12:39:52 THULELAND\n"), lookup=_LOOKUP)
+    assert labels[0].mmsi == "266248000"
+    assert labels[0].start.hour == 12 and labels[0].end.minute == 39
+
+
+def test_a_multi_word_vessel_name_survives_space_separation(tmp_path):
+    """'PECHORA STAR' contains a space itself, which is exactly why the timestamps have to
+    be matched by shape rather than by splitting on whitespace."""
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-04 10:03:36 2026-08-04 10:04:04 PECHORA STAR\n"), lookup=_LOOKUP)
+    assert labels[0].mmsi == "215760000"
+
+
+def test_tabs_still_work(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-07-31 12:39:48\t2026-07-31 12:39:52\tTHULELAND\tnote here\n"),
+        lookup=_LOOKUP)
+    assert labels[0].mmsi == "266248000" and labels[0].note == "note here"
+
+
+def test_a_note_is_kept_off_the_vessel_by_a_tab(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-07-31 12:39:48 2026-07-31 12:39:52 THULELAND\tmerged 0000+0001\n"),
+        lookup=_LOOKUP)
+    assert labels[0].mmsi == "266248000"
+    assert labels[0].note == "merged 0000+0001"
+
+
+def test_a_note_run_into_the_vessel_says_so(tmp_path):
+    """The remaining ambiguity, and the one people actually hit: without a tab there is no
+    way to tell where a multi-word vessel name ends and a note begins, so say that plainly
+    rather than guessing at a ship."""
+    with pytest.raises(ValueError, match="TAB"):
+        bi.parse_labels(_write(
+            tmp_path,
+            "2026-07-31 12:39:48 2026-07-31 12:39:52 MISTRAL Maas Approach, entering your area\n"),
+            lookup={"MISTRAL": "1"})
+
+
 def test_a_name_without_a_lookup_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="AIS cache"):
         bi.parse_labels(
@@ -206,6 +252,60 @@ def test_channel_must_match(tmp_path):
     labels = bi.parse_labels(_write(tmp_path, _THULELAND_TRUTH))
     stored = [_exchange("THULELAND", "266248000", ["13:58:14"], channel="161,650")]
     assert bi.score(labels, stored)["scored_turns"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Looking a vessel up while labelling
+#
+# Field 3 has to be spelled the way AIS spells it, and what you hear on the radio often is
+# not. This is a human convenience and is deliberately fuzzy; the label resolution it feeds
+# stays exact, so a near-miss shown here still has to be typed correctly to be accepted.
+# ---------------------------------------------------------------------------
+
+_FLEET = [
+    {"name": "THULELAND", "mmsi": "266248000", "callsign": "SKEI",
+     "latitude": 51.90, "longitude": 3.09},
+    {"name": "GOOILAND", "mmsi": "244700270", "callsign": "PF4616",
+     "latitude": 51.96, "longitude": 5.94},
+    {"name": "MSC TEMA VIII", "mmsi": "636024193", "callsign": "5LRK9"},
+]
+
+
+def test_a_substring_finds_the_vessel():
+    hits = bi.find_vessels("thule", _FLEET)
+    assert [h["name"] for h in hits] == ["THULELAND"]
+
+
+def test_the_search_is_case_insensitive():
+    assert bi.find_vessels("MSC tema", _FLEET)[0]["name"] == "MSC TEMA VIII"
+
+
+def test_a_misheard_name_still_finds_it():
+    """'Tulliland' is what the decoder produced for THULELAND -- no substring matches, so
+    the fallback has to be fuzzy or the lookup is useless exactly when it is needed."""
+    assert bi.find_vessels("Tulliland", _FLEET)[0]["name"] == "THULELAND"
+
+
+def test_a_hopeless_query_returns_nothing():
+    assert bi.find_vessels("zzzzzzzz", _FLEET) == []
+
+
+def test_results_carry_what_is_needed_to_label():
+    hit = bi.find_vessels("thule", _FLEET)[0]
+    assert hit["mmsi"] == "266248000" and hit["callsign"] == "SKEI"
+
+
+def test_distance_from_the_working_area_is_reported():
+    """Two ships can share a name; the near one is the one on the radio. This is also the
+    only place the 'matching ignores position' limitation is visible while labelling."""
+    hits = bi.find_vessels("land", _FLEET)
+    by_name = {h["name"]: h for h in hits}
+    assert by_name["THULELAND"]["km"] < by_name["GOOILAND"]["km"]
+
+
+def test_a_vessel_with_no_position_still_appears():
+    hit = next(h for h in bi.find_vessels("tema", _FLEET))
+    assert hit["km"] is None, "no position is not a reason to hide it from the search"
 
 
 # ---------------------------------------------------------------------------

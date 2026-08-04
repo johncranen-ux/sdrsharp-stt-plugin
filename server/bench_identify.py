@@ -31,6 +31,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,15 @@ DEFAULT_CONVERSATIONS = _SERVER_DIR / "stt_proxy" / "conversations.json"
 DEFAULT_CAPTURES = os.environ.get(
     "STT_CAPTURES_DIR", r"D:\SDR\SdrSharp\Plugins\SttPlugin\captures")
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+# Fields were originally tab-separated, and tabs turned out to be the single biggest obstacle
+# to actually labelling anything: an editor set to insert spaces silently breaks every line
+# touched, and one broken line fails the whole file. Both timestamps have a fixed shape, so
+# they can be recognised whatever separates them -- which leaves the rest of the line
+# unambiguous even when the vessel name contains spaces ("PECHORA STAR", "MSC TEMA VIII").
+# A tab is still honoured where present, and is the only way to keep a note off the name.
+_TS_RE   = r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"
+_LINE_RE = re.compile(rf"^({_TS_RE})[ \t]+({_TS_RE})[ \t]+(.+)$")
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +89,12 @@ def _resolve_expected(value: str, lookup: dict | None, where: str) -> str | None
                          f"resolve -- run bench_identify.py rather than calling parse_labels bare")
     mmsi = lookup.get(value.upper())
     if not mmsi:
+        # Much the commonest cause: a note left on the line without a tab in front of it, so
+        # it got read as part of the ship's name. Say so before blaming the spelling.
+        hint = (" -- if that includes a note, put a TAB before the note or delete it "
+                "(notes are not scored)") if len(value.split()) > 3 else ""
         raise ValueError(f"{where}: {value!r} is not in the AIS cache. Use its MMSI directly, "
-                         f"or check the spelling against /api/ais-cache")
+                         f"or check the spelling against /api/ais-cache{hint}")
     return mmsi
 
 
@@ -96,20 +110,71 @@ def parse_labels(path, lookup: dict | None = None) -> list[Label]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split("\t")
-        if len(parts) < 3:
-            raise ValueError(f"{path}:{lineno}: expected at least 3 tab-separated fields, "
-                             f"got {len(parts)}: {raw!r}")
-        start_s, end_s, expected_s = (p.strip() for p in parts[:3])
-        note = parts[3].strip() if len(parts) > 3 else ""
+        match = _LINE_RE.match(line)
+        if not match:
+            raise ValueError(f"{path}:{lineno}: expected '<start> <end> <vessel|mmsi|->', where "
+                             f"both timestamps look like 2026-07-31 12:39:48. Got: {raw!r}")
+        start_s, end_s, rest = match.group(1), match.group(2), match.group(3)
+        # A tab, if there is one, ends the vessel and begins the note. Without one the whole
+        # remainder is the vessel -- which is right for "PECHORA STAR" and wrong for a note
+        # that was never separated, so _resolve_expected explains that case.
+        expected_s, _, note = rest.partition("\t")
         try:
             start = datetime.datetime.strptime(start_s, _TS_FMT)
             end   = datetime.datetime.strptime(end_s, _TS_FMT)
         except ValueError as exc:
             raise ValueError(f"{path}:{lineno}: {exc}") from exc
-        mmsi = _resolve_expected(expected_s, lookup, f"{path}:{lineno}")
+        mmsi = _resolve_expected(expected_s.strip(), lookup, f"{path}:{lineno}")
+        note = note.strip()
         labels.append(Label(start, end, mmsi, note))
     return labels
+
+
+# Looking a vessel up while labelling
+#
+# Field 3 has to be spelled the way AIS spells it, and what you hear on the radio often is
+# not -- "Tulliland" for THULELAND, "Dooliland" for GOOILAND. This search is deliberately
+# fuzzy because it is a human convenience; the label resolution it feeds stays exact, so a
+# near-miss shown here still has to be typed correctly before it is accepted as truth.
+#
+# Distance is shown because two ships can share a name and the near one is the one on the
+# radio -- and because it is the only place, while labelling, that the "matching ignores
+# where a vessel actually is" limitation is visible at all.
+_MAAS_CENTER = (52.02, 3.88)
+FIND_MIN_SCORE = 65
+FIND_LIMIT     = 12
+
+
+def _km_from_maas(entry: dict) -> float | None:
+    import math
+    if entry.get("latitude") is None or entry.get("longitude") is None:
+        return None
+    lat0, lon0 = _MAAS_CENTER
+    dlat = math.radians(entry["latitude"] - lat0)
+    dlon = math.radians(entry["longitude"] - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(entry["latitude"]))
+         * math.sin(dlon / 2) ** 2)
+    return 6371 * 2 * math.asin(math.sqrt(a))
+
+
+def find_vessels(query: str, entries: list[dict]) -> list[dict]:
+    """Cached vessels whose name matches `query`, substring first then fuzzy."""
+    from rapidfuzz import fuzz
+
+    q = (query or "").strip().upper()
+    if not q:
+        return []
+    subs  = [e for e in entries if q in e.get("name", "").upper()]
+    pool  = subs
+    if not pool:
+        scored = [(fuzz.ratio(q, e.get("name", "").upper()), e) for e in entries]
+        pool = [e for s, e in sorted(scored, key=lambda x: -x[0]) if s >= FIND_MIN_SCORE]
+    out = []
+    for e in pool[:FIND_LIMIT]:
+        out.append({"name": e.get("name"), "mmsi": e.get("mmsi"),
+                    "callsign": e.get("callsign") or "-", "km": _km_from_maas(e)})
+    return out
 
 
 def load_capture_index(captures_dir, day: str) -> list[tuple[str, str, str]]:
@@ -376,7 +441,25 @@ def main() -> int:
                     help="re-run the resolver and score that instead of the stored verdicts "
                          "(makes API calls)")
     ap.add_argument("--out-json", help="write the scores as JSON, for comparing two runs")
+    ap.add_argument("--find", metavar="NAME",
+                    help="look a vessel up in the AIS cache and exit, to get the spelling "
+                         "field 3 needs. Fuzzy, so a misheard name still finds it")
     args = ap.parse_args()
+
+    if args.find:
+        from stt_proxy import ais
+        ais._load_cache()
+        with ais._cache_lock:
+            entries = list(ais._vessel_cache.values())
+        hits = find_vessels(args.find, entries)
+        if not hits:
+            print(f"nothing in the cache resembles {args.find!r}", file=sys.stderr)
+            return 1
+        print(f"{'name':28s} {'MMSI':>10s} {'callsign':>9s}   {'km from Maas Center':>19s}")
+        for h in hits:
+            dist = "  -" if h["km"] is None else f"{h['km']:6.0f}"
+            print(f"{h['name']:28s} {h['mmsi'] or '-':>10s} {h['callsign']:>9s}   {dist:>19s}")
+        return 0
 
     try:
         exchanges = json.loads(Path(args.conversations).read_text(encoding="utf-8"))
@@ -405,7 +488,12 @@ def main() -> int:
     from stt_proxy import ais
     ais._load_cache()
     lookup = {name: entry.get("mmsi") for name, entry in ais._vessel_cache.items()}
-    labels = parse_labels(args.labels, lookup=lookup)
+    try:
+        labels = parse_labels(args.labels, lookup=lookup)
+    except ValueError as exc:
+        # A hand-edited file will be malformed regularly, and that is not a crash: print the
+        # line and the reason, since this doubles as the syntax check while labelling.
+        return _fail(str(exc))
     if not labels:
         return _fail(f"no labels in {args.labels}")
 
