@@ -1214,11 +1214,26 @@ def test_fuzzy_maas_normalises_known_variants(variant):
     assert result.startswith("Maas Approach")
 
 
-@pytest.mark.parametrize("spelling", ["approach", "Approach", "Aproach"])
+@pytest.mark.parametrize("spelling", [
+    "approach", "Approach", "Aproach",
+    # A recognised approach-word is a precondition for the rule firing at all, so a spelling
+    # the pattern missed took the Maas correction down with it: "Aas Aapproach" was left
+    # entirely alone despite "Aas" scoring 85.7. 7 clips carried "Aapproach", 1 "Proach".
+    "Aapproach", "Proach",
+])
 def test_fuzzy_maas_tolerates_misspelled_approach(spelling):
-    """Only spellings actually observed in Groq output -- 'Approach' 25x, 'approach' 14x,
-    'Aproach' 2x. The regex is deliberately not widened past what the data shows."""
     assert proxy._correct_maas_before_approach(f"Aas {spelling}").startswith("Maas Approach")
+
+
+# Threshold 70 recognised only half the variants the references show as "Maas Approach".
+# Measured over the 636 benchmarked transmissions, dropping it to 50 corrects 54 more rows
+# across 27 clips and damages none; split-half validated at -1.04 / -1.51 WER points.
+@pytest.mark.parametrize("variant", [
+    "Aps", "Master", "Marsh", "MOTS", "Must", "Last", "Mous", "Airmass", "Kalmars", "Amass",
+])
+def test_fuzzy_maas_reaches_the_variants_the_references_show(variant):
+    result = proxy._correct_maas_before_approach(f"{variant} approach, this is Neptune")
+    assert result.startswith("Maas Approach"), f"{variant} is 'Maas Approach' in the references"
 
 
 @pytest.mark.parametrize("text", [
@@ -1230,12 +1245,69 @@ def test_fuzzy_maas_leaves_dissimilar_names_alone(text):
     assert proxy._correct_maas_before_approach(text) == text
 
 
+@pytest.mark.parametrize("text", [
+    "we are approaching the buoy",
+    "I'm approaching Maasvlakte",
+])
+def test_fuzzy_maas_leaves_the_verb_alone(text):
+    """Every "approaching" in the references is ordinary English ("are approaching",
+    "I'm approaching"); only the noun is ever the station. The old rule also silently ate
+    the "ing", rewriting "mass approaching" as "Maas Approach"."""
+    assert proxy._correct_maas_before_approach(text) == text
+
+
+def test_fuzzy_maas_does_not_swallow_a_vessel_name():
+    """Clip 0037 is "Starfighter, Maas Approach" with the comma lost in decoding. Replacing
+    whatever precedes "approach" scores better overall but deletes the ship, which is the one
+    thing the identification path cannot afford -- so the rule stays similarity-gated."""
+    assert "Starfighter" in proxy._correct_maas_before_approach("Starfighter Aapproach")
+
+
 def test_fuzzy_maas_is_applied_through_the_maritime_pipeline():
     assert "Maas Approach" in proxy._apply_sttt_corrections("AAS approach, AAS approach, Fjordstrom")
 
 
 def test_fuzzy_maas_is_not_applied_on_airband():
     text = "Aas approach"
+    assert proxy._apply_sttt_corrections(text, mode="airband") == text
+
+
+# Maas Center, and "anchor"
+#
+# Two smaller rules from the same substitution sweep. Both are clean but thin -- 2 clips
+# each, against 4 for the ladder rule -- so they are worth roughly a tenth of a WER point
+# apiece rather than the 1.24 the approach widening is worth.
+
+@pytest.mark.parametrize("variant", ["Maaf", "Mass", "Mast", "Aas"])
+def test_fuzzy_maas_normalises_the_center_too(variant):
+    """"Maas Center, Recon buoy" is read out as often as the approach call, and the same
+    mis-spellings land on it -- "Maaf Center, Rekkenbooi"."""
+    assert proxy._apply_sttt_corrections(f"{variant} Center, Recon buoy").startswith("Maas Center")
+
+
+@pytest.mark.parametrize("text", [
+    "Rotterdam Center, over",
+    "the traffic center is closed",
+])
+def test_center_rule_leaves_dissimilar_names_alone(text):
+    assert proxy._apply_sttt_corrections(text) == text
+
+
+def test_center_rule_is_not_applied_on_airband():
+    text = "Aas Center"
+    assert proxy._apply_sttt_corrections(text, mode="airband") == text
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("we are at Angkor, India", "anchor"),
+    ("heave up Angkor", "heave up anchor"),
+])
+def test_anchor_is_corrected(raw, expected):
+    assert expected in proxy._apply_sttt_corrections(raw)
+
+
+def test_anchor_rule_is_not_applied_on_airband():
+    text = "we are at Angkor"
     assert proxy._apply_sttt_corrections(text, mode="airband") == text
 
 

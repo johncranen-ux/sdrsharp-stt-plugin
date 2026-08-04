@@ -90,9 +90,11 @@ one sample rarely fires on the next. Similarity matching generalises to spelling
 seen during derivation and is worth **3.7 points held out**.
 
 `_correct_maas_before_approach` therefore replaces any token preceding an "approach"-like
-word whose `rapidfuzz.ratio` to "maas" is ≥ `MAAS_FUZZ_THRESHOLD` (default 70). Reviewed
-against every rewrite it makes on the full set: no false positives, and the ambiguous real
-words (`Marsh`, `Moth`, `last`, `are`) fall below threshold and are correctly left alone.
+word whose `rapidfuzz.ratio` to "maas" is ≥ `MAAS_FUZZ_THRESHOLD`. That threshold was 70
+when this was written, on the reasoning that the ambiguous real words (`Marsh`, `last`,
+`are`) fell below it and were "correctly left alone" — which a larger corpus showed was
+wrong for `Marsh` and `last`, both of which are genuinely "Maas Approach" in the references.
+It is now 50; see "The fuzzy Maas rule was firing on well under half the cases" below.
 
 Corrections are now **mode-scoped**: `_apply_sttt_corrections(text, mode=...)` applies
 shared rules (`Callsign`) on any band but restricts the maritime set, including the fuzzy
@@ -338,6 +340,55 @@ Escaping and the link live in `stt_proxy/markup.py`, shared by both pages becaus
 module previously interpolated every field into HTML unescaped, which matters more than it
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
+
+## The fuzzy Maas rule was firing on well under half the cases (2026-08-04)
+
+Running the substitution-frequency sweep again — this time over all 636 benchmarked
+transmissions carrying a reference, and against **corrected** output so only what is still
+broken shows up — put the biggest remaining cluster inside a rule that already existed.
+`_correct_maas_before_approach` was missing most of its own target, for two independent
+reasons.
+
+**A recognised approach-word is a precondition**, so a spelling the pattern missed took the
+Maas correction down with it. `ap+r?oa?ch` cannot match `Aapproach` — the leading double
+'a' defeats `ap+` — so *"Aas Aapproach"* was left completely alone even though `Aas` scores
+85.7. Seven clips carried `Aapproach` and one `Proach`; none could ever be corrected.
+
+**The threshold recognised only half the variants the references show.** Measured against
+"maas": `aps` 57.1, `master` 60.0, `marsh` 66.7, `mots`/`must`/`last`/`mous` 50.0 — all
+verifiably "Maas Approach" in the references, all left alone at 70.
+
+What licenses a threshold this loose is positional. Across every reference file the token
+before an "approach" **noun** is `maas` **210 times out of 212**, and both exceptions are
+comma-separated, which the pattern already refuses to cross. The only other form,
+`approaching`, is always ordinary English (*"we are approaching"*, *"I'm approaching"*) — so
+the rule is now noun-only, which also fixes a quiet bug: it replaced the whole word including
+its suffix, turning *"mass approaching"* into *"Maas Approach"*.
+
+| | pooled WER |
+|---|---|
+| before | 36.69% |
+| widened spelling + threshold 50, noun only | **35.45%** (−1.24) |
+
+54 rows corrected across 27 clips, none damaged. Split-half **−1.04 / −1.51** rather than
+collapsing — a similarity rule generalises where a list of spellings does not, which is the
+same result the original 2026-07-30 experiment found.
+
+**Going fully positional was measured and rejected.** Replacing *whatever* precedes the noun,
+ignoring similarity, scores 35.34% — 0.11 better. Clip 0037 is *"Starfighter, Maas Approach"*
+with the comma lost in decoding, and a positional rule rewrites that to *"Maas Approach"*,
+deleting the ship. Feeding the identification path a transmission with the vessel name
+removed is not worth a tenth of a point. At 50, `Starfighter` scores 13.3 and survives.
+
+Two smaller rules from the same sweep, both clean but on 2 clips each (against 4 for the
+ladder rule): fuzzy `Maas` before `Center` — *"Maaf Center, Rekkenbooi"*, read out about as
+often as the approach call — worth ~0.08, and `Angkor` → `anchor` worth ~0.10. All three
+together: **36.69% → 35.23%**.
+
+Things the sweep surfaced that are deliberately *not* correction rules: vessel-name errors
+(`holman`→`kirkeholmen`, `miltrasser`→`multraship`, `mst`→`msc`), which are the AIS matcher's
+job, and digit-vs-word differences (`0`→`zero`), which are a benchmark normalisation artifact
+rather than a transcription error — the CH01 prompt deliberately preserves the spoken form.
 
 ## "ladder" → "letter" / "leather" (2026-08-04)
 

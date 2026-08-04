@@ -146,6 +146,9 @@ _MARITIME_CORRECTIONS = [
     # but a letter of protest and a letter of credit are real ship's business, and excluding
     # them costs nothing on the 14 cases that do occur.
     (r'\b(?:letter|leather)\b(?!\s+of\b)', 'ladder', re.IGNORECASE),
+    # "at anchor" and "heave up anchor" come out as the Cambodian temple. 2 clips, ~0.10 WER
+    # points; "Angkor" has no other meaning on this channel.
+    (r'\bangkor\b', 'anchor', re.IGNORECASE),
 ]
 
 # Fuzzy "<something> Approach" -> "Maas Approach".
@@ -157,19 +160,69 @@ _MARITIME_CORRECTIONS = [
 # rules do not survive that: on a held-out half they were worth 0.3 WER points, against
 # 1.6 in-sample. Similarity matching generalises to spellings never seen during
 # derivation and measured 3.7 points on the same held-out half.
-_APPROACH_RE = re.compile(r"\b([A-Za-z.']{1,12})(\s+)(ap+r?oa?ch\w*)", re.IGNORECASE)
-MAAS_FUZZ_THRESHOLD = int(os.environ.get("MAAS_FUZZ_THRESHOLD", "70"))
+#
+# It was still firing on well under half the cases it should, for two independent reasons,
+# each worth more than every hand-written rule above combined.
+#
+# 1. A recognised approach-word is a precondition, so a spelling the pattern missed took the
+#    Maas correction down with it. "Aas Aapproach" was left entirely alone despite "Aas"
+#    scoring 85.7 -- the leading double 'a' defeats `ap+`. 7 clips carried "Aapproach" and
+#    one "Proach", and none of them could ever be corrected.
+#
+# 2. The threshold recognised only half the variants the references show. Measured against
+#    "maas": aps 57.1, master 60.0, marsh 66.7, mots/must/last/mous 50.0 -- all of them
+#    verifiably "Maas Approach" in the references, all of them left alone at 70.
+#
+# What licenses a threshold this loose is positional: across every reference file the token
+# before an "approach" NOUN is "maas" 210 times out of 212, and the two exceptions are
+# comma-separated, which the pattern already refuses to cross. Measured over the 636
+# benchmarked transmissions, 50 corrects 54 rows across 27 clips and damages none
+# (36.69% -> 35.45% pooled), and split-half validates at -1.04 and -1.51 rather than
+# collapsing, because a similarity rule generalises where a list of spellings does not.
+#
+# Replacing *whatever* precedes the noun -- ignoring similarity entirely -- scores better
+# still (35.34%), and is rejected. Clip 0037 is "Starfighter, Maas Approach" with the comma
+# lost in decoding: a positional rule rewrites that to "Maas Approach" and deletes the ship.
+# 0.11 WER points is not worth feeding the identification path a transmission with the vessel
+# name removed. At 50 "Starfighter" scores 13.3 and is left alone.
+#
+# Only the noun is ever the station: every "approaching" in the references is ordinary
+# English ("we are approaching", "I'm approaching"). The old rule replaced the whole word
+# including its suffix, so "mass approaching" came back as "Maas Approach".
+_APPROACH_RE = re.compile(r"\b([A-Za-z.']{1,12})(\s+)(a?ap*r?oa?ch\w*|proach\w*)", re.IGNORECASE)
+MAAS_FUZZ_THRESHOLD = int(os.environ.get("MAAS_FUZZ_THRESHOLD", "50"))
+
+# "Maas Center, Recon buoy" is read out about as often as the approach call and attracts the
+# same mis-spellings ("Maaf Center, Rekkenbooi"). Thin evidence next to the approach rule --
+# 2 clips, worth ~0.08 WER points -- but it is the identical correction on the identical
+# word, so it shares the threshold rather than acquiring one of its own.
+_CENTRE_RE = re.compile(r"\b([A-Za-z.']{1,12})(\s+)(cent[er][er])\b", re.IGNORECASE)
+
+
+def _looks_like_maas(word: str) -> bool:
+    stripped = word.lower().replace(".", "")
+    return stripped == "maas" or rf_fuzz.ratio(stripped, "maas") >= MAAS_FUZZ_THRESHOLD
 
 
 def _correct_maas_before_approach(text: str) -> str:
     def repl(match):
-        word = match.group(1)
-        stripped = word.lower().replace(".", "")
-        if stripped == "maas" or rf_fuzz.ratio(stripped, "maas") >= MAAS_FUZZ_THRESHOLD:
+        # The verb is ordinary English; only the noun is ever the station.
+        if match.group(3).lower().endswith("ing"):
+            return match.group(0)
+        if _looks_like_maas(match.group(1)):
             return f"Maas{match.group(2)}Approach"
         return match.group(0)
 
     return _APPROACH_RE.sub(repl, text)
+
+
+def _correct_maas_before_centre(text: str) -> str:
+    def repl(match):
+        if _looks_like_maas(match.group(1)):
+            return f"Maas{match.group(2)}Center"
+        return match.group(0)
+
+    return _CENTRE_RE.sub(repl, text)
 
 
 def _apply_sttt_corrections(text: str, mode: str = "maritime") -> str:
@@ -188,6 +241,7 @@ def _apply_sttt_corrections(text: str, mode: str = "maritime") -> str:
         result = re.sub(pattern, replacement, result, flags=flags)
     if mode != "airband":
         result = _correct_maas_before_approach(result)
+        result = _correct_maas_before_centre(result)
     return result
 
 
