@@ -33,7 +33,7 @@ works on any voice channel.
 - **Partial-callsign matching** — a callsign half-lost to STT still identifies the ship when
   the surviving characters fit exactly one vessel and a spoken name agrees
 - **Benchmark and replay tooling** for measuring accuracy on your own recordings
-- **332 tests** covering the DSP, the proxy pipeline and the identification logic
+- **343 tests** covering the DSP, the proxy pipeline and the identification logic
 
 ## Getting started
 

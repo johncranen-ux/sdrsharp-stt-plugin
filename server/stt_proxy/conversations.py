@@ -497,6 +497,33 @@ def _unresolved(chunks: list[dict]) -> list[dict]:
              "evidence": "resolver unavailable", "confidence": "low"}]
 
 
+# What the AIS match knows about the ship beyond its name, kept in one place so the snapshot
+# below and the renderer cannot drift apart.
+_PARTICULARS = ("imo", "length", "beam", "latitude", "longitude", "sog", "cog", "heading")
+
+
+def _format_particulars(row: dict) -> str:
+    """The ship's particulars as display bits, omitting whatever AIS did not supply.
+
+    A vessel matched by callsign alone carries dimensions but no position, so each bit is
+    included only when its values are present -- a row of dashes says nothing.
+    """
+    bits = []
+    if row.get("imo"):
+        bits.append(f"IMO {_html_escape(row['imo'])}")
+    if row.get("length") and row.get("beam"):
+        bits.append(f"{int(row['length'])} &times; {int(row['beam'])} m")
+    elif row.get("length"):
+        bits.append(f"{int(row['length'])} m")
+    if row.get("sog") is not None:
+        bits.append(f"{row['sog']:.1f} kn")
+    if row.get("cog") is not None:
+        bits.append(f"{int(row['cog'])}&deg;")
+    if row.get("latitude") is not None and row.get("longitude") is not None:
+        bits.append(f"{row['latitude']:.4f}, {row['longitude']:.4f}")
+    return " &middot; ".join(bits)
+
+
 def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
     """Keep the model inside the candidate list and account for every transmission.
 
@@ -517,7 +544,7 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
         ais  = by_name.get(name.upper())
         if name and not ais:
             print(f"  [resolve] dropped off-list vessel {name!r}", flush=True)
-        out.append({
+        row = {
             "chunk_ids": sorted(ids),
             "vessel": ais["name"] if ais else None,
             "mmsi": ais.get("mmsi") if ais else None,
@@ -526,7 +553,13 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
             "via_callsign": bool(ais and ais.get("via_callsign")),
             "evidence": str(ex.get("evidence") or "")[:200],
             "confidence": ex.get("confidence") if ex.get("confidence") in ("high", "medium", "low") else "low",
-        })
+        }
+        # Snapshotted, not looked up when the page renders: position, speed and course are
+        # live values, so drawing an hours-old exchange against the ship's current position
+        # would place it somewhere it was not when it called. The static fields come along
+        # for the ride rather than being fetched separately.
+        row.update({field: (ais.get(field) if ais else None) for field in _PARTICULARS})
+        out.append(row)
 
     missing = sorted(valid_ids - seen)
     if missing:
@@ -631,6 +664,11 @@ def render_conversations_page(rows: list[dict]) -> str:
             turns.append(f'<li><span class="t">{_html_escape(t.get("time",""))}</span> '
                          f'{_html_escape(t.get("text",""))} {note}</li>')
 
+        # Omitted entirely rather than rendered empty: conversations that resolved to nobody,
+        # and the rows stored before these fields existed, have nothing to say here.
+        particulars = _format_particulars(row)
+        ais_line = f'\n      <div class="ais">{particulars}</div>' if particulars else ""
+
         blocks.append(f"""
     <div class="conv {'named' if vessel else 'unnamed'}">
       <div class="hd">
@@ -639,7 +677,7 @@ def render_conversations_page(rows: list[dict]) -> str:
         <span class="meta">{' &middot; '.join(meta)}</span>
         <span class="when">{_html_escape(row.get('start',''))} &ndash; {_html_escape(row.get('end',''))[-8:]}
               &middot; ch {_html_escape(row.get('channel',''))} &middot; {len(row.get('turns', []))} turns</span>
-      </div>
+      </div>{ais_line}
       <div class="ev">{_html_escape(row.get('evidence',''))}</div>
       <ul>{''.join(turns)}</ul>
     </div>""")
@@ -661,6 +699,7 @@ def render_conversations_page(rows: list[dict]) -> str:
  .badge.high {{ background: #d4edda; }} .badge.medium {{ background: #fff3cd; }}
  .badge.low {{ background: #f8d7da; }}
  .meta, .when {{ color: #666; font-size: .85em; }} .when {{ margin-left: auto; }}
+ .ais {{ color: #2c3e50; font-size: .85em; margin-top: 5px; font-family: monospace; }}
  .ev {{ color: #555; font-style: italic; font-size: .9em; margin: 6px 0; }}
  ul {{ list-style: none; padding-left: 0; margin: 6px 0 0; }}
  li {{ padding: 3px 0; border-top: 1px solid #f0f0f0; font-size: .95em; }}

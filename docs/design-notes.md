@@ -341,6 +341,40 @@ module previously interpolated every field into HTML unescaped, which matters mo
 looks: AIS static data is broadcast in the clear, so a vessel name is attacker-controllable by
 anyone with a transmitter in the Rotterdam box.
 
+## Vessel particulars on /conversations, and three AIS fields that never parsed (2026-08-04)
+
+`/conversations` is where identity is actually settled, but it showed only the name, MMSI,
+callsign and type — while `/identified-vessels` had been rendering dimensions, IMO and a
+position all along. The AIS match already carries all of it; it simply never reached the
+page that matters most.
+
+**Snapshotted at resolve time, not looked up at render time.** Position, speed and course are
+live values. Drawing an hours-old exchange against the ship's *current* position would place
+it somewhere it was not when it called, which is worse than showing nothing. `_validate_exchanges`
+therefore copies the particulars into the stored row when the exchange resolves, seconds after
+it ends. The static fields come along rather than being fetched separately. Rows written
+before this — the 104 already on disk — simply omit the line rather than rendering dashes.
+
+**The feature immediately exposed a bug it would otherwise have inherited.** Three fields were
+read under the wrong key: `IMO`, `SOG` and `COG`, where aisstream.io sends `ImoNumber`, `Sog`
+and `Cog`. Every field name in that feed is PascalCase, and the evidence was unambiguous once
+looked at:
+
+| key as read | populated |
+|---|---|
+| `CallSign`, `Type`, `Latitude`, `TrueHeading` | 83–94% of 8,434 cached vessels |
+| `IMO`, `SOG`, `COG` | **0** |
+
+They parsed to `None` on every message ever received, so `/identified-vessels` rendered a dash
+for IMO, speed and course from the day it was written and nothing ever failed. `_process_ais`
+had **no tests at all**, which is why: the feed is external, the values are optional, and a
+missing field is indistinguishable from a ship that did not broadcast one. The message shapes
+are now pinned by tests written against the documented schema, since capitalisation is the
+whole risk here.
+
+Note that the cached entries only fill in as each ship re-broadcasts its static data, so IMO,
+speed and course appear gradually rather than at once.
+
 ## The fuzzy Maas rule was firing on well under half the cases (2026-08-04)
 
 Running the substitution-frequency sweep again — this time over all 636 benchmarked

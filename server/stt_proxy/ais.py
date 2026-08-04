@@ -134,6 +134,14 @@ async def _ais_loop(api_key: str) -> None:
             await _a.sleep(30)
 
 
+# aisstream.io names every field in PascalCase, and three were read here in upper case:
+# `IMO`, `SOG` and `COG`, where the feed sends `ImoNumber`, `Sog` and `Cog`. They parsed to
+# None on every message ever received -- 0 of 8,434 cached vessels carried any of the three,
+# while every correctly-cased key (`CallSign`, `Type`, `Latitude`, `TrueHeading`) sat at
+# 83-94% -- so /identified-vessels showed a dash for IMO, speed and course from the day it
+# was written, and nothing failed. Field names are pinned by tests against the documented
+# message shape now, because a typo here is invisible: the feed is external, the value is
+# optional, and None is indistinguishable from "this ship did not broadcast it".
 def _process_ais(msg: dict) -> None:
     try:
         msg_type = msg.get("MessageType", "")
@@ -148,7 +156,7 @@ def _process_ais(msg: dict) -> None:
             callsign = ship.get("CallSign", "").strip()
             if name:
                 dim    = ship.get("Dimension", {})
-                imo    = ship.get("IMO")
+                imo    = ship.get("ImoNumber")
                 stype  = ship.get("Type")
                 length = (dim.get("A", 0) + dim.get("B", 0)) or None
                 beam   = (dim.get("C", 0) + dim.get("D", 0)) or None
@@ -166,8 +174,8 @@ def _process_ais(msg: dict) -> None:
                 pos = msg.get("Message", {}).get("PositionReport", {})
                 lat = pos.get("Latitude")
                 lon = pos.get("Longitude")
-                sog = pos.get("SOG")
-                cog = pos.get("COG")
+                sog = pos.get("Sog")
+                cog = pos.get("Cog")
                 heading = pos.get("TrueHeading")
                 with _cache_lock:
                     if key not in _vessel_cache:

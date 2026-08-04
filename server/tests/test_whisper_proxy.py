@@ -118,6 +118,91 @@ def test_a_letter_of_something_is_left_alone(raw):
 
 
 # ---------------------------------------------------------------------------
+# Parsing the aisstream feed
+#
+# This had no tests, and three fields were being read under the wrong key: `IMO`, `SOG` and
+# `COG`, where the feed sends `ImoNumber`, `Sog` and `Cog`. They parsed to None on every
+# message ever received -- 0 of 8,434 cached vessels had any of the three, while every
+# correctly-cased key was 83-94% populated -- so /identified-vessels rendered a dash for IMO,
+# speed and course from the day it was written. Payloads below follow aisstream.io's
+# documented message shape; the point of these tests is the exact capitalisation.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ais_caches(monkeypatch):
+    vessels, callsigns = {}, {}
+    monkeypatch.setattr(ais, "_vessel_cache", vessels)
+    monkeypatch.setattr(ais, "_callsign_cache", callsigns)
+    return vessels, callsigns
+
+
+def test_ship_static_data_is_parsed(ais_caches):
+    vessels, callsigns = ais_caches
+    ais._process_ais({
+        "MessageType": "ShipStaticData",
+        "MetaData": {"MMSI": 215760000},
+        "Message": {"ShipStaticData": {
+            "Name": "PECHORA STAR", "CallSign": "9HA2788", "ImoNumber": 9123456, "Type": 89,
+            "Dimension": {"A": 100, "B": 29, "C": 10, "D": 11},
+        }},
+    })
+    entry = vessels["PECHORA STAR"]
+    assert entry["mmsi"] == "215760000"
+    assert entry["callsign"] == "9HA2788"
+    assert entry["imo"] == 9123456, "read as ImoNumber, not IMO"
+    assert (entry["length"], entry["beam"]) == (129, 21)
+    assert callsigns["9HA2788"] is entry, "one object, so a position report updates both"
+
+
+def test_position_report_is_parsed(ais_caches):
+    vessels, _ = ais_caches
+    ais._process_ais({
+        "MessageType": "PositionReport",
+        "MetaData": {"MMSI": 215760000, "ShipName": "PECHORA STAR"},
+        "Message": {"PositionReport": {
+            "Latitude": 51.92, "Longitude": 3.5378, "Sog": 8.2, "Cog": 43.0,
+            "TrueHeading": 45,
+        }},
+    })
+    entry = vessels["PECHORA STAR"]
+    assert (entry["latitude"], entry["longitude"]) == (51.92, 3.5378)
+    assert entry["sog"] == 8.2, "read as Sog, not SOG"
+    assert entry["cog"] == 43.0, "read as Cog, not COG"
+    assert entry["heading"] == 45
+
+
+def test_a_position_report_updates_the_vessel_the_static_message_created(ais_caches):
+    """The two message types arrive independently, and the callsign lookup must see the
+    position too -- both caches hold the same object."""
+    vessels, callsigns = ais_caches
+    ais._process_ais({
+        "MessageType": "ShipStaticData", "MetaData": {"MMSI": 1},
+        "Message": {"ShipStaticData": {"Name": "ANOUK", "CallSign": "PABC", "Type": 80,
+                                       "Dimension": {"A": 50, "B": 10, "C": 5, "D": 6}}},
+    })
+    ais._process_ais({
+        "MessageType": "PositionReport", "MetaData": {"MMSI": 1, "ShipName": "ANOUK"},
+        "Message": {"PositionReport": {"Latitude": 52.0, "Longitude": 4.0, "Sog": 3.3,
+                                       "Cog": 180.0, "TrueHeading": 181}},
+    })
+    assert callsigns["PABC"]["sog"] == 3.3
+    assert vessels["ANOUK"]["length"] == 60
+
+
+def test_a_message_with_no_mmsi_is_ignored(ais_caches):
+    vessels, _ = ais_caches
+    ais._process_ais({"MessageType": "ShipStaticData", "MetaData": {},
+                        "Message": {"ShipStaticData": {"Name": "GHOST"}}})
+    assert vessels == {}
+
+
+def test_a_malformed_message_does_not_raise(ais_caches):
+    """The feed is external; a shape change must not kill the websocket thread."""
+    ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
+                        "Message": None})
+
+
+# ---------------------------------------------------------------------------
 # AIS hint filtering
 #
 # The original settings (WRatio, cutoff 65, 3-char tokens) produced 1,993 distinct spurious
@@ -1045,6 +1130,84 @@ def test_stored_turn_text_is_copied_verbatim_from_the_journal(monkeypatch):
 
     assert [t["text"] for t in saved[0]["turns"]] == original
     assert [c["text"] for c in window] == original, "resolution must not mutate the journal"
+
+
+# Vessel particulars on /conversations
+#
+# The AIS match already carries dimensions, IMO and a position, and /identified-vessels
+# shows them -- but /conversations, which is where identity is actually settled, showed only
+# the name and MMSI. The particulars are snapshotted when the exchange resolves rather than
+# looked up when the page renders: position, speed and course are live values, so rendering
+# an hours-old exchange against the ship's current position would claim it was somewhere it
+# was not when it called.
+
+_RICH = {"name": "PECHORA STAR", "mmsi": "215760000", "callsign": "9HA2788", "type": 89,
+         "imo": "9123456", "length": 129, "beam": 21, "latitude": 51.92, "longitude": 3.5378,
+         "sog": 8.2, "cog": 43.0, "heading": 45}
+
+
+def test_validate_snapshots_the_vessel_particulars():
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1], "vessel": "PECHORA STAR", "confidence": "high"}],
+        [_chunk(30, cid=1)], {"PECHORA STAR": _RICH})
+    assert out[0]["imo"] == "9123456"
+    assert (out[0]["length"], out[0]["beam"]) == (129, 21)
+    assert (out[0]["latitude"], out[0]["longitude"]) == (51.92, 3.5378)
+    assert (out[0]["sog"], out[0]["cog"]) == (8.2, 43.0)
+
+
+def test_validate_leaves_particulars_empty_when_nobody_was_identified():
+    out = proxy._validate_exchanges(
+        [{"chunk_ids": [1], "vessel": None}], [_chunk(30, cid=1)], {})
+    assert out[0]["imo"] is None and out[0]["length"] is None
+    assert out[0]["latitude"] is None and out[0]["sog"] is None
+
+
+def test_page_shows_the_vessel_particulars():
+    html = proxy.render_conversations_page([{
+        "vessel": "PECHORA STAR", "mmsi": "215760000", "confidence": "high",
+        "imo": "9123456", "length": 129, "beam": 21,
+        "latitude": 51.92, "longitude": 3.5378, "sog": 8.2, "cog": 43.0,
+        "start": "2026-08-04 10:03:36", "end": "2026-08-04 10:04:04", "turns": [],
+    }])
+    assert "IMO 9123456" in html
+    assert "129 &times; 21 m" in html
+    assert "8.2 kn" in html
+    assert "43&deg;" in html
+    assert "51.9200, 3.5378" in html
+
+
+def test_page_omits_particulars_that_are_missing():
+    """A vessel matched by callsign alone carries no position: show the dimensions it has
+    and say nothing about where it is, rather than rendering a row of dashes."""
+    html = proxy.render_conversations_page([{
+        "vessel": "PECHORA STAR", "mmsi": "215760000", "confidence": "high",
+        "length": 129, "beam": 21,
+        "start": "2026-08-04 10:03:36", "end": "2026-08-04 10:04:04", "turns": [],
+    }])
+    assert "129 &times; 21 m" in html
+    assert "kn" not in html and "IMO" not in html
+
+
+def test_page_still_renders_a_row_stored_before_particulars_existed():
+    """The 104 conversations already on disk have none of these keys."""
+    html = proxy.render_conversations_page([{
+        "vessel": "VISTA", "mmsi": "538009952", "confidence": "high",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    assert "VISTA" in html
+    assert 'class="ais"' not in html
+
+
+def test_page_cannot_be_broken_out_of_by_a_hostile_imo():
+    """IMO comes off the AIS feed like everything else here -- broadcast in the clear, so
+    attacker-controllable by anyone with a transmitter in the Rotterdam box."""
+    html = proxy.render_conversations_page([{
+        "vessel": "EVIL", "mmsi": "1", "confidence": "high", "imo": "<script>alert(1)</script>",
+        "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
+    }])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
 
 
 def test_page_renders_with_no_conversations():
