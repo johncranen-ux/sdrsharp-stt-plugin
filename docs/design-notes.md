@@ -384,6 +384,36 @@ Dropping the cutoff to 75 recovers 7 rather than 3, but that is the knob whose t
 cut spurious probe→vessel pairs from 2,334 to 101. Any cutoff change has to be measured for
 false positives *and* recall, never recall alone.
 
+### Phonetic matching does not pay (2026-08-06)
+
+The failures above are phonetic, so a phonetic matcher looked like the obvious tool. Sized
+with `jellyfish.metaphone` before writing anything, scoring recovery **and** the precision
+proxy together — distinct probe→vessel pairs over all 718 stored transcripts:
+
+| Variant | Recovered (of 24) | Probe→vessel pairs |
+|---|---|---|
+| ortho ≥ 85, n ≤ 2 *(current)* | 0 | 216 |
+| **ortho ≥ 85, n ≤ 4** | **3** | **233** |
+| phonetic = 100, n ≤ 4 | 1 | 505 |
+| phonetic ≥ 90, n ≤ 4 | 3 | 610 |
+| either ≥ 90, n ≤ 4 | 5 | 624 |
+| either ≥ 85, n ≤ 4 | 6 | 1200 |
+
+**Phonetic matching costs 2.3×–5.6× more spurious pairs to recover at most 6 of 24.** That
+is not a wash, it is actively harmful: `_find_ais_hints` caps the hint list at 5, so flooding
+it pushes the correct vessel *out* of the list the resolver ever sees. Metaphone also cannot
+separate the case that motivated it — ELEANOR keys to `ELNR` against both ELENORE and
+ELENORA, exactly as `fuzz.ratio` does at 86.
+
+**Longer probes alone are the only change here that pays**: +3 recovered for +17 pairs (+8%).
+Checked for regression on the top-5 hint list across all identifiable conversations: 29 keep
+the correct vessel, 2 newly gain it, **0 are crowded out**. (Two rather than three, because
+one recovered vessel does not make the top 5.)
+
+`jellyfish` was installed for this experiment and removed again; it earned no permanent
+place. What is left for the remaining ~21 unreachable conversations is not a better string
+matcher — it is position filtering, which is the AIS staleness item under Known limitations.
+
 ### Prompt v2: the vocabulary is the lever, not the names (2026-08-06)
 
 Two candidates against the shipped prompt, run as separate arms so the causes stay separable
