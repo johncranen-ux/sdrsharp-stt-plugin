@@ -156,6 +156,24 @@ async def _ais_loop(api_key: str) -> None:
 # optional, and None is indistinguishable from "this ship did not broadcast it".
 _LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Exclude vessels not heard from in this many minutes when matching. 0 disables it, which is
+# the default -- the field it depends on only started being written on 2026-08-06, so there
+# is no data yet from which to choose a threshold.
+#
+# This EXCLUDES rather than deletes, deliberately. A purge is destructive and, worse, silent:
+# once an entry is gone there is no way to ask how often the vessel removed was the one that
+# went on to call. Filtering at match time gives the same candidate-pool reduction -- the
+# cache holds 8,642 names accumulated over weeks, where a live 15-minute window would hold a
+# few hundred -- while staying an env knob that can be A/B'd and reverted.
+#
+# Calibrating it needs live data, not judgement: for each conversation, how old was the
+# correct vessel's last_seen at the moment of the call? Note the bounding box reaches only
+# 64 km west of Maas Center while inbound traffic arrives from the west, so a vessel calling
+# from further out is not being updated at all and any threshold will exclude it.
+AIS_MAX_AGE_MIN = int(os.environ.get("AIS_MAX_AGE_MIN", "0"))
+
+_stale_filter_warned = False
+
 
 def _now() -> str:
     """Timestamp for `last_seen`, in the format the rest of the stores use.
@@ -175,6 +193,49 @@ def _now() -> str:
     everything reads as unknown rather than as confidently current.
     """
     return datetime.datetime.now().strftime(_LAST_SEEN_FMT)
+
+
+def _is_fresh(entry: dict, cutoff: datetime.datetime) -> bool:
+    """Whether this vessel was heard from recently enough to be a plausible candidate.
+
+    A missing or unparseable `last_seen` counts as NOT fresh. Unknown age is not evidence of
+    recency, and every entry written before 2026-08-06 lacks the field -- so enabling the
+    filter against an old cache excludes almost everything until the feed has run again.
+    That is loud (see the warning in _fresh_snapshot) rather than subtly wrong, and it
+    self-corrects as vessels are seen.
+    """
+    stamp = entry.get("last_seen")
+    if not stamp:
+        return False
+    try:
+        return datetime.datetime.strptime(stamp, _LAST_SEEN_FMT) >= cutoff
+    except (TypeError, ValueError):
+        return False
+
+
+def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
+    """(keys, cache) for matching, honouring AIS_MAX_AGE_MIN.
+
+    Shared by every matcher so one setting means one thing everywhere -- the same reason the
+    decoder params live in one place.
+    """
+    global _stale_filter_warned
+    with _cache_lock:
+        if not _vessel_cache:
+            return [], {}
+        if AIS_MAX_AGE_MIN <= 0:
+            return list(_vessel_cache.keys()), dict(_vessel_cache)
+        total  = len(_vessel_cache)
+        cutoff = datetime.datetime.now() - datetime.timedelta(minutes=AIS_MAX_AGE_MIN)
+        cache  = {k: v for k, v in _vessel_cache.items() if _is_fresh(v, cutoff)}
+
+    if not _stale_filter_warned and total and len(cache) < total * 0.05:
+        _stale_filter_warned = True
+        print(f"[AIS] age filter left {len(cache)} of {total} vessels matchable "
+              f"(AIS_MAX_AGE_MIN={AIS_MAX_AGE_MIN}). Expected right after enabling it, or "
+              f"after a feed outage: entries with no last_seen are treated as unknown age.",
+              flush=True)
+    return list(cache.keys()), cache
 
 
 def _process_ais(msg: dict) -> None:
@@ -320,11 +381,9 @@ def match_by_name(extracted_name: str) -> dict | None:
     if not extracted_name:
         return None
     query = extracted_name.upper()
-    with _cache_lock:
-        if not _vessel_cache:
-            return None
-        keys  = list(_vessel_cache.keys())
-        cache = dict(_vessel_cache)
+    keys, cache = _fresh_snapshot()
+    if not keys:
+        return None
     cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
     hit = _best_name_match(query, keys, cutoff)
     if hit:
@@ -492,11 +551,9 @@ def _legacy_hint_probes(text: str) -> list[str]:
 def _find_ais_hints(text: str, n: int = 5) -> list[dict]:
     if not text.strip():
         return []
-    with _cache_lock:
-        if not _vessel_cache:
-            return []
-        keys  = list(_vessel_cache.keys())
-        cache = dict(_vessel_cache)
+    keys, cache = _fresh_snapshot()
+    if not keys:
+        return []
 
     scorer = rf_fuzz.ratio if AIS_HINT_FILTER else rf_fuzz.WRatio
     cutoff = AIS_HINT_MIN_SCORE if AIS_HINT_FILTER else 65

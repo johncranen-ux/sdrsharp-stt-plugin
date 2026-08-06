@@ -264,6 +264,74 @@ def test_both_message_types_stamp_last_seen(ais_caches, message, name):
     datetime.datetime.strptime(stamped, "%Y-%m-%d %H:%M:%S")
 
 
+# Age filter
+#
+# Off by default, so these all set AIS_MAX_AGE_MIN explicitly. It excludes at match time
+# rather than deleting, so a badly chosen threshold cannot destroy data and the cost of the
+# threshold stays measurable.
+
+def _aged(name, minutes_ago, mmsi="1"):
+    stamp = datetime.datetime.now() - datetime.timedelta(minutes=minutes_ago)
+    return {"name": name, "callsign": "", "mmsi": mmsi, "type": None, "imo": None,
+            "length": None, "beam": None, "latitude": 52.0, "longitude": 4.0,
+            "last_seen": stamp.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def test_age_filter_is_off_by_default_so_stale_vessels_still_match(ais_caches):
+    vessels, _ = ais_caches
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=10_000)
+    assert ais.AIS_MAX_AGE_MIN == 0
+    assert proxy.match_by_name("WILSON DURNESS")["name"] == "WILSON DURNESS"
+
+
+def test_age_filter_excludes_a_vessel_not_heard_from_recently(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=60)
+    assert proxy.match_by_name("WILSON DURNESS") is None
+    assert proxy._find_ais_hints("this is WILSON DURNESS calling") == []
+
+
+def test_age_filter_keeps_a_recently_heard_vessel(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=2)
+    assert proxy.match_by_name("WILSON DURNESS")["name"] == "WILSON DURNESS"
+    assert [h["name"] for h in proxy._find_ais_hints("this is WILSON DURNESS calling")]         == ["WILSON DURNESS"]
+
+
+def test_unknown_age_is_not_treated_as_recent(ais_caches, monkeypatch):
+    """Every entry written before last_seen existed lacks it. Counting those as fresh would
+    make the filter silently do nothing against exactly the cache it would first meet."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    entry = _aged("WILSON DURNESS", minutes_ago=0)
+    del entry["last_seen"]
+    vessels["WILSON DURNESS"] = entry
+    assert proxy.match_by_name("WILSON DURNESS") is None
+
+
+def test_a_corrupt_timestamp_is_not_treated_as_recent(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    entry = _aged("WILSON DURNESS", minutes_ago=0)
+    entry["last_seen"] = "not a timestamp"
+    vessels["WILSON DURNESS"] = entry
+    assert proxy.match_by_name("WILSON DURNESS") is None
+
+
+def test_age_filter_narrows_the_pool_without_touching_the_cache(ais_caches, monkeypatch):
+    """The point of excluding rather than purging: the data survives, so raising the
+    threshold later brings the vessel back rather than needing it re-broadcast."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=60)
+    assert proxy.match_by_name("WILSON DURNESS") is None
+    assert "WILSON DURNESS" in vessels               # still there
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 120)
+    assert proxy.match_by_name("WILSON DURNESS")["name"] == "WILSON DURNESS"
+
+
 def test_last_seen_rolls_forward_rather_than_recording_entry_time(ais_caches, monkeypatch):
     """The point of the field. A position that is refreshed must carry a fresh timestamp,
     or it says nothing the position did not already say."""

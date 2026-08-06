@@ -297,6 +297,8 @@ All are environment variables, normally set in `start-all.bat`.
 |---|---|---|
 | `AIS_HINT_FILTER` | `on` | Stops ordinary speech being matched to real ships |
 | `AIS_HINT_MIN_SCORE` | `85` | Similarity needed for an AIS name hint |
+| `AIS_HINT_MAX_NGRAM` | `4` | Longest word span looked up as a vessel name (2 restores pre-2026-08-06 behaviour) |
+| `AIS_MAX_AGE_MIN` | `0` (off) | Ignore vessels not heard from in this many minutes when matching. Excludes rather than deletes, so raising it brings them back. Needs a day of `last_seen` data before a threshold can be chosen from evidence |
 | `AIS_NAME_FILTER` | `on` | Stops a misheard name matching a short vessel spelled inside it ("Orason" → `RA`) |
 | `AIS_NAME_MIN_SCORE` | `76` | Similarity needed to match a spoken name to an AIS vessel |
 | `AIS_PARTIAL_CALLSIGN` | `on` | Identifies a vessel from a partly-garbled spelled-out callsign when a spoken name agrees |
