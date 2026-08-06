@@ -327,7 +327,62 @@ one matches perfectly. Reproduced live: the hints for that transmission are `ROT
 
 The fix needs both halves: generate 3-word (probably 4-word) probes, *and* prefer the
 longest matching probe rather than the first, or the spurious short match still wins on
-probe order. Not yet implemented.
+probe order. Not yet implemented — and see below for why it is worth much less than it looks.
+
+### Why identification actually fails (2026-08-06)
+
+Diagnosed per **conversation**, not per transmission: identity belongs to the exchange, so a
+mid-conversation turn that names nobody ("Okay, thank you, next call when underway") is
+*supposed* to yield no hints. Over the 59 verified conversations:
+
+| | n | |
+|---|---|---|
+| Identified correctly | 31 | 53% |
+| **Expected vessel not reachable from any turn** | **24** | **41%** |
+| Reachable, but the resolver did not pick it | 4 | 7% |
+
+**86% of failures are upstream of the resolver.** The Claude call is very nearly never the
+problem — it picks correctly whenever the right vessel is in front of it. Effort spent on the
+resolver prompt would have been effort wasted.
+
+**But longer probes recover almost none of it.** Simulated over the same 24, everything else
+held constant:
+
+| Probe variant | Conversations recovered |
+|---|---|
+| n-grams ≤ 2, cutoff 85 *(current)* | 0 |
+| n-grams ≤ 3, cutoff 85 | 3 |
+| n-grams ≤ 4, cutoff 85 | 3 |
+| n-grams ≤ 4, cutoff 80 | 5 |
+| n-grams ≤ 4, cutoff 75 | 7 |
+
+Only **3 of 24** — SANTA ISABEL MAERSK and MSC MARIA PIA. The word-count correlation above
+(every multi-word failure being a hint failure) invited the conclusion that probe length was
+the cause; it is not. For most long names the *transcription itself* is too corrupted for a
+whole-name probe to reach 85 either.
+
+**The real dominant cause is STT mangling the vessel name past orthographic reach:**
+
+| Heard | Actually |
+|---|---|
+| "Oasun", "O'Razon" | ORASUND |
+| "Haltizeus" | THESEUS |
+| "Vista Heisberger" | BIRTHE ESSBERGER |
+| "telepathy" | TULIPA SEAWAYS |
+| "Yeki Borg" | JEKERBORG |
+| "Mid-Huff", "Huff" | BITHAV |
+
+These are *phonetically* close and orthographically far, which is precisely what whole-string
+`fuzz.ratio` cannot see. A phonetic matcher (Double Metaphone, or a phoneme-level distance)
+is the tool that fits the failure, not a longer n-gram.
+
+One case is unfixable by matching at all: ELENORE was predicted as **ELENORA**, a different
+real vessel one character away, three times. Separating those needs position — which is the
+AIS staleness limitation already recorded under Known limitations.
+
+Dropping the cutoff to 75 recovers 7 rather than 3, but that is the knob whose tightening
+cut spurious probe→vessel pairs from 2,334 to 101. Any cutoff change has to be measured for
+false positives *and* recall, never recall alone.
 
 ### Prompt v2: the vocabulary is the lever, not the names (2026-08-06)
 
