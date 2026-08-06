@@ -371,6 +371,10 @@ def match_by_callsign_pattern(pattern: str) -> dict | None:
 AIS_HINT_FILTER    = os.environ.get("AIS_HINT_FILTER", "on").strip().lower() != "off"
 AIS_HINT_MIN_SCORE = int(os.environ.get("AIS_HINT_MIN_SCORE", "85"))
 AIS_HINT_MIN_TOKEN = int(os.environ.get("AIS_HINT_MIN_TOKEN", "4"))
+# Longest word span offered to the matcher. 4 covers every multi-word name seen in this
+# traffic ("SANTA ISABEL MAERSK", "MSC MARIA PIA"); raising it further costs probes per
+# transmission without a name to find. Set to 2 to get the pre-2026-08-06 behaviour.
+AIS_HINT_MAX_NGRAM = int(os.environ.get("AIS_HINT_MAX_NGRAM", "4"))
 
 # Words that are never a vessel name on their own here. Numbers and NATO phonetics are
 # how callsigns and positions get read out (callsigns have their own exact lookup in
@@ -395,27 +399,56 @@ WHAT WHEN WHERE WHICH WHILE ABOUT ABOVE BELOW AFTER BEFORE
 
 
 def _hint_probes(text: str) -> list[str]:
-    """Single words and adjacent pairs worth looking up as vessel names."""
-    min_token = AIS_HINT_MIN_TOKEN if AIS_HINT_FILTER else 3
-    words = [w.strip(".,!?;:") for w in text.upper().split()] if AIS_HINT_FILTER \
-        else text.upper().split()
+    """Contiguous word spans worth looking up as vessel names.
+
+    Spans run up to AIS_HINT_MAX_NGRAM words because the matcher scores WHOLE strings. A
+    probe shorter than the name it should match cannot clear the cutoff however perfectly it
+    overlaps -- "SANTA ISABEL" scores 77 against SANTA ISABEL MAERSK and "ISABEL MAERSK" 81,
+    both under 85 -- so a name longer than the longest probe is unreachable at every length
+    that exists, while "ISABEL" matches a different, real vessel at 100. Adjacent pairs alone
+    therefore lost every vessel with a three-word name.
+
+    Measured 2026-08-06 over the 59 verified conversations: raising the limit from 2 to 4
+    recovers 3 of 24 unmatched conversations for +8% spurious probe->vessel pairs, and
+    crowds nothing out of the 5-slot hint list. Phonetic matching was sized against this and
+    rejected -- it cost 2.3-5.6x the spurious pairs. See docs/design-notes.md.
+    """
+    if not AIS_HINT_FILTER:
+        return _legacy_hint_probes(text)
+
+    words = [w.strip(".,!?;:") for w in text.upper().split()]
 
     probes = []
-    for i, w in enumerate(words):
-        if len(w) >= min_token:
-            probes.append(w)
-        if i < len(words) - 1:
-            nxt = words[i + 1]
-            # A pair only needs ONE substantial token: real names routinely pair a short
-            # word with a long one ("NQ TULIPA", "GOOD WAY"), and requiring both to clear
-            # the bar silently drops them. Pairs are specific enough that the length guard
-            # matters far less than it does for a lone word.
-            if (max(len(w), len(nxt)) >= min_token if AIS_HINT_FILTER
-                    else len(nxt) >= min_token):
-                probes.append(f"{w} {nxt}")
+    # Grouped by span length, shortest first -- the order the recovery and crowding-out
+    # measurements were taken in.
+    for n in range(1, max(AIS_HINT_MAX_NGRAM, 1) + 1):
+        for i in range(len(words) - n + 1):
+            span = words[i:i + n]
+            # A span needs only ONE substantial token: real names routinely pair a short
+            # word with a long one ("NQ TULIPA", "GOOD WAY"), and requiring every token to
+            # clear the bar silently drops them. A span is specific enough that the length
+            # guard matters far less than it does for a lone word.
+            if max(len(t) for t in span) < AIS_HINT_MIN_TOKEN:
+                continue
+            if all(t in _HINT_STOPWORDS for t in span):
+                continue
+            probes.append(" ".join(span))
+    return probes
 
-    if AIS_HINT_FILTER:
-        probes = [p for p in probes if not all(tok in _HINT_STOPWORDS for tok in p.split())]
+
+def _legacy_hint_probes(text: str) -> list[str]:
+    """The pre-filter behaviour, reproduced exactly -- bug, ordering and all.
+
+    AIS_HINT_FILTER=off is only a trustworthy revert if it restores what was there before,
+    so this path must not inherit improvements made to the one above.
+    """
+    words = text.upper().split()
+    probes = []
+    for i, w in enumerate(words):
+        if len(w) >= 3:
+            probes.append(w)
+        if i < len(words) - 1 and len(words[i + 1]) >= 3:
+            probes.append(f"{w} {words[i + 1]}")
     return probes
 
 

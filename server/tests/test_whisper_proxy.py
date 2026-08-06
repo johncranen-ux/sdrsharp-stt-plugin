@@ -288,6 +288,49 @@ def test_short_tokens_are_not_probed():
     assert "THE" not in proxy._hint_probes("THE")
 
 
+# Longer spans
+#
+# The matcher scores whole strings, so a name longer than the longest probe is unreachable
+# at every probe length that exists -- while one of its words can match a different, real
+# vessel outright. Adjacent pairs alone lost every three-word name.
+
+@pytest.mark.parametrize("text,expected", [
+    ("this is SANTA ISABEL MAERSK", "SANTA ISABEL MAERSK"),
+    ("Maas Approach, MSC MARIA PIA", "MSC MARIA PIA"),
+])
+def test_three_word_names_are_probed_whole(text, expected):
+    assert expected in proxy._hint_probes(text)
+
+
+def test_spans_run_to_four_words_and_stop():
+    # Deliberately not NATO phonetics -- those are all stopwords, so a span of them is
+    # filtered before length ever comes into it.
+    probes = proxy._hint_probes("STOLT GREENSHANK BALTIC SPLIT ORASUND")
+    assert "STOLT GREENSHANK BALTIC SPLIT" in probes
+    assert not any(len(p.split()) > 4 for p in probes)
+
+
+def test_span_length_is_configurable(monkeypatch):
+    monkeypatch.setattr(ais, "AIS_HINT_MAX_NGRAM", 2)
+    probes = proxy._hint_probes("SANTA ISABEL MAERSK calling")
+    assert "SANTA ISABEL" in probes
+    assert "SANTA ISABEL MAERSK" not in probes
+
+
+def test_stopword_guard_still_applies_to_longer_spans():
+    """A four-word span of pure speech is no more worth looking up than a two-word one."""
+    probes = proxy._hint_probes("good morning please thank sir madam")
+    assert not any(len(p.split()) >= 3 for p in probes), probes
+
+
+def test_longer_spans_do_not_crowd_the_right_vessel_out(ais_cache):
+    """The failure mode worth guarding: more probes means more matches, and the hint list
+    holds only five. A vessel that was hinted before must still be hinted now."""
+    text = "Maas Approach, this is WILSON DURNESS, over."
+    names = [h["name"] for h in proxy._find_ais_hints(text)]
+    assert "WILSON DURNESS" in names
+
+
 @pytest.fixture
 def ais_cache(monkeypatch):
     cache = {

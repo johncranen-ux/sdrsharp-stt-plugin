@@ -414,6 +414,32 @@ one recovered vessel does not make the top 5.)
 place. What is left for the remaining ~21 unreachable conversations is not a better string
 matcher — it is position filtering, which is the AIS staleness item under Known limitations.
 
+### Longer probes, shipped and measured (2026-08-06)
+
+`_hint_probes` now emits contiguous spans of 1–4 words (`AIS_HINT_MAX_NGRAM`, default 4)
+instead of single words and adjacent pairs. `AIS_HINT_FILTER=off` still restores the original
+behaviour exactly, via a separate `_legacy_hint_probes` that must not inherit improvements —
+otherwise the revert is not a revert.
+
+Scored with `--resolve` over the 59 verified conversations. **The default mode cannot measure
+this**: it scores the *stored* verdicts, which a matcher change cannot retroactively alter,
+and dutifully reports identical numbers before and after.
+
+| Run | Precision | Recall | correct / wrong / missed |
+|---|---|---|---|
+| `AIS_HINT_MAX_NGRAM=2` (previous) | 74.8% | 60.6% | 163 / 55 / 51 |
+| **`=4` (shipped)** | **77.4%** | **63.6%** | 171 / 50 / 48 |
+| `=4`, repeat run | 77.3% | 63.2% | 170 / 50 / 49 |
+
+**+2.6 precision, +3.0 recall**, against a noise floor of ~0.4 points established by the
+repeat run. Eight more transmissions correct, five fewer wrong, three fewer missed — the
+change helps both axes rather than trading one for the other.
+
+Note the re-resolved baseline (74.8/60.6) is well above the stored verdicts (68.0/51.7).
+That gap is *not* attributable to anything measured here: `--resolve` replays the stored
+transcript text through today's code, so it reflects resolver and matcher work already in the
+tree since those verdicts were written, and excludes any STT change.
+
 ### Prompt v2: the vocabulary is the lever, not the names (2026-08-06)
 
 Two candidates against the shipped prompt, run as separate arms so the causes stay separable
