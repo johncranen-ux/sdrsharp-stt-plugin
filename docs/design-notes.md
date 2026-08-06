@@ -414,6 +414,55 @@ one recovered vessel does not make the top 5.)
 place. What is left for the remaining ~21 unreachable conversations is not a better string
 matcher — it is position filtering, which is the AIS staleness item under Known limitations.
 
+### Static AIS messages were erasing positions (2026-08-06)
+
+The two ingest branches in `_process_ais` were asymmetric. `PositionReport` merged into the
+existing entry; `ShipStaticData` **assigned a fresh dict**, and that dict has no
+`latitude`/`longitude` keys at all. So any vessel that reported its position and then
+broadcast static data lost the position — and static messages repeat roughly every 6 minutes,
+so this fired continuously for every vessel sitting in the box.
+
+That is very likely the bulk of the **25% of vessels in the labelled conversations that had
+no position at all**, which is what made the distance data unusable. Now merges. Prediction
+worth checking after the proxy has run for a day: that 25% should fall substantially. It will
+not repair the existing cache — a position already overwritten is gone until that vessel is
+seen again.
+
+### `last_seen`, and why a position needs one (2026-08-06)
+
+Every cache write now stamps `last_seen`. It is **rolling, not an entry time**: AIS transmits
+position every 2–10 seconds underway, so a vessel in the box has it rewritten constantly, and
+it freezes only once the vessel leaves, stops transmitting, or the proxy stops running.
+
+Without it a cached position cannot be interpreted at all. The cache is reloaded from disk at
+startup and entries never expire, so "48 km from Maas Center" might be from forty seconds ago
+or from three weeks ago, and nothing in the data distinguishes them. Concretely: on
+2026-08-06 the on-disk cache had last been written 2026-08-04 23:59, making every position in
+it at least 46 hours old, with no way to tell which were far older.
+
+It cannot be backfilled — entries written before this have no timestamp and never will, so a
+missing `last_seen` means *unknown age*, not *recent*.
+
+**Why this is the prerequisite for distance filtering.** Measured over the 59 verified
+conversations, a hard distance gate is unusable: only 46% of correct vessels are within 50 km
+and 25% have no position, so a 50 km gate would reject over half the right answers. The
+bounding box (`ROTTERDAM_BBOX`, roughly 205 × 215 km) is simply large, and vessels calling
+Maas Approach are routinely 40–100 km out — being far away is normal, not suspicious. And in
+the ELENORE/ELENORA case, the *correct* vessel has no position while the wrong one sits at
+48 km, so "prefer the nearer" would have actively confirmed the error.
+
+Distance is therefore worth having as a recency-weighted prior, not a gate — and its real
+value is buying headroom to loosen the fuzzy cutoff (which recovered 7 of 24 unreachable
+conversations but inflated spurious pairs 5.6×) without flooding the 5-slot hint list.
+
+**On evicting vessels that leave the box:** aisstream only sends messages for ships inside
+the box, so a departure is never announced — it is indistinguishable from a vessel going
+quiet, or from the proxy being down. Eviction can only be TTL-based, which needs this same
+field. Weighting is preferable to deleting: evicting the vessel that is about to call loses
+the identification entirely, while keeping a stale one costs one extra candidate among
+thousands. A generous TTL (30 days) is still worth having as housekeeping, since the cache
+currently grows without bound.
+
 ### Longer probes, shipped and measured (2026-08-06)
 
 `_hint_probes` now emits contiguous spans of 1–4 words (`AIS_HINT_MAX_NGRAM`, default 4)

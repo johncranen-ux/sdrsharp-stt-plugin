@@ -218,6 +218,66 @@ def test_a_position_report_updates_the_vessel_the_static_message_created(ais_cac
     assert vessels["ANOUK"]["length"] == 60
 
 
+def _static(name, mmsi=1, callsign="PABC"):
+    return {"MessageType": "ShipStaticData", "MetaData": {"MMSI": mmsi},
+            "Message": {"ShipStaticData": {"Name": name, "CallSign": callsign, "Type": 80,
+                                           "Dimension": {"A": 50, "B": 10, "C": 5, "D": 6}}}}
+
+
+def _position(name, mmsi=1, lat=52.0, lon=4.0):
+    return {"MessageType": "PositionReport", "MetaData": {"MMSI": mmsi, "ShipName": name},
+            "Message": {"PositionReport": {"Latitude": lat, "Longitude": lon, "Sog": 3.3,
+                                           "Cog": 180.0, "TrueHeading": 181}}}
+
+
+def test_static_data_does_not_erase_a_known_position(ais_caches):
+    """The reverse order of the test above, and the one that was broken: the static branch
+    assigned a fresh dict carrying no position, so a vessel that reported its position and
+    then broadcast static data lost it. Static messages repeat every ~6 minutes, so this
+    fired continuously and left 25% of the vessels in the labelled conversations with no
+    position at all -- which is what made distance data unusable."""
+    vessels, callsigns = ais_caches
+    ais._process_ais(_position("ANOUK"))
+    ais._process_ais(_static("ANOUK"))
+    assert vessels["ANOUK"]["latitude"] == 52.0
+    assert vessels["ANOUK"]["longitude"] == 4.0
+    assert vessels["ANOUK"]["callsign"] == "PABC"      # and the static fields still arrive
+    assert callsigns["PABC"] is vessels["ANOUK"]       # both caches share one object
+
+
+def test_static_data_still_creates_a_vessel_never_seen_before(ais_caches):
+    vessels, _ = ais_caches
+    ais._process_ais(_static("NEWCOMER"))
+    assert vessels["NEWCOMER"]["mmsi"] == "1"
+    assert vessels["NEWCOMER"].get("latitude") is None
+
+
+@pytest.mark.parametrize("message,name", [
+    (_position("ANOUK"), "ANOUK"),
+    (_static("BERTHA"), "BERTHA"),
+])
+def test_both_message_types_stamp_last_seen(ais_caches, message, name):
+    vessels, _ = ais_caches
+    ais._process_ais(message)
+    stamped = vessels[name]["last_seen"]
+    # Parsing it is the assertion: the format has to stay readable and comparable.
+    datetime.datetime.strptime(stamped, "%Y-%m-%d %H:%M:%S")
+
+
+def test_last_seen_rolls_forward_rather_than_recording_entry_time(ais_caches, monkeypatch):
+    """The point of the field. A position that is refreshed must carry a fresh timestamp,
+    or it says nothing the position did not already say."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "_now", lambda: "2026-08-06 10:00:00")
+    ais._process_ais(_position("ANOUK"))
+    assert vessels["ANOUK"]["last_seen"] == "2026-08-06 10:00:00"
+
+    monkeypatch.setattr(ais, "_now", lambda: "2026-08-06 10:05:00")
+    ais._process_ais(_position("ANOUK", lat=52.5))
+    assert vessels["ANOUK"]["last_seen"] == "2026-08-06 10:05:00"
+    assert vessels["ANOUK"]["latitude"] == 52.5
+
+
 def test_a_message_with_no_mmsi_is_ignored(ais_caches):
     vessels, _ = ais_caches
     ais._process_ais({"MessageType": "ShipStaticData", "MetaData": {},

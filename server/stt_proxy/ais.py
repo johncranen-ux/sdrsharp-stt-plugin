@@ -154,6 +154,29 @@ async def _ais_loop(api_key: str) -> None:
 # was written, and nothing failed. Field names are pinned by tests against the documented
 # message shape now, because a typo here is invisible: the feed is external, the value is
 # optional, and None is indistinguishable from "this ship did not broadcast it".
+_LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _now() -> str:
+    """Timestamp for `last_seen`, in the format the rest of the stores use.
+
+    Rolling, not an entry time: AIS transmits position every 2-10 seconds underway, so a
+    vessel in the box has this rewritten constantly, and it freezes only once the vessel
+    leaves, stops transmitting, or the proxy stops running. That is the whole value of it --
+    a cached position is otherwise uninterpretable, since the cache is reloaded from disk at
+    startup and entries never expire, so "48 km from Maas Center" could be from forty
+    seconds ago or from three weeks ago and nothing in the data distinguishes them.
+
+    It cannot be backfilled: entries written before this existed have no timestamp and never
+    will. Treat a missing `last_seen` as unknown age, not as recent.
+
+    Caveat: this conflates "the vessel left the area" with "the proxy was not running", so
+    it is a floor on freshness rather than a measurement of it. That is the safe direction --
+    everything reads as unknown rather than as confidently current.
+    """
+    return datetime.datetime.now().strftime(_LAST_SEEN_FMT)
+
+
 def _process_ais(msg: dict) -> None:
     try:
         msg_type = msg.get("MessageType", "")
@@ -177,9 +200,21 @@ def _process_ais(msg: dict) -> None:
                 entry  = {"name": name, "callsign": callsign, "mmsi": mmsi,
                           "type": stype, "imo": imo, "length": length, "beam": beam,
                           "draught": ship.get("MaximumStaticDraught"),
-                          "destination": _clean_destination(ship.get("Destination", ""))}
+                          "destination": _clean_destination(ship.get("Destination", "")),
+                          "last_seen": _now()}
                 with _cache_lock:
-                    _vessel_cache[name.upper()] = entry
+                    # MERGE, never replace. Static data carries no position, so assigning
+                    # this dict wholesale deleted whatever PositionReport had recorded --
+                    # and static messages repeat every ~6 minutes, so a vessel sitting in
+                    # the box lost its position over and over. Measured before this fix:
+                    # 25% of the vessels in the labelled conversations had no position at
+                    # all, which is the failure that made distance data unusable.
+                    existing = _vessel_cache.get(name.upper())
+                    if existing is not None:
+                        existing.update(entry)
+                        entry = existing
+                    else:
+                        _vessel_cache[name.upper()] = entry
                     if callsign:
                         _callsign_cache[callsign.upper()] = entry
 
@@ -198,11 +233,13 @@ def _process_ais(msg: dict) -> None:
                         _vessel_cache[key] = {"name": name, "callsign": "", "mmsi": mmsi,
                                               "type": None, "imo": None, "length": None, "beam": None,
                                               "latitude": lat, "longitude": lon, "sog": sog,
-                                              "cog": cog, "heading": heading}
+                                              "cog": cog, "heading": heading,
+                                              "last_seen": _now()}
                     else:
                         e = _vessel_cache[key]
                         e["latitude"] = lat; e["longitude"] = lon
                         e["sog"] = sog; e["cog"] = cog; e["heading"] = heading
+                        e["last_seen"] = _now()
     except Exception as exc:
         print(f"[AIS] process error: {exc}", flush=True)
 
