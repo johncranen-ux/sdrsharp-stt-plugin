@@ -138,10 +138,18 @@ def test_every_prompt_fits_groqs_length_cap():
         assert len(text.split()) <= backends.GROQ_PROMPT_MAX_WORDS, name
 
 
-def test_candidate_prompts_contain_no_invented_vessel_name_or_callsign():
-    # The whole point of the v2 candidates. A name in the prompt can be echoed into output
-    # and then matched against AIS, which is how a phantom vessel with a real MMSI is born.
-    for name in ("no_names", "vocab"):
+def test_shipped_prompt_contains_no_invented_vessel_name_or_callsign():
+    # A name in the prompt can be echoed into output and then matched against AIS, which is
+    # how a phantom vessel with a real MMSI is born -- measured happening on clips 0068 and
+    # 0188 under the v1 prompt. This is the regression guard for that.
+    for name in ("shipped", "no_names"):
         words = set(bench.PROMPTS[name].lower().split())
         assert "neptune" not in words, name
         assert "pabc" not in words, name
+
+
+def test_superseded_prompts_are_kept_for_reproducibility():
+    # Every figure on record was measured against one of these; deleting them would make
+    # those numbers unreproducible.
+    assert bench.PROMPTS["v1_names"] != bench.MARITIME_PROMPT
+    assert "neptune" in bench.PROMPTS["v1_names"].lower()

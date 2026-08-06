@@ -53,11 +53,25 @@ GROQ_QUOTA_WARN_STEP = int(os.environ.get("GROQ_QUOTA_WARN_STEP", "50"))
 # All are env-overridable for A/B testing with server/bench.py without editing code.
 # ---------------------------------------------------------------------------
 
+# Fluent example transmissions, using vocabulary actually observed in Rotterdam VHF traffic.
+# Measured 2026-08-06 over 244 hand-referenced clips: 3.7 points of WER better than the
+# previous prompt through the deployed path (CI [-6.7%, -1.0%], sign test p=0.0008), and 4.4
+# points better on a held-out set it was not derived from. See docs/design-notes.md.
+#
+# Contains NO vessel name, deliberately. The previous prompt named an invented vessel
+# ("Motortanker Neptune") that matches a real AIS entry at 100, and was measured returning
+# that name on clips where nothing of the sort was said -- a phantom vessel with a real MMSI
+# attached. Any name here can be echoed into output and then matched against AIS.
 DEFAULT_MARITIME_PROMPT = (
-    "Maas Approach, this is Motortanker Neptune, callsign PABC, requesting permission "
-    "to enter the Botlek, over. "
-    "Motortanker Neptune, Maas Approach, roger, proceed to VHF channel six one, out. "
-    "Rotterdam VTS, be advised we are standing by on channel one six, over."
+    "Maas Approach, Maas Aanloop, this is the inbound motortanker, requesting "
+    "permission to enter the Botlek, over. "
+    "Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over. "
+    "Pilot Maas, we are outbound from Europoort past the Maasvlakte, our draught "
+    "is eleven metres twenty, pilot ladder portside, over. "
+    "Maas Approach, my intention is to proceed for East Anchorage, crossing the "
+    "Deepwater route, ETA at the Maas Center buoy one four four five, over. "
+    "Understood, shall we change to channel seven seven, over."
 )
 
 

@@ -288,6 +288,47 @@ Two vocabulary findings worth carrying into any future prompt: the station is ad
 unprompted decode hears it too — and **Multraship/Multratug** towage is recurring traffic
 (0038, 0251, 0253).
 
+### Identification, measured against verified labels (2026-08-06)
+
+The first honest identification numbers. 59 hand-verified conversations
+(`identification-labels-verified.txt`, the prefix of the labels file checked by ear), 267
+transmissions:
+
+| | Verified labels | Self-scored whole file |
+|---|---|---|
+| Precision | **68.0%** | 98.5% |
+| Recall | **51.7%** | 97.7% |
+
+The self-scored figures are meaningless and should never be quoted: field 3 of a drafted line
+is pre-filled with the resolver's own verdict, so an unverified file scores the resolver
+against itself. Against ground truth it names the wrong vessel on 65 of 203 transmissions it
+names at all, and stays silent on 64 it should have identified.
+
+Over-segmentation is confirmed as a real effect: 1.24 exchanges per conversation, with 11 of
+59 conversations split across more than one.
+
+### Multi-word vessel names are unfindable (2026-08-06)
+
+`_hint_probes` generates single words and **adjacent pairs only**, so a three-word name is
+never probed whole. Combined with the whole-string `fuzz.ratio` cutoff of 85 — which was the
+right fix for `WRatio`'s substring inflation — this systematically loses long names to short
+ones. For *SANTA ISABEL MAERSK* (which is in the cache):
+
+| Probe | Against | Score | |
+|---|---|---|---|
+| `SANTA ISABEL` | SANTA ISABEL MAERSK | 77 | below cutoff |
+| `ISABEL MAERSK` | SANTA ISABEL MAERSK | 81 | below cutoff |
+| `SANTA ISABEL MAERSK` | — | — | **never generated** |
+| `ISABEL` | ISABEL (a different vessel) | **100** | returned |
+
+So the correct vessel cannot be matched at any probe length available, while an unrelated
+one matches perfectly. Reproduced live: the hints for that transmission are `ROTTERDAM`,
+`MAAS`, `ISABEL` — three wrong vessels and not the right one.
+
+The fix needs both halves: generate 3-word (probably 4-word) probes, *and* prefer the
+longest matching probe rather than the first, or the spurious short match still wins on
+probe order. Not yet implemented.
+
 ### Prompt v2: the vocabulary is the lever, not the names (2026-08-06)
 
 Two candidates against the shipped prompt, run as separate arms so the causes stay separable

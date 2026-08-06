@@ -409,7 +409,16 @@ def test_name_filter_can_be_disabled(monkeypatch, name_cache):
 # Prompt echo
 # ---------------------------------------------------------------------------
 
-_PROMPT = proxy.DEFAULT_MARITIME_PROMPT
+# Pinned to the prompt that shipped until 2026-08-06, not to whatever is current. These
+# cases are the *reported incident* -- the CH01 exchange that came back as three different
+# vessels -- and they must keep passing as documentation of the mechanism no matter how the
+# shipped prompt is later reworded. Coverage of the current prompt is separate, below.
+_PROMPT = (
+    "Maas Approach, this is Motortanker Neptune, callsign PABC, requesting permission "
+    "to enter the Botlek, over. "
+    "Motortanker Neptune, Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over."
+)
 
 
 @pytest.mark.parametrize("text", [
@@ -439,6 +448,22 @@ def test_one_novel_word_is_enough_to_clear_a_transmission():
     """A word the prompt cannot supply means the speaker said something real."""
     assert proxy._is_prompt_echo("Motortanker Neptune, Maas Approach.", _PROMPT) is True
     assert proxy._is_prompt_echo("Motortanker Neptune, Maas Approach, Botlek bound.", _PROMPT) is False
+
+
+# The shipped prompt, whatever it currently is, must still be echo-detectable. Without this
+# a future prompt could quietly disable the filter -- it only fires on words the prompt
+# actually contains, so a reworded prompt with none of the old vocabulary would silently
+# stop suppressing anything.
+
+def test_shipped_prompt_echo_is_detected():
+    """A verbatim sentence of the live prompt, read back instead of transcribed."""
+    first_sentence = proxy.DEFAULT_MARITIME_PROMPT.split(". ")[0] + "."
+    assert proxy._is_prompt_echo(first_sentence, proxy.DEFAULT_MARITIME_PROMPT) is True
+
+
+def test_shipped_prompt_leaves_real_speech_alone():
+    assert proxy._is_prompt_echo("Maas Approach, Wilson Durness, calling you.",
+                                 proxy.DEFAULT_MARITIME_PROMPT) is False
 
 
 def test_prompt_echo_filter_can_be_disabled(monkeypatch):
