@@ -240,9 +240,53 @@ since these references would then score against the better prompt.
 transcribe because `language` is pinned to `en` (`backends.py:85`, `:132`). Forced-English
 decoding of Dutch produced German-flavoured invention: *"Mötter, Röck, Achtung, Maranatha"*.
 That text then flows into vessel identification and AIS matching, which is exactly how a
-phantom vessel with a real MMSI gets manufactured. How much Dutch traffic there is across the
-full set has not been measured; a language-detection sweep (`verbose_json`, no forced
-language) would answer it.
+phantom vessel with a real MMSI gets manufactured.
+
+### Why the language stays pinned to English (2026-08-06)
+
+The obvious response to those two clips — stop forcing `en`, let Whisper detect — was tried
+and **rejected on measurement**. `sweep_language.py --language ""` on a 4-clip smoke test
+labelled two plainly English transmissions *"Modern Greek"* and transcribed them into Greek
+script:
+
+| Clip | Reference | Unprompted, auto-detected |
+|---|---|---|
+| 0003 | "Maas Approach, Maas Approach, this is MSC Athens, Callsign five Lima Kilo Victor Five." | Μας προσέξετε, μας προσέξετε, αυτό είναι το ΜΣΥ Αθένα, κόλτ σάιν 5… |
+
+Language ID on a few seconds of noisy VHF is not trustworthy, and the failure is not
+symmetric: forcing `en` costs the occasional genuinely-Dutch transmission, while unforcing it
+risks mangling English — which is the overwhelming majority of this traffic — into whatever
+the detector guesses. **The pin stays.** Handling Dutch properly needs something better than
+per-chunk auto-detection (longer context, or a detector run over a whole conversation rather
+than one 5-second chunk); it is not a one-line change.
+
+This also killed the idea of a language census: with a false-positive rate that high on
+English clips, an auto-detect sweep cannot say how much Dutch is really in the set. The
+honest current answer is that two clips are known Dutch, by ear, and the true figure is
+unmeasured. (When a language *is* forced, the API echoes it back, so `sweep_language.py`
+suppresses the census in that mode rather than reporting a meaningless "100% English".)
+
+### The sweep found no further contamination (2026-08-06)
+
+`sweep_language.py` over all 244 referenced clips — unprompted, English forced, so the prompt
+is the only variable removed. **The nine corrected references were the whole of it**, as far
+as this screen can see.
+
+Fifteen references still contain a prompt-distinctive word, and all fifteen are ordinary
+radio vocabulary: `callsign` (13), `proceed` (2), `permission` (1). Each is corroborated by
+the unprompted decode independently producing the same word — 0060's reference reads
+"Serenade, what is your Callsign?" and the unprompted decode hears "Serenade, what is your
+call sign?". **A decoder that was never told the prompt exists cannot echo it**, so agreement
+is proof the word was really spoken.
+
+The highest-divergence references are hard audio, not contamination — 0205 ("Maas Approach,
+roger." vs *"Patricia is there, I'm asking you."*), 0137 ("Mind Polar" vs *"mine's fuller"*).
+None of the top 20 by divergence contains a prompt-distinctive word.
+
+Two vocabulary findings worth carrying into any future prompt: the station is addressed as
+**"Maas Aanloop"** (Dutch) as well as "Maas Approach" — reference 0086 uses it and the
+unprompted decode hears it too — and **Multraship/Multratug** towage is recurring traffic
+(0038, 0251, 0253).
 
 ## Vessel identification on CH01 (2026-07-30)
 
