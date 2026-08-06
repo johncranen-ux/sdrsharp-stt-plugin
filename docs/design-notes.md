@@ -511,6 +511,23 @@ That safety case is visible in what the echo filter suppresses. In the shipped a
 Sam.") returned `MOTORTANKER NEPTUNE` — the prompt inventing a vessel that matches AIS at 100
 on audio that says nothing of the sort. Both disappear once the name leaves the prompt.
 
+**Caveat on the corpus, and the check it prompted.** Only clips 0000–0099 of
+`references-2026-07-28.txt` are hand-verified; the rest is still draft pre-fill from
+whisper.cpp output, and the file's own header warns that "any backend comparison built on
+them will flatter it". **66% of that corpus by word count is draft.** Re-scored on the
+verified 89 clips alone:
+
+| Arm | Pooled WER | Δ | 95% CI |
+|---|---|---|---|
+| shipped (v1) | 32.0% | — | — |
+| `no_names` | 30.5% | −1.5% | [−6.2%, +2.2%] |
+| **`vocab`** | **25.5%** | **−6.5%** | **[−11.7%, −1.9%]** |
+
+The win is *larger* on clean ground truth, and still clears zero — as the direction of the
+bias predicts, since drafts derived from v1-prompt whisper.cpp output resemble the v1 arm
+more than they resemble `vocab`. The mixed-corpus figure of −3.7 was conservative, and
+`no_names` remains a wash on either corpus.
+
 **Held out on the 2026-07-27 set** (49 references, not used to derive the vocabulary):
 
 | Arm | Raw | Deployed | Δ deployed | 95% CI | Sign test |
