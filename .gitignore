@@ -41,6 +41,9 @@ conversations.json
 # format is documented in docs/user-manual.md; build your own with make_references.py.
 references.txt
 references-*.txt
+# Timestamped backups written before any bulk correction pass -- same transcript data,
+# same restriction.
+references*.bak-*
 
 # bench_identify.py ground truth, and its output. Drafted from conversations.json, so the
 # note field carries transcript text and it falls under exactly the restriction above.

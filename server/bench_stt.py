@@ -38,9 +38,20 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--config", default="groq_prompt",
                         help="key to store results under, matching bench.py's CONFIGS")
+    parser.add_argument("--prompt", default="shipped", choices=sorted(bench.PROMPTS),
+                        help="which decoding prompt to send (default: shipped, i.e. whatever "
+                             "the proxy currently sends)")
     parser.add_argument("--only-with-reference", action="store_true",
                         help="skip clips that have no reference text (saves API quota)")
     parser.add_argument("--limit", type=int, default=0)
+    # Groq's free tier allows 20 requests/minute. Unpaced, a few hundred clips will start
+    # drawing 429s, and backends.transcribe deliberately gives up on a long Retry-After
+    # rather than stalling live radio -- correct in production, but in a bench a dropped
+    # clip is a clip scored as total loss. Pacing is the cheaper fix.
+    parser.add_argument("--sleep", type=float, default=0.0,
+                        help="seconds between requests (use ~3.2 against Groq's free tier)")
+    parser.add_argument("--retries", type=int, default=3,
+                        help="attempts per clip before recording it as failed")
     args = parser.parse_args()
 
     captures = Path(args.captures)
@@ -55,7 +66,9 @@ def main() -> int:
     if args.limit:
         clips = clips[:args.limit]
 
-    print(f"{len(clips)} clips, backend={backends.STT_BACKEND}, model={backends.GROQ_MODEL}")
+    prompt = bench.PROMPTS[args.prompt]
+    print(f"{len(clips)} clips, backend={backends.STT_BACKEND}, model={backends.GROQ_MODEL}, "
+          f"prompt={args.prompt} ({len(prompt.split())} words)")
 
     rows = []
     for index, (clip_id, path) in enumerate(clips, start=1):
@@ -65,19 +78,25 @@ def main() -> int:
             "content_type": "audio/wav",
             "data": path.read_bytes(),
         }
-        started = time.monotonic()
-        status, body, _headers = backends.transcribe(file_info, language="en",
-                                                     prompt=bench.MARITIME_PROMPT)
-        elapsed = time.monotonic() - started
 
-        text, error = "", None
-        if status == 200:
-            try:
-                text = (json.loads(body.decode("utf-8")).get("text") or "").strip()
-            except Exception as exc:  # noqa: BLE001
-                error = f"bad JSON: {exc}"
-        else:
+        text, error, elapsed = "", None, 0.0
+        for attempt in range(1, args.retries + 1):
+            if args.sleep and (index > 1 or attempt > 1):
+                time.sleep(args.sleep)
+            # Timed inside the loop and after the sleep: "elapsed" is the decode latency of
+            # the attempt that produced this row, not that plus however long we paced for.
+            started = time.monotonic()
+            status, body, _headers = backends.transcribe(file_info, language="en", prompt=prompt)
+            elapsed = time.monotonic() - started
+            if status == 200:
+                try:
+                    text, error = (json.loads(body.decode("utf-8")).get("text") or "").strip(), None
+                except Exception as exc:  # noqa: BLE001
+                    error = f"bad JSON: {exc}"
+                break
             error = f"HTTP {status}: {body[:160].decode('utf-8', 'replace')}"
+            if attempt < args.retries:
+                print(f"      retry {attempt}/{args.retries - 1} after {error[:60]}", flush=True)
 
         rows.append({
             "clip_id": clip_id,
@@ -93,6 +112,10 @@ def main() -> int:
     out = Path(args.out)
     out.write_text(json.dumps({
         "model_label": f"{backends.STT_BACKEND}-{backends.GROQ_MODEL}",
+        # Recorded so a results file can never again be mistaken for one produced by a
+        # different prompt -- the whole reason this A/B was needed.
+        "prompt_key": args.prompt,
+        "prompt": prompt,
         "results": {args.config: rows},
     }, ensure_ascii=False, indent=1), encoding="utf-8")
 

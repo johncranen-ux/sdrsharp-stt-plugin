@@ -28,6 +28,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from stt_proxy import backends  # noqa: E402  (path set above)
+
 
 # ---------------------------------------------------------------------------
 # Configuration matrix
@@ -37,11 +41,29 @@ from typing import Any
 # Edit/add entries here as new parameters are worth comparing.
 # ---------------------------------------------------------------------------
 
-MARITIME_PROMPT = (
+# The prompt production actually sends, imported rather than restated. bench.py carried its
+# own copy until 2026-08-06, and the two had drifted: every WER figure on record (including
+# the "~9-10 points, largest single lever" claim in docs/design-notes.md) was measured
+# against a prompt the proxy has never sent. A copy cannot be kept honest by discipline, so
+# there is now only one.
+MARITIME_PROMPT = backends.DEFAULT_MARITIME_PROMPT
+
+# That drifted copy. Measured against the shipped prompt over 244 clips on 2026-08-06 (see
+# docs/design-notes.md): worse by 2.6 points pooled, and worse on 74 clips against 50 better
+# (sign test p=0.038) -- so the shipped prompt wins, but the pooled-WER interval grazes zero.
+# Kept because that is a direction without a magnitude: a future, larger reference set should
+# be able to settle it, and it cannot re-run the comparison if this text is gone.
+LEGACY_BENCH_PROMPT = (
     "Maas Approach, this is Motortanker Neptune, over. "
     "Roger, standing by on channel one six. "
     "Rotterdam VTS, Pilot Rotterdam, Botlek Traffic, over, out, wilco."
 )
+
+# Selectable by name from the command line (bench.py --prompt, bench_stt.py --prompt).
+PROMPTS: dict[str, str] = {
+    "shipped": MARITIME_PROMPT,
+    "legacy": LEGACY_BENCH_PROMPT,
+}
 
 CONFIGS: dict[str, dict[str, Any]] = {
     "current": {
@@ -308,6 +330,7 @@ def run(args: argparse.Namespace) -> int:
         return 1
 
     print(f"clips: {len(clips)}   references: {len(refs)}   configs: {config_names}")
+    print(f"prompt: {args.prompt} ({len(PROMPTS[args.prompt].split())} words)")
     print(f"backend: {args.host}:{args.port}{args.path}   model-label: {args.model_label or '(unset)'}\n")
 
     # results[config_name] = list of dict(clip_id, text, elapsed, wer, error)
@@ -315,6 +338,10 @@ def run(args: argparse.Namespace) -> int:
 
     for config_name in config_names:
         fields = CONFIGS[config_name]
+        # Swap in the selected prompt without mutating CONFIGS -- configs with no "prompt"
+        # key are unprompted on purpose ("current", "beam5") and must stay that way.
+        if "prompt" in fields:
+            fields = {**fields, "prompt": PROMPTS[args.prompt]}
         print(f"-- {config_name} --")
         for clip_id, wav_path in clips:
             file_bytes = wav_path.read_bytes()
@@ -447,6 +474,9 @@ def main() -> int:
     parser.add_argument("--captures", required=True, help="Directory containing *_sent.wav clips")
     parser.add_argument("--references", help="Path to references.txt (id<TAB>transcript per line)")
     parser.add_argument("--matrix", default="quick", help="quick | full | <single config name>")
+    parser.add_argument("--prompt", default="shipped", choices=sorted(PROMPTS),
+                        help="which prompt the prompt-bearing configs use (default: shipped, "
+                             "i.e. whatever the proxy currently sends)")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--path", default="/inference")

@@ -116,7 +116,7 @@ rows have no equivalent on Groq.
 |---|---|---|
 | Model | `ggml-large-v3.bin` | Benchmarked against `large-v3-turbo` on 49 real, hand-transcribed Rotterdam VHF clips: 38.9% pooled WER vs 40.8%. Costs ~33% more decode time (mean 3.55s vs 2.66s) and 1.5GB more VRAM — trivial on a 24GB card, and both models decode well under real-time (aggregate RTF 0.57x vs 0.43x), so no throughput risk. |
 | Beam search | `beam_size=5`, `best_of=5` | ~1 point better than greedy once the prompt is fixed. |
-| Maritime prompt | Fluent example transmissions (see `DEFAULT_MARITIME_PROMPT` in `whisper-proxy.py`) | The single largest lever found: ~9-10 points of WER improvement over no prompt. A keyword-list-style prompt was tried first and rejected — it primes Whisper to echo the list back verbatim on noisy/silent audio. |
+| Maritime prompt | Fluent example transmissions (see `DEFAULT_MARITIME_PROMPT` in `stt_proxy/backends.py`) | The single largest lever found: ~9-10 points of WER improvement over no prompt. A keyword-list-style prompt was tried first and rejected — it primes Whisper to echo the list back verbatim on noisy/silent audio. **That ~9-10 point figure was measured against a different prompt than the one shipped** — see "The prompt was never the one being measured" below. |
 | Server-side Silero VAD | **Off** (`WHISPER_VAD=false`) | Measured no WER benefit over VAD-off at the same decoder settings (48.5%/41.8% vs 40.8% pooled), and whisper.cpp's VAD+beam combination has its own flakiness (intermittent HTTP 500s, and one full server wedge observed). The plugin's own client-side VAD already does this job. |
 | Suppress non-speech tokens | On | Reduces hallucinated fillers. |
 | Nautical-term corrections | Regex pass (`_apply_sttt_corrections` in `whisper-proxy.py`), applied to every non-CH01 maritime/airband response | Evidence-backed rules (Mass/Mars/March Approach → Maas Approach, call sign → Callsign, motor tanker → Motortanker, draft → draught, boys/boy → buoys/buoy) derived from substitution-frequency analysis of the baseline benchmark. Measured on the same 61-clip/49-reference set, `beam5_prompt`: pooled WER 41.6% direct against whisper.cpp (`:8080`, no corrections) → 35.9% through the proxy (`:9000`, corrections applied), a ~5.7-point improvement — but most of that predates this pass: ~4.2 points come from the 7 correction rules that already existed (Mass/March Approach, bare "mass", cosine, call sign, motor tanker, draft, boys), and only ~1.3 points from the 3 rules added in this pass (Mars Approach, bare "mars", boy). 2026-07-28. |
@@ -133,6 +133,116 @@ All of the above are env-overridable in `whisper-proxy.py` (`WHISPER_BEAM_SIZE`,
 
 Full per-clip results: `server/bench-report.html` (turbo, full config matrix) and
 `server/bench-report-large-v3.html` (large-v3, winning config).
+
+### The prompt was never the one being measured (2026-08-06)
+
+`bench.py` defined its own `MARITIME_PROMPT` (24 words) while the proxy sent
+`DEFAULT_MARITIME_PROMPT` (40 words). Every prompt figure above, and the Groq/whisper.cpp
+comparison, was therefore measured against text production has never sent. `bench.py` now
+imports the shipped constant — one prompt, no copy to drift — and `tests/test_bench.py` pins
+them together so it cannot come back. `bench_stt.py --prompt {shipped,legacy}` selects
+between them, and results files record which was used.
+
+Measured over 244 hand-referenced clips from `captures/2026-07-28`, `STT_BACKEND=groq`,
+via `bench_prompt_ab.py` (paired on clip id; 5,000 bootstrap resamples), after the nine
+contaminated references described below were corrected by ear:
+
+| Arm | Pooled WER | Δ vs shipped | 95% CI on Δ |
+|---|---|---|---|
+| **shipped** (40 words, in production) | **29.0%** | — | — |
+| legacy (24 words, what the numbers above describe) | 31.1% | +2.1% | [−0.5%, +4.8%] |
+| shipped, re-run | 29.0% | +0.0% | [+0.0%, +0.0%] |
+
+**The shipped prompt is the better of the two, but not by a margin this clip set can
+resolve.** The pooled-WER interval spans zero; the sign test is what carries the result —
+legacy is worse on 73 clips and better on 50, two-sided *p* = 0.047. The two disagree
+because a handful of long clips dominate pooled WER. Read together: direction established,
+magnitude not. The practical consequence is only that the recorded figures above slightly
+*understate* what production does, so nothing shipped needs changing.
+
+**Scored through the deployed path (`--echo-filter`), the gap is wider.** bench.py measures
+the raw decoder — right for decoder settings, wrong for a prompt comparison, because the
+prompt-echo filter is downstream of the prompt and keyed to it. Four shipped-arm clips (0068,
+0134, 0188, 0225) came back as verbatim prompt fragments that `_is_prompt_echo` suppresses in
+production, so the raw score charges the shipped prompt 28 edits for text no user ever sees,
+against legacy's 18:
+
+| Arm | Pooled WER (deployed path) | Δ | 95% CI | Sign test |
+|---|---|---|---|---|
+| shipped | **28.4%** | — | — | — |
+| legacy | 31.0% | +2.6% | [−0.04%, +5.18%] | 74 worse / 47 better, *p* = 0.018 |
+
+The interval still grazes zero, so the honest reading is unchanged — but both the effect and
+its significance improve once the measurement matches what is actually deployed. A prompt
+that echoes more is otherwise penalised twice: once in the text it emits, and again in the
+WER of text production already discards.
+
+**Groq's decoder is effectively deterministic at `temperature=0`**, which the third arm
+exists to establish: 242 of 243 clips came back byte-identical across two runs an hour
+apart. The noise floor is therefore ~0.2 points, so the 2.6-point gap is not sampling
+scatter — the uncertainty in it is which clips are in the set, not what the API returns.
+This also retires a standing worry: unlike the Claude calls (`identify.py`, where two
+identical runs scored 38.8% and 39.7%), STT runs need no repetition to be trusted.
+
+Two things fell out of the per-clip diffs, both arguing against the *content* of the
+shipped prompt even though its overall score is better:
+
+* **`callsign PABC` appears to prime letter-by-letter spelling.** On two short clips the
+  shipped arm returned `M-A-S-A-P-P-R-O-A-A-L-L-O-S` and `M-A-S-P-O-A-R-T-E-R-A` where the
+  legacy arm returned "Aas Approach, Excel." and "Maas approach, over." Only the shipped
+  prompt contains a spelled callsign, only the shipped arm produced this failure (2 clips vs
+  0), and it emitted `PABC` on 4 clips against legacy's 0. Two clips is not proof, but the
+  mechanism is plausible and the failure is severe where it lands.
+* **Nine references were themselves wrong, several of them prompt echoes.**
+  `make_references.py` pre-fills references from the plugin's own prompted output for
+  hand-correction, so an echo the labeller missed becomes "ground truth" — and rewards
+  whichever arm hallucinates it. All nine have since been re-transcribed by ear and
+  corrected; the table above is the post-correction measurement.
+
+### Finding contaminated ground truth (2026-08-06)
+
+Three screens found all nine, and only the last needed a human:
+
+1. **Prompt-distinctive tokens.** Flag references containing a prompt word outside
+   `_ECHO_GENERIC_WORDS`. Cheap, but noisy — "callsign" and "proceed" are ordinary radio
+   vocabulary, so 16 of 24 hits were false alarms.
+2. **Speech rate.** Reference word count over clip duration. The corpus median is 1.95
+   words/sec; clip 0148 implied 6.3 and 0253 implied 5.4. **Nobody says 13 words in 2.1
+   seconds** — that is contamination proven by arithmetic, no listening required.
+3. **An unprompted re-decode.** A reference drafted from prompted output cannot be checked
+   against more prompted output. Re-decoding with `prompt=""` gives an independent witness
+   that has no way to know the prompt's vessel name or callsign exists. Where it diverges
+   sharply, the reference is the prompt talking.
+
+What the audio actually said, versus what the contaminated references claimed:
+
+| Clip | Reference claimed | Actually said |
+|---|---|---|
+| 0148 | "Rotterdam VTS, be advised we are standing by on channel one six, over." | "Check, Standby zero one" |
+| 0251 | "Motortanker Neptune, Maas Approach, roger." | "Multratug 18 malala?" |
+| 0253 | "Motortanker Neptune, be advised we are standing by…" | "Multratug 18 in service?" |
+| 0170 | "…Motortanker Neptune, coming over." | "…Motorvessel la? Veronica B, come in over" |
+| 0212 | "Neptune is by the end of the way" | "next report on the way" |
+| 0177 | "(PABC1330) PABC one three three zero" | "Our, best ETA one three three zero" |
+| 0112 | "Callsign PABC" | "Callsign Papa Bravo Oscar Uniform" |
+
+**Every invented vessel name was the prompt's own.** `Motortanker Neptune` appeared in four
+references and was in the audio of none of them.
+
+**Contamination distorts comparisons more than it distorts absolute scores.** Correcting nine
+of 244 references moved the headline WER by 0.2 points (29.2% → 29.0%) but moved the
+shipped-vs-legacy delta by 0.5 (+2.6% → +2.1%) — because the contamination was not random,
+it favoured the arm that hallucinates the prompt. Any future prompt comparison must sweep the
+reference set first, and *especially* one testing a prompt that removes the invented names,
+since these references would then score against the better prompt.
+
+**Two clips were Dutch** (0251, 0253 — both the tug *Multratug 18*), which the pipeline cannot
+transcribe because `language` is pinned to `en` (`backends.py:85`, `:132`). Forced-English
+decoding of Dutch produced German-flavoured invention: *"Mötter, Röck, Achtung, Maranatha"*.
+That text then flows into vessel identification and AIS matching, which is exactly how a
+phantom vessel with a real MMSI gets manufactured. How much Dutch traffic there is across the
+full set has not been measured; a language-detection sweep (`verbose_json`, no forced
+language) would answer it.
 
 ## Vessel identification on CH01 (2026-07-30)
 

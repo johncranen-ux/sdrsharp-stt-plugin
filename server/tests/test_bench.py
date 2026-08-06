@@ -100,3 +100,32 @@ def test_word_alignment_ops_edit_count_matches_word_error_counts():
     non_matches = sum(1 for o in ops if o[0] != "match")
     edits, _ = bench.word_error_counts(ref, hyp)
     assert non_matches == edits
+
+
+# ---------------------------------------------------------------------------
+# Prompt reconciliation
+#
+# bench.py used to define its own MARITIME_PROMPT, which drifted from the one the proxy
+# sends -- so every WER figure on record was measured against text that was never deployed.
+# These pin the two together so the drift cannot silently come back.
+# ---------------------------------------------------------------------------
+
+from stt_proxy import backends  # noqa: E402
+
+
+def test_bench_prompt_is_the_prompt_the_proxy_actually_sends():
+    assert bench.MARITIME_PROMPT == backends.DEFAULT_MARITIME_PROMPT
+
+
+def test_prompt_bearing_configs_all_use_the_shipped_prompt():
+    prompted = [c for c in bench.CONFIGS.values() if "prompt" in c]
+    assert prompted, "expected at least one prompt-bearing config"
+    assert all(c["prompt"] == backends.DEFAULT_MARITIME_PROMPT for c in prompted)
+
+
+def test_legacy_prompt_is_kept_distinct_and_selectable():
+    # It only earns its place in the tree while it differs from the shipped prompt; once
+    # the A/B is written up and it is retired, this test should go with it.
+    assert bench.LEGACY_BENCH_PROMPT != bench.MARITIME_PROMPT
+    assert bench.PROMPTS == {"shipped": bench.MARITIME_PROMPT,
+                             "legacy": bench.LEGACY_BENCH_PROMPT}
