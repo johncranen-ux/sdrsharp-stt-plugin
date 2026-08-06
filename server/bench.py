@@ -59,10 +59,41 @@ LEGACY_BENCH_PROMPT = (
     "Rotterdam VTS, Pilot Rotterdam, Botlek Traffic, over, out, wilco."
 )
 
+# Candidate v2, arm 1: the shipped prompt with the invented vessel name and callsign taken
+# out and NOTHING else changed, so a difference is attributable to that alone. The names earn
+# removal on three independent counts (docs/design-notes.md): they manufactured four false
+# references, they are still echoed into live output on ~1.6% of clips, and the spelled
+# callsign coincides with letter-by-letter spelling failures. The "this is <vessel>" shape is
+# kept, since that structure may be what the prompt is really teaching.
+NO_NAMES_PROMPT = (
+    "Maas Approach, this is the inbound motortanker, requesting permission "
+    "to enter the Botlek, over. "
+    "Motortanker, Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over."
+)
+
+# Arm 2: the same removal, plus vocabulary actually observed in these captures -- station and
+# place names, and procedural phrasing. Deliberately contains no vessel name at all: the
+# lesson of the false references is that any name in the prompt can be echoed out and matched
+# against AIS. Uses the ~160 tokens of Groq's 224-token budget the shipped prompt leaves idle.
+VOCAB_PROMPT = (
+    "Maas Approach, Maas Aanloop, this is the inbound motortanker, requesting "
+    "permission to enter the Botlek, over. "
+    "Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over. "
+    "Pilot Maas, we are outbound from Europoort past the Maasvlakte, our draught "
+    "is eleven metres twenty, pilot ladder portside, over. "
+    "Maas Approach, my intention is to proceed for East Anchorage, crossing the "
+    "Deepwater route, ETA at the Maas Center buoy one four four five, over. "
+    "Understood, shall we change to channel seven seven, over."
+)
+
 # Selectable by name from the command line (bench.py --prompt, bench_stt.py --prompt).
 PROMPTS: dict[str, str] = {
     "shipped": MARITIME_PROMPT,
     "legacy": LEGACY_BENCH_PROMPT,
+    "no_names": NO_NAMES_PROMPT,
+    "vocab": VOCAB_PROMPT,
 }
 
 CONFIGS: dict[str, dict[str, Any]] = {

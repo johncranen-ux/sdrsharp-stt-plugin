@@ -127,5 +127,21 @@ def test_legacy_prompt_is_kept_distinct_and_selectable():
     # It only earns its place in the tree while it differs from the shipped prompt; once
     # the A/B is written up and it is retired, this test should go with it.
     assert bench.LEGACY_BENCH_PROMPT != bench.MARITIME_PROMPT
-    assert bench.PROMPTS == {"shipped": bench.MARITIME_PROMPT,
-                             "legacy": bench.LEGACY_BENCH_PROMPT}
+    assert bench.PROMPTS["shipped"] == bench.MARITIME_PROMPT
+    assert bench.PROMPTS["legacy"] == bench.LEGACY_BENCH_PROMPT
+
+
+def test_every_prompt_fits_groqs_length_cap():
+    # Over-length is a hard 400 from Groq, which costs a real chunk of radio audio.
+    # _truncate_prompt would save the request but silently bench a different prompt.
+    for name, text in bench.PROMPTS.items():
+        assert len(text.split()) <= backends.GROQ_PROMPT_MAX_WORDS, name
+
+
+def test_candidate_prompts_contain_no_invented_vessel_name_or_callsign():
+    # The whole point of the v2 candidates. A name in the prompt can be echoed into output
+    # and then matched against AIS, which is how a phantom vessel with a real MMSI is born.
+    for name in ("no_names", "vocab"):
+        words = set(bench.PROMPTS[name].lower().split())
+        assert "neptune" not in words, name
+        assert "pabc" not in words, name

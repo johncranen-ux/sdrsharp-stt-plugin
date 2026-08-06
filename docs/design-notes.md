@@ -288,6 +288,51 @@ Two vocabulary findings worth carrying into any future prompt: the station is ad
 unprompted decode hears it too — and **Multraship/Multratug** towage is recurring traffic
 (0038, 0251, 0253).
 
+### Prompt v2: the vocabulary is the lever, not the names (2026-08-06)
+
+Two candidates against the shipped prompt, run as separate arms so the causes stay separable
+(`bench.py` `NO_NAMES_PROMPT`, `VOCAB_PROMPT`). 244 clips, paired, `--echo-filter` figures in
+the "deployed" column:
+
+| Arm | Raw | Deployed | Δ deployed | 95% CI | Sign test |
+|---|---|---|---|---|---|
+| shipped | 29.0% | 28.4% | — | — | — |
+| `no_names` (names removed, nothing else) | 27.8% | 27.6% | −0.8% | [−3.1%, +1.4%] | 37 / 36, *p* = 1.00 |
+| **`vocab`** (names removed + observed vocabulary) | **24.5%** | **24.7%** | **−3.7%** | **[−6.7%, −1.0%]** | 97 / 55, ***p* = 0.0008** |
+
+**Removing the invented names does nothing for WER.** `no_names` is a dead heat. Had both
+changes been bundled into one arm the whole gain would have been credited to the wrong cause.
+The case for dropping `Motortanker Neptune` and `callsign PABC` is **identification safety,
+not accuracy** — a different axis, and worth keeping straight.
+
+That safety case is visible in what the echo filter suppresses. In the shipped arm, clip 0068
+(reference "Inaudible") returned `MOTORTANKER NEPTUNE, roger, over.` and 0188 ("Go ahead,
+Sam.") returned `MOTORTANKER NEPTUNE` — the prompt inventing a vessel that matches AIS at 100
+on audio that says nothing of the sort. Both disappear once the name leaves the prompt.
+
+**Held out on the 2026-07-27 set** (49 references, not used to derive the vocabulary):
+
+| Arm | Raw | Deployed | Δ deployed | 95% CI | Sign test |
+|---|---|---|---|---|---|
+| shipped | 41.6% | 40.0% | — | — | — |
+| `vocab` | 35.6% | 35.6% | −4.4% | [−9.9%, +1.7%] | 19 / 14, *p* = 0.49 |
+
+**The effect did not shrink out of sample** — the point estimate is if anything larger than
+in-sample (−4.4 vs −3.7 deployed). That is the test that matters here, because overfitting
+predicts collapse toward zero, which is exactly what happened to the hand-written correction
+rules (1.6 points in-sample, 0.3 held out). At *n* = 49 this set cannot certify significance
+on its own; the significance comes from the 244-clip run, and this run's job was to check the
+effect replicates on data it was not built from. It does. One caveat on the hold-out's
+purity: "Deepwater route" appears in the 07-27 references and was seen while building the
+prompt; the rest of the vocabulary traces to the 07-28 set.
+
+**Known cost.** A richer prompt widens `_is_prompt_echo`'s distinctive-word set (8 tokens for
+the shipped prompt, 29 for `vocab`), making false suppression more likely. Clip 0226 —
+`"ETA, roger, one one six."` — looks like exactly that, and 0028 is lost by both new arms
+because dropping "Neptune" leaves `motortanker` as a bare prompt word in a 6-word all-prompt
+transmission. Suppression counts did not rise overall (3 for `vocab` against 4 for shipped
+in-sample; 0 against 1 held out), so this is a cost to watch rather than a blocker.
+
 ## Vessel identification on CH01 (2026-07-30)
 
 A single exchange between Maas Approach and *Wilson Durness* was reported showing three
