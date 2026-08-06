@@ -44,6 +44,8 @@ references-*.txt
 # Timestamped backups written before any bulk correction pass -- same transcript data,
 # same restriction.
 references*.bak-*
+identification-labels*.bak-*
+identification-labels-verified.txt
 
 # bench_identify.py ground truth, and its output. Drafted from conversations.json, so the
 # note field carries transcript text and it falls under exactly the restriction above.
