@@ -138,8 +138,17 @@ async def _ais_loop(api_key: str) -> None:
             async with websockets.connect("wss://stream.aisstream.io/v0/stream", ssl=ssl_ctx) as ws:
                 await ws.send(sub_msg)
                 print("[AIS] connected — watching Rotterdam / Maas Approach area", flush=True)
-                async for raw in ws:
-                    _process_ais(json.loads(raw))
+                # Watches the clock alongside the read loop rather than wrapping recv() in a
+                # timeout: cancelling a recv() mid-frame is a way to lose messages, and the
+                # only thing needed here is a periodic look at when the last one arrived.
+                watchdog = (asyncio.create_task(_watch_silence(time.monotonic()))
+                            if AIS_SILENCE_WARN_SEC > 0 else None)
+                try:
+                    async for raw in ws:
+                        _process_ais(json.loads(raw))
+                finally:
+                    if watchdog is not None:
+                        watchdog.cancel()
         except Exception as exc:
             print(f"[AIS] disconnected ({exc}), reconnecting in 30s...", flush=True)
             import asyncio as _a
@@ -173,6 +182,81 @@ _LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
 AIS_MAX_AGE_MIN = int(os.environ.get("AIS_MAX_AGE_MIN", "0"))
 
 _stale_filter_warned = False
+
+# Seconds of total silence on a connected feed before saying so. 0 disables the check.
+#
+# The failure this exists for, observed 2026-08-07: aisstream accepted the connection,
+# accepted the subscription, and then sent nothing -- for the entire session. No error, no
+# close, no exception, so the reconnect handler never fired and "[AIS] connected" remained
+# the last word on the subject. Meanwhile every lookup went on matching against a cache
+# loaded from disk, three days stale, with total confidence. Confirmed external: a fresh key
+# and a whole-world bounding box were equally silent (aisstream/aisstream#15).
+#
+# A feed that fails by going quiet is indistinguishable from a quiet feed unless something
+# is watching the clock, which is the whole point of this. 60s is far longer than the
+# seconds-apart cadence of a busy estuary, so it cannot fire on normal traffic.
+AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "60"))
+
+# time.monotonic() of the last frame of any recognised type; None until the first arrives.
+_last_message_at = None
+
+_unknown_frames_logged = 0
+_UNKNOWN_FRAME_LOG_LIMIT = 3
+
+
+def _silence_report(last_message_at, connected_at, now, threshold):
+    """The warning a quiet feed deserves, or None if it is behaving.
+
+    Pure so the decision can be tested without a websocket or a clock. Distinguishes "went
+    quiet mid-stream" from "never sent anything", because they point at different causes:
+    the first is a stall or an emptied bounding box, the second is the subscription being
+    accepted and ignored, which is a server-side or credential fault no retry will fix.
+    """
+    if threshold <= 0:
+        return None
+
+    if last_message_at is None:
+        quiet = now - connected_at
+        if quiet < threshold:
+            return None
+        return (f"[AIS] WARNING: connected {quiet:.0f}s ago and has received no data at all. "
+                f"The subscription was accepted but nothing is being delivered -- check the "
+                f"API key and aisstream.io status. Lookups are running against the cache "
+                f"loaded from disk, whose age is unknown.")
+
+    quiet = now - last_message_at
+    if quiet < threshold:
+        return None
+    return (f"[AIS] WARNING: no AIS data for {quiet:.0f}s on a connected feed. "
+            f"Cached positions are going stale.")
+
+
+async def _watch_silence(connected_at: float) -> None:
+    """Report a feed that has gone quiet, for as long as it stays quiet."""
+    interval = max(AIS_SILENCE_WARN_SEC, 5)
+    while True:
+        await asyncio.sleep(interval)
+        report = _silence_report(_last_message_at, connected_at,
+                                 time.monotonic(), AIS_SILENCE_WARN_SEC)
+        if report:
+            print(report, flush=True)
+
+
+def _report_unrecognised_frame(msg: dict) -> None:
+    """Log a frame that is not an AIS message -- rate-limited, since a fault repeats.
+
+    aisstream reports refusals as {"error": "..."} over an otherwise healthy socket. Such a
+    frame carries no MMSI, so it used to be dropped by the `if not mmsi: return` guard and
+    never seen -- the most diagnostic thing the server can say, discarded in silence.
+    """
+    global _unknown_frames_logged
+    if _unknown_frames_logged >= _UNKNOWN_FRAME_LOG_LIMIT:
+        return
+    _unknown_frames_logged += 1
+    detail = msg.get("error") or json.dumps(msg)[:200]
+    tail = (" (further such frames will not be logged)"
+            if _unknown_frames_logged == _UNKNOWN_FRAME_LOG_LIMIT else "")
+    print(f"[AIS] server sent a non-AIS frame: {detail}{tail}", flush=True)
 
 
 def _now() -> str:
@@ -239,8 +323,17 @@ def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
 
 
 def _process_ais(msg: dict) -> None:
+    global _last_message_at
     try:
         msg_type = msg.get("MessageType", "")
+        if not msg_type:
+            _report_unrecognised_frame(msg)
+            return
+
+        # Before the MMSI guard below, deliberately: this records that the feed is ALIVE,
+        # which is true of any well-formed frame whether or not it names a usable vessel.
+        _last_message_at = time.monotonic()
+
         meta     = msg.get("MetaData", {})
         mmsi     = str(meta.get("MMSI", "")).strip()
         if not mmsi:

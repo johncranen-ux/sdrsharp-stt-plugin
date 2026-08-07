@@ -133,6 +133,10 @@ def ais_caches(monkeypatch):
     vessels, callsigns = {}, {}
     monkeypatch.setattr(ais, "_vessel_cache", vessels)
     monkeypatch.setattr(ais, "_callsign_cache", callsigns)
+    # Feed-health state is module-global and its log is rate-limited, so without this a
+    # test's output would depend on which tests ran before it.
+    monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
+    monkeypatch.setattr(ais, "_last_message_at", None)
     return vessels, callsigns
 
 
@@ -357,6 +361,64 @@ def test_a_malformed_message_does_not_raise(ais_caches):
     """The feed is external; a shape change must not kill the websocket thread."""
     ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
                         "Message": None})
+
+
+# ---------------------------------------------------------------------------
+# Feed silence detection
+#
+# On 2026-08-07 the feed was found delivering nothing for an entire session: the websocket
+# connected, "[AIS] connected" printed, and then silence -- no error, no disconnect, no log
+# line of any kind, while every lookup carried on matching happily against a cache last
+# updated three days earlier. Two blind spots made that invisible, and both are covered here.
+
+
+def test_a_frame_with_no_message_type_is_reported(ais_caches, capsys):
+    """aisstream signals refusals as {"error": ...} on an otherwise healthy socket.
+
+    Such a frame has no MessageType and no MMSI, so it used to hit the `if not mmsi: return`
+    line and vanish without trace -- the single most diagnostic thing the feed can send,
+    silently discarded.
+    """
+    ais._process_ais({"error": "Api Key Is Not Valid"})
+    out = capsys.readouterr().out
+    assert "Api Key Is Not Valid" in out, "the server's own error text must reach the log"
+
+
+def test_unrecognised_frames_are_logged_but_rate_limited(ais_caches, capsys):
+    """A persistent error must not turn into an unbounded log flood."""
+    for _ in range(50):
+        ais._process_ais({"error": "nope"})
+    assert capsys.readouterr().out.count("nope") <= ais._UNKNOWN_FRAME_LOG_LIMIT
+
+
+def test_a_recognised_frame_records_when_it_arrived(ais_caches, monkeypatch):
+    monkeypatch.setattr(ais, "_last_message_at", None)
+    ais._process_ais(_position("ANOUK"))
+    assert ais._last_message_at is not None, "needed to tell 'quiet' from 'dead'"
+
+
+def test_silence_report_is_quiet_while_data_flows():
+    assert ais._silence_report(last_message_at=1000.0, connected_at=900.0,
+                               now=1030.0, threshold=60) is None
+
+
+def test_silence_report_warns_when_a_connected_feed_goes_quiet():
+    msg = ais._silence_report(last_message_at=1000.0, connected_at=900.0,
+                              now=1100.0, threshold=60)
+    assert msg is not None and "100" in msg
+
+
+def test_silence_report_warns_when_no_frame_ever_arrived():
+    """The actual 2026-08-07 shape: connected, subscribed, never sent a single frame."""
+    msg = ais._silence_report(last_message_at=None, connected_at=900.0,
+                              now=1000.0, threshold=60)
+    assert msg is not None
+    assert "no data at all" in msg.lower(), "must read differently from a mid-stream stall"
+
+
+def test_silence_report_can_be_disabled():
+    assert ais._silence_report(last_message_at=None, connected_at=0.0,
+                               now=1e9, threshold=0) is None
 
 
 # ---------------------------------------------------------------------------
