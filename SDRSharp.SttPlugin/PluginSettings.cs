@@ -15,14 +15,24 @@ namespace SDRSharp.SttPlugin
         public static string  ServerUrl { get; set; } = "http://localhost:9000";
         public static string  Mode      { get; set; } = "maritime";
         public static string  Language  { get; set; } = "en";
+        // Empty by DEFAULT, and deliberately so: the decoder prompt is owned by the proxy
+        // (server/stt_proxy/backends.py, DEFAULT_MARITIME_PROMPT). Its effective prompt is
+        // `client_prompt or DEFAULT_MARITIME_PROMPT`, so anything non-empty sent from here
+        // shadows the server's entirely — and a default baked into the DLL pins every
+        // deployment to whichever prompt shipped with it, silently, forever.
+        //
+        // That is not hypothetical. This field used to default to a prompt naming an
+        // invented vessel, "Motortanker Neptune". The server replaced it on 2026-08-06 with
+        // a measured one (3.7 WER points better, p=0.0008), but the plugin kept overriding
+        // it, so the improvement never reached production and the invented name — which
+        // matches a real AIS entry at score 100 — kept being echoed into transcripts and
+        // then resolved to a real MMSI.
+        //
+        // The textbox remains, as a per-site override for someone who knows what they want.
         // Whisper's initial prompt biases decoding style/vocabulary from fluent example
         // text, not from a keyword list — a dense list of terms tends to get echoed back
         // verbatim on noisy or silent audio instead of improving real transcriptions.
-        public static string  Prompt    { get; set; } =
-            "Maas Approach, this is Motortanker Neptune, callsign PABC, requesting permission " +
-            "to enter the Botlek, over. " +
-            "Motortanker Neptune, Maas Approach, roger, proceed to VHF channel six one, out. " +
-            "Rotterdam VTS, be advised we are standing by on channel one six, over.";
+        public static string  Prompt    { get; set; } = "";
         public static int     VadLevel  { get; set; } = 10;
         public static int     SilenceMs { get; set; } = 600;
         public static bool    Enabled   { get; set; } = false;

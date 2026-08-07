@@ -32,6 +32,7 @@
     <Compile Include="..\SDRSharp.SttPlugin\Dsp\VoiceActivityDetector.cs" Link="Src\VoiceActivityDetector.cs" />
     <Compile Include="..\SDRSharp.SttPlugin\WavBuilder.cs" Link="Src\WavBuilder.cs" />
     <Compile Include="..\SDRSharp.SttPlugin\WhisperClient.cs" Link="Src\WhisperClient.cs" />
+    <Compile Include="..\SDRSharp.SttPlugin\PluginSettings.cs" Link="Src\PluginSettings.cs" />
   </ItemGroup>
 
 </Project>
