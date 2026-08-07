@@ -136,6 +136,20 @@ Full per-clip results: `server/bench-report.html` (turbo, full config matrix) an
 
 ### The prompt was never the one being measured (2026-08-06)
 
+> **Follow-up, 2026-08-07: nor was the deployed one.** The section below fixed the *bench*
+> copy. The *plugin* held a third copy, and it beat them both. `PluginSettings.Prompt`
+> defaulted to a prompt naming an invented vessel, "Motortanker Neptune", and
+> `WhisperClient` sent it as the `prompt` form field on every request — while
+> `_effective_prompt` resolves to `client_prompt or DEFAULT_MARITIME_PROMPT`, so any
+> non-empty client prompt shadows the server's entirely. The v2 prompt measured on
+> 2026-08-06 therefore never ran in production, and the phantom name — which matches a real
+> AIS entry at score 100 — kept being echoed into transcripts and resolved to a real MMSI.
+> `PluginSettings.Prompt` now defaults to `""`, so the proxy owns the prompt as the
+> proxy-owned-params design in `backends.py` always intended; the textbox remains as a
+> deliberate per-site override. Pinned by `PluginSettingsTests`. **Note that the
+> deployed `SDRSharp.SttPlugin.xml` persists the old value and must be cleared too — the
+> DLL default only applies where no settings file exists yet.**
+
 `bench.py` defined its own `MARITIME_PROMPT` (24 words) while the proxy sent
 `DEFAULT_MARITIME_PROMPT` (40 words). Every prompt figure above, and the Groq/whisper.cpp
 comparison, was therefore measured against text production has never sent. `bench.py` now
@@ -462,6 +476,128 @@ field. Weighting is preferable to deleting: evicting the vessel that is about to
 the identification entirely, while keeping a stale one costs one extra candidate among
 thousands. A generous TTL (30 days) is still worth having as housekeeping, since the cache
 currently grows without bound.
+
+### What the deployed prompt actually cost (2026-08-07)
+
+The plugin had been shadowing the server's prompt with `v1_names` (see the follow-up note
+above). Measured for the first time on a **clean** corpus — 99 hand-verified clips from
+`captures/2026-08-07`, references checked by ear the same day, `STT_BACKEND=groq`, paired on
+clip id with 5,000 bootstrap resamples:
+
+| arm | pooled WER | Δ vs shipped | 95% CI on Δ |
+|---|---|---|---|
+| **shipped** (v2, 93 words — never actually ran in production) | **25.1%** | — | — |
+| `v1_names` (40 words — what production really used) | 36.4% | **+11.3%** | **[+7.8%, +15.2%]** |
+
+51 of 99 clips are worse under `v1_names`, 11 better, 37 unchanged. With `--echo-filter` the
+gap holds at +10.0% [+6.4%, +13.8%], so it is not an artefact of a single echoed clip.
+
+**Three mechanisms are visible in the movers**, and they explain the size of the gap:
+
+- **Spoken digits collapse to numerals.** `v1_names` returns "1330" where the transmission
+  says, and the reference records, "one three three zero" (clips 0060, 0041). Radio procedure
+  spells digits out; the v2 prompt's spelled-out numbers carry that into the decoder.
+- **Key terms degrade**: "Maaas Approach", "Maaas Centervoe" on 0067.
+- **Verbatim prompt echo.** On 0038, against audio saying "Tug, Panda, Motorvessel", `v1_names`
+  returned *"Rotterdam VTS, be advised we are standing by on channel one six, over."* — a
+  sentence lifted straight out of its own prompt. Caught by the echo filter, but it is the
+  failure mode that motivated removing invented names in the first place.
+
+**The methodological point is the bigger one.** The 2026-08-06 measurement put the shipped
+prompt only 2.1 points ahead with a CI spanning zero, and the v2 work at 3.7 points. Both were
+measured on a corpus **66% draft pre-fill from whisper.cpp output**. The clean corpus puts the
+same comparison at 11.3 points with a CI nowhere near zero. Draft references do not merely add
+noise — they **systematically understate any change that makes output diverge from whisper.cpp**,
+because the draft *is* whisper.cpp. Prompt figures measured on part-draft ground truth should
+be treated as lower bounds, not estimates.
+
+One honest caveat: the echo filter suppressed **3** clips in the shipped arm (0058, 0073, 0086)
+against **1** in `v1_names`. The longer v2 prompt gives more text to echo. The filter catches
+them, but that is worth watching.
+
+**Dutch clips, and why the annotation must use square brackets.** Eight of the 99 clips are
+Dutch (0053–0057, 0085–0088) and were annotated by hand. `_normalize` strips `[...]` only —
+`_BRACKET_RE` is `\[[^\]]*\]` — so a `(dutch)` marker survives as the literal token `dutch`,
+a word no arm can produce, costing one guaranteed edit per marked clip in *every* arm. The
+markers were converted to `[dutch]`. Use square brackets for any hand annotation.
+
+The conclusion survives all three treatments, which is the point of recording them:
+
+| treatment | shipped | `v1_names` | Δ | 95% CI |
+|---|---|---|---|---|
+| `(dutch)` counted as a word (the bug) | 25.1% | 36.4% | +11.3% | [+7.8%, +15.2%] |
+| `[dutch]` stripped, clips still scored | 24.8% | 36.1% | +11.2% | [+7.7%, +15.1%] |
+| Dutch clips excluded entirely | 22.2% | 33.9% | +11.6% | [+7.7%, +15.9%] |
+
+The delta is stable at ~11 points throughout; only the absolute WERs move. Note that the eight
+Dutch clips (8% of the corpus) carry **2.6 points of absolute WER** in both arms — expected,
+since the language is pinned to `en` (see "Why the language stays pinned to English"). The
+Dutch-inclusive figure is the production-realistic one, since Dutch transmissions genuinely
+occur on this channel; the excluded figure is the English-only decoder performance.
+
+### The AIS feed fails by going quiet (2026-08-07)
+
+The feed delivered nothing for a whole session while reporting itself healthy. `[AIS]
+connected` printed at 08:59:54, the TCP connection to aisstream stayed established for the
+next 31 minutes, and in that time the cache did not change by one byte: 8,642 vessels,
+identical md5, **0% carrying `last_seen`**. No error, no close, no exception — so the
+reconnect handler in `_ais_loop` never fired, because from its point of view nothing had gone
+wrong. Every lookup meanwhile matched happily against a cache loaded from disk.
+
+**The cause is external, and was pinned down by elimination rather than assumed.** With the
+proxy stopped, so exactly one connection held the key:
+
+| test | frames in 30s |
+|---|---|
+| original key, sole connection | 0 |
+| freshly issued key | 0 |
+| Rotterdam bbox, no message-type filter | 0 |
+| **whole-world bbox, no filters** | **0** |
+
+A world bounding box returning nothing eliminates the subscription shape, the bounding box,
+the filter, the key, and concurrency throttling. The subscription matches the documented
+format field for field. This is [aisstream/aisstream#15](https://github.com/aisstream/aisstream/issues/15),
+open with no resolution. Nothing in this repo can fix it.
+
+**What is fixed here is the silence.** Two blind spots let a dead feed pass for a live one:
+
+- `_process_ais` returned without logging on any frame lacking an MMSI — which is exactly
+  the shape of aisstream's `{"error": "..."}` frames. The most diagnostic thing the server
+  can say was being discarded. Now logged, rate-limited to
+  `_UNKNOWN_FRAME_LOG_LIMIT` so a persistent fault cannot flood the console.
+- Nothing watched the clock. `_watch_silence` now runs alongside the read loop and reports a
+  connected feed that has gone quiet for `AIS_SILENCE_WARN_SEC` (default 60, 0 disables).
+  It distinguishes *went quiet mid-stream* from *never sent anything*, because those point at
+  different causes. It watches from a separate task rather than wrapping `recv()` in a
+  timeout: cancelling a `recv()` mid-frame is a way to lose messages, and all that is needed
+  is a periodic look at when the last frame arrived.
+
+The decision logic is `_silence_report`, kept pure so it can be tested without a websocket or
+a clock.
+
+**Confirmed independently, and dated.** The community uptime monitor at
+`https://aisuptime.buttermilkgreen.fyi/api/v1/status` (unofficial — aisstream publishes no
+status page of its own) reported, at the time of writing:
+
+```json
+{"state": "Silent Failure", "websocketConnected": true,
+ "lastMessageReceived": "2026-08-05T13:31:30.210Z"}
+```
+
+`websocketConnected: true` alongside `Silent Failure` is precisely the shape diagnosed here,
+observed by a third party against their own keys. All 48 samples in its rolling 24-hour
+window are `Service Outage`, with no healthy sample. Other users report the same on the
+issue tracker, one of them having already run the same elimination —
+"[Zero messages on global bounding box since 2026-08-05 13:31 UTC — valid key, new key, and
+second IP all affected](https://github.com/aisstream/issues/issues/257)".
+
+So the outage began **2026-08-05 13:31 UTC** and has run continuously since. Our cache last
+gained content at 2026-08-04 23:59 only because that is when the proxy last ran; it was never
+up during the healthy window on 08-05.
+
+Beware of `aistreams.statuspage.io` (plural), which shows all-green: its components are
+"Proxy's and Api / Management Portal / Streams" and it belongs to a different service. It is
+not evidence about aisstream.io.
 
 ### Longer probes, shipped and measured (2026-08-06)
 
