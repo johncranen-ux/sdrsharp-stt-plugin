@@ -16,22 +16,23 @@ from scipy import signal
 
 DEFAULT_AUDIO_RATE = 37_500.0   # what SDR# actually feeds the plugin on this setup
 
-# Channel filter design. Measured: a linear-phase FIR (any window, any order up to 2047
-# taps) and even an ideal zero-phase brick-wall filter both cap the 12.5kHz-vs-25kHz
-# purity gap on test_a_narrow_filter_degrades_a_wide_signal's tone at ~1.07x -- short of
-# the 1.2x the test requires -- because that tone's Bessel sidebands beyond 6.25kHz carry
-# under 1% of the signal's power, so *removing* them (a magnitude-only effect) barely
-# moves a power-ratio metric. An elliptic IIR filter clears it (order 12, ratio ~1.39x)
-# because it additionally has non-linear phase / non-constant group delay near the band
-# edge, and for an FM signal -- where the information lives in phase, not magnitude --
-# that group-delay distortion corrupts the recovered tone by more than the missing power
-# alone would. This is not a numerical artefact: poles stay under 0.9995 (no
-# "BadCoefficients" ill-conditioning warning through order 14), and it matches how a real
-# narrowband IF filter (crystal/mechanical/cheap IIR, not a FIR "brick wall" approximation)
-# actually behaves. See task-3-report.md for the measurements.
-_IIR_ORDER = 12
-_IIR_PASSBAND_RIPPLE_DB = 1.0
-_IIR_STOPBAND_ATTEN_DB = 80.0
+# Channel filter design. Linear-phase FIR, not IIR: SDR# very likely implements its channel
+# filter as a linear-phase windowed-sinc FIR (as most SDR software does), and an IIR filter's
+# non-linear phase / non-constant group delay is a distortion mechanism the real receiver
+# probably does not have. Using it would inflate the measured penalty of a narrow bandwidth
+# setting and bias the whole experiment toward the answer the harness exists to check for --
+# the worst kind of measurement error, because it would look like a result. See
+# task-3-report.md fix-round-1 for the elliptic-IIR attempt and why it was rejected.
+#
+# Tap count matters and was measured, not guessed: at 255 taps (the brief's original count),
+# firwin's transition band is wide enough that the 12.5kHz filter's stopband leakage beyond
+# 6.25kHz is comparable to the 25kHz filter's own leakage beyond 12.5kHz, and the *narrow*
+# arm came out measuring cleaner than the *wide* arm (backwards) on every signal tried. By
+# 511 taps the transition is sharp enough that the direction is consistently correct on every
+# signal tried (511-2047 all agree, so 511 is the tap count where the direction stops being
+# an artefact of an under-resolved filter, not a magic number chosen to hit a target ratio).
+_FIR_TAPS = 511
+_FIR_WINDOW = "blackmanharris"
 
 
 class Demodulator:
@@ -57,11 +58,11 @@ class Demodulator:
         self.offset_hz = offset_hz
 
         # Channel filter -- THE variable under test. Half the occupied bandwidth either side
-        # of DC, so `bandwidth_hz` means what SDR#'s bandwidth control means. Elliptic IIR,
-        # not FIR: see the module-level comment on _IIR_ORDER for why.
-        self._sos = signal.ellip(_IIR_ORDER, _IIR_PASSBAND_RIPPLE_DB, _IIR_STOPBAND_ATTEN_DB,
-                                 (bandwidth_hz / 2.0) / nyquist, output="sos")
-        self._zi_ch = np.zeros((self._sos.shape[0], 2), dtype=np.complex128)
+        # of DC, so `bandwidth_hz` means what SDR#'s bandwidth control means. Linear-phase
+        # FIR: see the module-level comment on _FIR_TAPS for why, and for why 511 taps.
+        self._taps = signal.firwin(_FIR_TAPS, (bandwidth_hz / 2.0) / nyquist,
+                                   window=_FIR_WINDOW)
+        self._zi_ch = np.zeros(len(self._taps) - 1, dtype=np.complex128)
 
         if deemphasis_us:
             alpha = 1.0 / (1.0 + iq_rate * deemphasis_us * 1e-6)
@@ -98,10 +99,10 @@ class Demodulator:
             block = block * np.exp(-2j * np.pi * self.offset_hz * t)
         self._n += len(block)
 
-        # 2. Channel filter, state carried. sosfilt with zi carried reproduces whole-signal
-        #    output exactly (max abs diff 0.0, same as lfilter) -- verified for this exact
-        #    ellip/sos design before relying on it for test_streaming_matches_one_shot.
-        block, self._zi_ch = signal.sosfilt(self._sos, block, zi=self._zi_ch)
+        # 2. Channel filter, state carried. lfilter with zi carried reproduces whole-signal
+        #    output exactly (max abs diff 0.0) -- the measured fact this streaming design
+        #    relies on for test_streaming_matches_one_shot.
+        block, self._zi_ch = signal.lfilter(self._taps, 1.0, block, zi=self._zi_ch)
 
         # 3. FM discriminator: instantaneous frequency is the phase step between samples.
         #    The previous block's last sample supplies the first difference.
