@@ -438,7 +438,15 @@ git commit -m "Read SDR# baseband recordings, and synthesise IQ to test against"
 **Files:**
 - Create: `server/iq/plugin_dsp.py`
 - Create: `server/tests/test_iq_plugin_dsp.py`
-- Create: `server/tests/golden/` (holds three copied clip pairs)
+
+**Golden fixtures are NOT committed** (decided 2026-08-09). They are real Ch 01 traffic, and
+this repository's policy is that received traffic never enters it — `.gitignore` excludes
+`captures/` as user data and CI fails on committed transcripts. Recorded audio is more
+exposing than a transcript, not less, and the repository is public. The test therefore reads
+the pairs from the live captures directory and **skips** when they are absent, so it pins the
+port during development — which is where it caught the 0.946 bug — and is simply skipped in
+CI. Path comes from `STT_CAPTURES_DIR`, defaulting to
+`D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07`.
 
 **Interfaces:**
 - Consumes: nothing.
@@ -454,20 +462,15 @@ With that fixed the port reaches correlation 1.000000 and RMS error 1.2e-5, belo
 3.05e-5 of int16 quantisation. **Do not substitute `scipy.signal.resample_poly` here** — it
 would be a better resampler and would therefore no longer be what production does.
 
-- [ ] **Step 1: Copy three golden clip pairs into the repo**
+- [ ] **Step 1: Confirm the golden pairs exist locally (do NOT copy them into the repo)**
 
 ```bash
-mkdir -p server/tests/golden
-for c in 0000 0003 0121; do
-  cp "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07/${c}_raw.wav"  server/tests/golden/
-  cp "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07/${c}_sent.wav" server/tests/golden/
-done
-ls server/tests/golden
+ls "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07/0000_raw.wav" \
+   "D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07/0000_sent.wav"
 ```
 
-Expected: six files. These are short VHF transmissions and are committed deliberately, as
-the only way to pin the port against production; `.gitignore` excludes bulk reference
-transcripts and captures, not these six fixtures.
+Expected: both listed. They stay where they are — see the note above on why they are never
+copied into the repository.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -486,6 +489,7 @@ the first attempt scored 0.946 correlation because LinearResample steps by
 (len-1)/(outLen-1), not by fromRate/toRate.
 """
 
+import os
 import sys
 import wave
 from pathlib import Path
@@ -498,7 +502,10 @@ sys.path.insert(0, str(_SERVER_DIR))
 
 from iq import plugin_dsp  # noqa: E402
 
-_GOLDEN = Path(__file__).resolve().parent / "golden"
+# Real Ch 01 traffic, so it is never copied into the repository -- see the task note.
+# Read from wherever the plugin wrote it; skip when it is not on this machine (CI).
+_GOLDEN = Path(os.environ.get(
+    "STT_CAPTURES_DIR", r"D:/SDR/SdrSharp/Plugins/SttPlugin/captures/2026-08-07"))
 
 
 def _read(path):
@@ -509,9 +516,17 @@ def _read(path):
 
 @pytest.mark.parametrize("clip", ["0000", "0003", "0121"])
 def test_the_port_reproduces_production_output(clip):
-    """The whole point of this task. Anything below 0.9999 means a stage has diverged."""
-    raw, raw_rate = _read(_GOLDEN / f"{clip}_raw.wav")
-    sent, sent_rate = _read(_GOLDEN / f"{clip}_sent.wav")
+    """The whole point of this task. Anything below 0.9999 means a stage has diverged.
+
+    Skipped where the captures are not present. That is a real loss of coverage in CI and
+    is accepted deliberately: the alternative is publishing recorded vessel traffic.
+    """
+    raw_path, sent_path = _GOLDEN / f"{clip}_raw.wav", _GOLDEN / f"{clip}_sent.wav"
+    if not (raw_path.exists() and sent_path.exists()):
+        pytest.skip(f"golden capture {clip} not present under {_GOLDEN}")
+
+    raw, raw_rate = _read(raw_path)
+    sent, sent_rate = _read(sent_path)
 
     got = plugin_dsp.process_chunk(raw, raw_rate, sent_rate)
 
@@ -736,12 +751,13 @@ def process_chunk(samples: np.ndarray, from_rate: float,
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `py -m pytest server/tests/test_iq_plugin_dsp.py -v`
-Expected: 9 passed, including all three golden clips at correlation >= 0.9999
+Expected: 9 passed on this machine (3 golden + 6 unit). The three golden tests
+SKIP where the captures are absent; that is expected in CI and must not be 'fixed'.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add server/iq/plugin_dsp.py server/tests/test_iq_plugin_dsp.py server/tests/golden
+git add server/iq/plugin_dsp.py server/tests/test_iq_plugin_dsp.py
 git commit -m "Port the plugin's DSP chain, pinned against real production clips"
 ```
 
