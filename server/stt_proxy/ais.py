@@ -16,6 +16,7 @@ import asyncio
 import datetime
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -116,13 +117,57 @@ def _ais_thread(api_key: str) -> None:
     asyncio.run(_ais_loop(api_key))
 
 
-async def _ais_loop(api_key: str) -> None:
-    try:
-        import websockets
-    except ImportError:
-        print("[AIS] 'websockets' not installed — run: pip install websockets", flush=True)
-        return
+# Reconnect backoff. The retry used to be a flat 30s, which was fine for the failure it was
+# written for -- a one-off dropped connection -- and actively harmful for the one seen on
+# 2026-08-08: aisstream accepted every connection, stopped answering keepalive pings, and the
+# client closed with `1011 keepalive ping timeout` roughly 40s in (ping_interval 20 +
+# ping_timeout 20, the websockets defaults, which are left alone deliberately -- detecting a
+# dead peer is exactly what they are for). A fixed retry against that turns one dead upstream
+# into a permanent reconnect every ~70s, and after two cycles aisstream started answering
+# HTTP 429. We were part of the problem.
+#
+# The trap in the obvious fix: the connection SUCCEEDS every time. Backoff reset on
+# "connected" would fire on every cycle and never engage at all. It resets only when a
+# connection actually delivered a frame -- the one thing that distinguishes a working feed
+# from a socket that opens and dies.
+_RECONNECT_BASE_SEC   = 5      # a genuine blip deserves a fast retry
+_RECONNECT_CAP_SEC    = 300    # backing off must not become never coming back
+_RATE_LIMIT_FLOOR_SEC = 60     # 429 is the server naming us specifically; honour it
+_RECONNECT_JITTER     = 0.25   # upward only, so it can never undercut the floor above
 
+
+def _reconnect_delay(attempt: int, *, rate_limited: bool = False,
+                     jitter: float | None = None) -> float:
+    """Seconds to wait before retry number `attempt` (0-based).
+
+    Pure, with the random draw injectable, so the policy can be tested without a clock.
+    Jitter only ever adds: its job is to de-synchronise retries, and a downward jitter
+    applied after the 429 floor would quietly reconnect faster than the server just asked.
+    """
+    delay = min(_RECONNECT_BASE_SEC * (2 ** attempt), _RECONNECT_CAP_SEC)
+    if rate_limited:
+        delay = max(delay, _RATE_LIMIT_FLOOR_SEC)
+    if jitter is None:
+        jitter = random.random()
+    return delay * (1 + _RECONNECT_JITTER * jitter)
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    """Whether a connect failure was the server refusing us for going too fast.
+
+    websockets 16 raises `InvalidStatus` carrying the HTTP response; the status code is read
+    off it rather than parsed out of str(exc), because the message text is not an API.
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 429
+
+
+async def _sleep(seconds: float) -> None:
+    """Indirection so tests can drive the retry loop without waiting on a real clock."""
+    await asyncio.sleep(seconds)
+
+
+async def _ais_loop(api_key: str) -> None:
     sub_msg = json.dumps({
         "APIKey": api_key,
         "BoundingBoxes": ROTTERDAM_BBOX,
@@ -133,7 +178,15 @@ async def _ais_loop(api_key: str) -> None:
     import certifi
     ssl_ctx = _ssl.create_default_context(cafile=certifi.where())
 
+    consecutive_failures = 0
     while True:
+        delivered = 0
+        started = time.monotonic()
+        rate_limited = False
+        # A graceful close ends the `async for` without raising anything, so the reason has
+        # to default to something sayable. The delay applies on that path too: pacing lived
+        # inside `except` before, which meant a politely-closing server got a hot loop.
+        reason = "closed by the server"
         try:
             async with websockets.connect("wss://stream.aisstream.io/v0/stream", ssl=ssl_ctx) as ws:
                 await ws.send(sub_msg)
@@ -146,13 +199,23 @@ async def _ais_loop(api_key: str) -> None:
                 try:
                     async for raw in ws:
                         _process_ais(json.loads(raw))
+                        delivered += 1
                 finally:
                     if watchdog is not None:
                         watchdog.cancel()
         except Exception as exc:
-            print(f"[AIS] disconnected ({exc}), reconnecting in 30s...", flush=True)
-            import asyncio as _a
-            await _a.sleep(30)
+            reason = str(exc) or exc.__class__.__name__
+            rate_limited = _is_rate_limited(exc)
+
+        # A connection that delivered nothing did not work, however cleanly it opened -- and
+        # under the 2026-08-08 fault every one of them opens cleanly, so this is the only
+        # signal that separates a working feed from a socket that accepts and dies.
+        consecutive_failures = 0 if delivered else consecutive_failures + 1
+        delay = _reconnect_delay(max(consecutive_failures - 1, 0), rate_limited=rate_limited)
+        print(f"[AIS] disconnected after {time.monotonic() - started:.0f}s "
+              f"having received {delivered} message(s) ({reason}), "
+              f"reconnecting in {delay:.0f}s...", flush=True)
+        await _sleep(delay)
 
 
 # aisstream.io names every field in PascalCase, and three were read here in upper case:

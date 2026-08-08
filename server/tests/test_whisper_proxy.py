@@ -4,6 +4,7 @@ multipart parse/rebuild that lets the proxy own the whisper.cpp decoder paramete
 Run with: py -m pytest server/tests -v
 """
 
+import asyncio
 import datetime
 import importlib.util
 import json
@@ -419,6 +420,178 @@ def test_silence_report_warns_when_no_frame_ever_arrived():
 def test_silence_report_can_be_disabled():
     assert ais._silence_report(last_message_at=None, connected_at=0.0,
                                now=1e9, threshold=0) is None
+
+
+# ---------------------------------------------------------------------------
+# Reconnect backoff
+#
+# On 2026-08-08 the 08-07 outage changed shape: aisstream stopped answering the client's
+# keepalive pings, so the connection now dies ~40s in (ping_interval 20 + ping_timeout 20)
+# with `1011 keepalive ping timeout` instead of sitting there silently. The retry was a flat
+# `sleep(30)`, so we reconnected at a fixed rate forever -- and after two cycles aisstream
+# answered `HTTP 429`. A dead upstream had been turned into us hammering it.
+#
+# The subtlety that makes a naive fix useless: every connection SUCCEEDS. Backoff keyed on
+# connection failure would reset on each accept and never engage. It has to be keyed on the
+# connection proving useful, which means delivering a frame.
+
+
+def test_first_reconnect_is_prompt():
+    """A one-off blip deserves a fast retry, not a punishment."""
+    assert ais._reconnect_delay(0, jitter=0.0) == pytest.approx(ais._RECONNECT_BASE_SEC)
+
+
+def test_reconnect_delay_grows_with_consecutive_failures():
+    delays = [ais._reconnect_delay(n, jitter=0.0) for n in range(6)]
+    assert delays == sorted(delays) and len(set(delays)) == len(delays), (
+        f"consecutive failures must back off, got {delays}")
+
+
+def test_reconnect_delay_is_capped():
+    """Backing off must not become never coming back."""
+    assert ais._reconnect_delay(99, jitter=1.0) <= ais._RECONNECT_CAP_SEC * 1.5
+
+
+def test_rate_limited_reconnect_waits_at_least_a_minute():
+    """HTTP 429 is the server saying *you specifically are too fast*; honour it."""
+    assert ais._reconnect_delay(0, rate_limited=True, jitter=0.0) >= 60
+
+
+def test_jitter_only_ever_adds_delay():
+    """Jitter de-syncs retries; it must never push us back under the intended floor."""
+    for n in (0, 3, 99):
+        for r in (0.0, 0.5, 1.0):
+            assert ais._reconnect_delay(n, jitter=r) >= ais._reconnect_delay(n, jitter=0.0)
+
+
+def test_jitter_actually_spreads_the_delay():
+    assert ais._reconnect_delay(3, jitter=0.0) != ais._reconnect_delay(3, jitter=1.0)
+
+
+def test_rate_limit_is_recognised_from_the_exception():
+    """websockets 16 raises InvalidStatus carrying the response; 429 is the one that matters."""
+    from websockets.exceptions import InvalidStatus
+
+    class _Resp:
+        def __init__(self, code): self.status_code = code
+
+    assert ais._is_rate_limited(InvalidStatus(_Resp(429))) is True
+    assert ais._is_rate_limited(InvalidStatus(_Resp(503))) is False
+    assert ais._is_rate_limited(RuntimeError("keepalive ping timeout")) is False
+
+
+# --- the loop itself, driven against a fake websocket -----------------------
+
+
+class _FakeAisSocket:
+    """A socket that yields `frames` and then ends -- abruptly, or gracefully."""
+
+    def __init__(self, frames, graceful=False):
+        self._frames = list(frames)
+        self._graceful = graceful
+        self.sent = []
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._frames:
+            return json.dumps(self._frames.pop(0))
+        if self._graceful:
+            raise StopAsyncIteration
+        raise ConnectionError("keepalive ping timeout")
+
+
+class _FakeAisConnect:
+    def __init__(self, frames_per_connection, graceful=False):
+        self._frames = list(frames_per_connection)
+        self._graceful = graceful
+        self.connections = []
+
+    def __call__(self, *args, **kwargs):
+        frames = self._frames.pop(0) if self._frames else []
+        self._conn = _FakeAisSocket(frames, graceful=self._graceful)
+        self.connections.append(self._conn)
+        return self
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def _run_loop(monkeypatch, frames_per_connection, stop_after, graceful=False):
+    """Drive `_ais_loop` against fakes; return the delays slept and the fake connector."""
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+        if len(delays) >= stop_after:
+            raise _StopLoop
+
+    connect = _FakeAisConnect(frames_per_connection, graceful=graceful)
+    monkeypatch.setattr(ais.websockets, "connect", connect)
+    monkeypatch.setattr(ais, "_sleep", fake_sleep)
+    monkeypatch.setattr(ais, "AIS_SILENCE_WARN_SEC", 0)
+
+    try:
+        asyncio.run(ais._ais_loop("test-key"))
+    except _StopLoop:
+        pass
+    return delays, connect
+
+
+def test_a_server_that_accepts_then_dies_makes_us_back_off(ais_caches, monkeypatch):
+    """The exact 2026-08-08 fault. Every connection succeeds, so a fixed rate is the bug."""
+    delays, _ = _run_loop(monkeypatch, frames_per_connection=[], stop_after=4)
+    assert delays == sorted(delays) and len(set(delays)) == len(delays), (
+        f"a repeatedly-dying feed must be retried more and more slowly, got {delays}")
+
+
+def test_a_productive_connection_resets_the_backoff(ais_caches, monkeypatch):
+    """Backoff must not accumulate across a feed that is actually working.
+
+    Connections 1 and 2 deliver nothing, so the delay grows; connection 3 delivers a frame,
+    so delays 3 and 4 must be back at the base. Compared against the base band rather than
+    each other, since jitter makes every draw different by design.
+    """
+    good = [_position("ANOUK")]
+    delays, _ = _run_loop(monkeypatch,
+                          frames_per_connection=[[], [], good, []],
+                          stop_after=4)
+    base_band = (ais._RECONNECT_BASE_SEC, ais._RECONNECT_BASE_SEC * (1 + ais._RECONNECT_JITTER))
+    assert delays[1] > base_band[1], f"a second dead connection must back off, got {delays}"
+    for i in (2, 3):
+        assert base_band[0] <= delays[i] <= base_band[1], (
+            f"delay {i} should be back at the base after data arrived, got {delays}")
+
+
+def test_a_gracefully_closing_server_is_still_paced(ais_caches, monkeypatch):
+    """A clean close ends the `async for` without raising, so it used to skip the wait entirely.
+
+    That is a hot reconnect loop against a server that is politely telling us to go away --
+    the fastest possible way to earn the HTTP 429 seen on 2026-08-08.
+    """
+    delays, _ = _run_loop(monkeypatch, frames_per_connection=[], stop_after=3, graceful=True)
+    assert len(delays) == 3 and all(d >= ais._RECONNECT_BASE_SEC for d in delays), (
+        f"a clean close must be paced like any other, got {delays}")
+
+
+def test_the_subscription_is_sent_on_every_reconnect(ais_caches, monkeypatch):
+    """A reconnect that forgot to subscribe would recreate the 08-07 silent feed from our side."""
+    _, connect = _run_loop(monkeypatch, frames_per_connection=[], stop_after=3)
+    assert len(connect.connections) >= 3
+    for conn in connect.connections:
+        assert len(conn.sent) == 1, "each connection must send exactly one subscription"
+        assert json.loads(conn.sent[0])["APIKey"] == "test-key"
 
 
 # ---------------------------------------------------------------------------
