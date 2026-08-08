@@ -196,3 +196,44 @@ def test_the_mixer_phase_is_continuous_across_blocks():
     out = np.concatenate([d.process(b) for b in np.array_split(iq, 8)] + [d.flush()])
     settled = out[len(out) // 4: -len(out) // 4]
     assert np.max(np.abs(settled)) < 0.05, "a perfectly tuned unmodulated carrier is silent"
+
+
+# Squelch
+#
+# The second variable under test. The suspicion from 2026-08-07: squelch clips the opening
+# of each transmission, and the vessel name is almost always in the first words -- exactly
+# what identification needs. Squelch-off is a supported configuration; the plugin's VAD
+# falls back to its adaptive RMS gate when ReadSquelchOpen() returns None.
+
+
+def test_squelch_off_is_a_no_op():
+    """The arm this is compared against, so it must not alter a single sample."""
+    audio = _tone(1000.0, 0.2, AUDIO_RATE)
+    assert np.array_equal(demod.apply_squelch(audio, AUDIO_RATE, None), audio)
+
+
+def test_squelch_mutes_audio_below_the_threshold():
+    quiet = _tone(1000.0, 0.2, AUDIO_RATE) * 0.001
+    gated = demod.apply_squelch(quiet, AUDIO_RATE, threshold_db=-40.0)
+    assert np.max(np.abs(gated)) < np.max(np.abs(quiet)) * 0.1
+
+
+def test_squelch_passes_audio_above_the_threshold():
+    loud = _tone(1000.0, 0.2, AUDIO_RATE) * 0.5
+    gated = demod.apply_squelch(loud, AUDIO_RATE, threshold_db=-40.0)
+    settled = gated[int(0.05 * AUDIO_RATE):]
+    assert np.std(settled) > 0.9 * np.std(loud[int(0.05 * AUDIO_RATE):])
+
+
+def test_squelch_clips_the_start_of_a_transmission():
+    """The exact damage being measured: a transmission that starts abruptly loses its
+    opening to the gate's attack, and that is where the vessel name is."""
+    silence = np.zeros(int(0.1 * AUDIO_RATE))
+    speech = _tone(1000.0, 0.3, AUDIO_RATE) * 0.5
+    audio = np.concatenate([silence, speech])
+
+    gated = demod.apply_squelch(audio, AUDIO_RATE, threshold_db=-40.0)
+    onset = len(silence)
+    first_20ms = slice(onset, onset + int(0.02 * AUDIO_RATE))
+    assert np.std(gated[first_20ms]) < np.std(audio[first_20ms]) * 0.9, (
+        "the opening should be attenuated relative to ungated audio")

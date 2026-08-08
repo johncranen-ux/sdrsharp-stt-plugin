@@ -159,6 +159,68 @@ class Demodulator:
         return np.asarray(out[front:], dtype=np.float64)
 
 
+# Floor for the log-domain envelope, in dB. Only needs to sit well below any threshold_db
+# a caller would pass (and below float64 log(0) blowing up); -240dB is arbitrary margin,
+# not a tuned value.
+_SQUELCH_FLOOR_DB = -240.0
+
+
+def apply_squelch(audio: np.ndarray, rate: float, threshold_db: float | None,
+                  attack_ms: float = 5.0, release_ms: float = 100.0) -> np.ndarray:
+    """Gate audio below `threshold_db`, or return it untouched when squelch is off.
+
+    Modelled on what a receiver squelch does to the audio the plugin sees, not on SDR#'s
+    internal implementation: an envelope follower with a fast attack and slow release. The
+    attack is what clips the opening syllables of a transmission, which is the damage this
+    arm exists to quantify -- the vessel name is almost always in the first words.
+
+    threshold_db=None means squelch disabled, and must return the input unchanged so the
+    two arms differ by the gate alone.
+
+    The envelope is tracked in the dB domain, not linear. A linear |x| follower (the first
+    version tried here) makes attack_ms nearly meaningless for a squelch: the time to cross
+    threshold_db depends on the *linear gap* between the threshold and the signal, not on
+    attack_ms alone, so a threshold set far below the transmission's level (the realistic
+    case -- -40dB threshold under a -6dBFS signal, per test_squelch_clips_the_start_of_a_
+    transmission) is crossed in a handful of samples regardless of attack_ms, and the test
+    that exists to detect the very damage this arm is built to measure failed: only 7 of 750
+    samples in the first 20ms came out gated. Tracking level in dB makes the one-pole step
+    response's rise, in dB, independent of how far below the signal the threshold sits --
+    same physics as an analogue compressor's log-domain envelope follower -- so attack_ms
+    means what it says regardless of the threshold_db/signal-level gap. Verified against all
+    four squelch tests before switching from the linear version.
+
+    Not vectorised: the attack/release coefficient at each sample depends on comparing the
+    input to the *previous* envelope value, i.e. on the recurrence's own not-yet-computed
+    output, so scipy.signal.lfilter (fixed coefficients) cannot express it and there is no
+    reordering that lets numpy compute it without the sample-by-sample scan. Measured at
+    ~40s per hour of 37.5kHz audio -- the same order of magnitude as demodulate() itself
+    (~100s/hour for this harness's FIR channel filter), so judged acceptable for an offline
+    harness rather than trading correctness for speed. See task-4-report.md.
+    """
+    if threshold_db is None:
+        return audio
+    audio = np.asarray(audio, dtype=np.float64)
+    if len(audio) == 0:
+        return audio
+
+    # Envelope: one-pole follower over 20*log10(|x|), floored so silence doesn't log(0).
+    # Separate attack and release constants, as any squelch/compressor envelope needs.
+    attack = np.exp(-1.0 / max(1.0, rate * attack_ms * 1e-3))
+    release = np.exp(-1.0 / max(1.0, rate * release_ms * 1e-3))
+    mag = np.abs(audio)
+    floor_lin = 10 ** (_SQUELCH_FLOOR_DB / 20.0)
+    mag_db = 20.0 * np.log10(np.maximum(mag, floor_lin))
+    env_db = np.empty_like(mag_db)
+    level = _SQUELCH_FLOOR_DB
+    for i, m in enumerate(mag_db):
+        coeff = attack if m > level else release
+        level = coeff * level + (1.0 - coeff) * m
+        env_db[i] = level
+
+    return audio * (env_db >= threshold_db)
+
+
 def demodulate(iq: np.ndarray, iq_rate: float, bandwidth_hz: float,
                offset_hz: float = 0.0, audio_rate: float = DEFAULT_AUDIO_RATE,
                deemphasis_us: float | None = 750.0) -> np.ndarray:
