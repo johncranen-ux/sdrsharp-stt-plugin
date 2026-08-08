@@ -205,7 +205,6 @@ from stt_proxy.corrections import (  # noqa: E402
     _is_hallucination,
     _is_prompt_echo,
     PHONETIC_PROBE_MIN_LEN,
-    _callsign_tail_candidates,
     _partial_callsign_pattern,
     _phonetic_callsign_probes,
     _prompt_echo_tokens,

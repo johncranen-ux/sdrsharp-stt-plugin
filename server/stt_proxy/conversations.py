@@ -25,8 +25,7 @@ from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
                            match_by_callsign, match_by_callsign_pattern,
                            match_by_callsign_suffix, match_by_mmsi)
 from stt_proxy.claude import _get_claude
-from stt_proxy.corrections import (_callsign_supported_by_text, _callsign_tail_candidates,
-                                   _partial_callsign_pattern, _phonetic_callsign_probes,
+from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
                                    _spelled_out_runs)
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
 from stt_proxy.markup import VESSELFINDER_URL, _html_escape, _vessel_link  # noqa: F401
@@ -352,8 +351,7 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
         decoded = _partial_callsign_pattern(text)
         if decoded:
             probes.append(("pattern", decoded[0]))
-        for run in _phonetic_callsign_probes(text):
-            probes += [("suffix", tail) for tail in _callsign_tail_candidates(run)]
+        probes += [("suffix", run) for run in _phonetic_callsign_probes(text)]
 
         for kind, probe in probes:
             entry = (match_by_callsign_pattern(probe) if kind == "pattern"

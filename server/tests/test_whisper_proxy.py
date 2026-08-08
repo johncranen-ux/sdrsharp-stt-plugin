@@ -1246,14 +1246,15 @@ def test_phonetic_runs_need_no_callsign_keyword():
     assert proxy._phonetic_callsign_probes("all time two, Papa Bravo 8") == ["2PB8"]
 
 
-def test_callsign_tails_are_peeled_from_the_left_longest_first():
-    """2FPB8 arrived as the run 2PB8, which is a tail of nothing; PB8 is a tail of one."""
-    assert proxy._callsign_tail_candidates("2PB8") == ["2PB8", "PB8"]
+def test_the_run_boundary_is_what_isolates_the_callsign():
+    """Why no tail-peeling is needed: the words that broke the callsign also end the run.
 
-
-def test_callsign_tails_never_go_below_the_probe_floor():
-    assert all(len(t) >= proxy.PHONETIC_PROBE_MIN_LEN
-               for t in proxy._callsign_tail_candidates("ABCDE"))
+    "backstreet" sits between the "two" and the "Papa", so the run is PB8 -- already a tail
+    of exactly one cached callsign. Peeling was implemented, measured over 218 conversations,
+    found to add one false positive and zero true positives, and removed.
+    """
+    assert proxy._phonetic_callsign_probes(
+        "Berkey Fountain, call time two, backstreet Papa Bravo 8, calling you over.") == ["PB8"]
 
 
 def test_phonetic_runs_ignore_ordinary_speech():

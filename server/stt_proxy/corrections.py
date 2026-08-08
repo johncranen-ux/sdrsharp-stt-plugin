@@ -355,19 +355,16 @@ def _phonetic_callsign_probes(text: str) -> list[str]:
     return probes
 
 
-def _callsign_tail_candidates(run: str) -> list[str]:
-    """Tails of a phonetic run to try against the cache, longest first.
-
-    A spelled-out callsign loses its opening characters first: the start of a transmission
-    is where the squelch tail, the AGC and the operator's own hesitation all land. BERGE
-    TOWNSEND's 2FPB8 arrived as "two ... Papa Bravo 8" -- the leading 2 survived but the
-    Foxtrot did not, so the run is "2PB8", which is a tail of no callsign at all. Peeling
-    from the left gives "PB8", which is a tail of exactly one.
-
-    Longest first so the most specific probe that can match is the one that does.
-    """
-    run = (run or "").upper()
-    return [run[i:] for i in range(len(run) - PHONETIC_PROBE_MIN_LEN + 1)]
+# Peeling tails off the run -- trying "2PB8", then "PB8", then "B8..." -- was implemented
+# and REMOVED on 2026-08-08, because it was measured rather than assumed. Over 218 stored
+# conversations and 861 transmissions it produced exactly one extra claim, and that claim was
+# wrong: a badly over-merged window where Motortanker Neptune spells out "Charlie Alpha Bravo
+# Charlie Echo" (CABCE), peeled to BCE, matched PRINSES MAXIMA's PBCE, and got past the name
+# gate because "maximum draught" had been transcribed "Maxima drop".
+#
+# It bought nothing because the run boundary already does the work: the real decoder output
+# is "call time two, backstreet Papa Bravo 8", and "backstreet" breaks the run, so the run IS
+# "PB8". The whole run is matched as the tail, and that is all.
 
 
 def _callsign_supported_by_text(callsign: str, text: str) -> bool:
