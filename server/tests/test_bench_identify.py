@@ -9,6 +9,7 @@ conversation resolving as three different ships) are what this exists to have ca
 Run with: py -m pytest server/tests -v
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -252,6 +253,58 @@ def test_channel_must_match(tmp_path):
     labels = bi.parse_labels(_write(tmp_path, _THULELAND_TRUTH))
     stored = [_exchange("THULELAND", "266248000", ["13:58:14"], channel="161,650")]
     assert bi.score(labels, stored)["scored_turns"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-transmission rows
+#
+# The aggregates alone cannot answer "which transmissions changed, and how", which is the
+# only question worth asking when comparing two arms. On 2026-08-08 an A/B showed correct
+# declines falling 41 -> 30 while `wrong` rose only 3, and there was no way to find the
+# transmissions concerned: a turn's bucket family is fixed by its label, so the arithmetic
+# only works if segmentation moved turns between label windows. Aggregates hid that.
+
+
+def test_every_scored_turn_is_reported_individually(tmp_path):
+    labels = bi.parse_labels(_write(tmp_path, _THULELAND_TRUTH))
+    stored = [_exchange("THULELAND", "266248000", ["13:58:14", "13:58:25"])]
+    r = bi.score(labels, stored)
+    assert len(r["turns"]) == r["scored_turns"] == 2
+    assert {t["outcome"] for t in r["turns"]} == {"correct"}
+
+
+def test_a_turn_row_carries_what_a_diff_needs(tmp_path):
+    labels = bi.parse_labels(_write(tmp_path, _THULELAND_TRUTH))
+    stored = [_exchange("GOOILAND", "244700270", ["13:58:14"])]
+    row = bi.score(labels, stored)["turns"][0]
+    assert row["time"] == "2026-08-04 13:58:14"      # the join key between two arms
+    assert row["label"] == "266248000"
+    assert row["predicted"] == "244700270"
+    assert row["outcome"] == "wrong"
+
+
+def test_every_outcome_appears_in_the_rows(tmp_path):
+    """correct / wrong / missed / correct_null must each be nameable, or a diff cannot
+    say which way a transmission moved."""
+    labels = bi.parse_labels(_write(
+        tmp_path,
+        "2026-08-04 13:58:14\t2026-08-04 13:58:30\t266248000\tTHULELAND\n"
+        "2026-08-04 12:00:00\t2026-08-04 12:00:30\t-\tnobody\n"))
+    stored = [
+        _exchange("THULELAND", "266248000", ["13:58:14"]),   # correct
+        _exchange("GOOILAND", "244700270", ["13:58:20"]),    # wrong
+        _exchange(None, None, ["13:58:30"]),                 # missed
+        _exchange(None, None, ["12:00:00"]),                 # correct_null
+    ]
+    rows = bi.score(labels, stored)["turns"]
+    assert {r["outcome"] for r in rows} == {"correct", "wrong", "missed", "correct_null"}
+
+
+def test_turn_rows_survive_the_json_round_trip(tmp_path):
+    """They are written with --out-json and read back by whatever compares two arms."""
+    labels = bi.parse_labels(_write(tmp_path, _THULELAND_TRUTH))
+    stored = [_exchange("THULELAND", "266248000", ["13:58:14"])]
+    assert json.loads(json.dumps(bi.score(labels, stored)))["turns"][0]["outcome"] == "correct"
 
 
 # ---------------------------------------------------------------------------

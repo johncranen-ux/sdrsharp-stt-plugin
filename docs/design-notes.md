@@ -1285,6 +1285,44 @@ traffic on those channels.
   hang becomes a ~15-20s automatic recovery (surfaced to the plugin as one connection-reset
   error) instead of a 60s hang or a full Windows GPU-driver-timeout popup.
 
+## What the phonetic callsign anchor is actually worth (2026-08-08)
+
+Measured properly after two earlier attempts got it wrong, and the record of those attempts
+matters more than the result.
+
+**The instrument had to be characterised first.** `resolve_conversation` was sampling at the
+API default of 1.0 while `identify.py` had pinned `temperature=0` all along, so the first
+A/B run compared 85.1% precision against 78.5% and neither figure meant anything. Pinning the
+resolver to 0 was necessary but is *not* sufficient on its own: repeat runs are now identical
+on 143 of 143 transmissions in both arms, yet one conversation (10:48:19-10:48:30, three
+turns) still flips between naming NOORDSTROOM and naming nobody across runs. That single
+conversation is worth ~2.8 precision points, which is larger than most changes worth
+measuring. **Always repeat a run before believing a difference of a few points.**
+
+**The result, three runs per arm, `AIS_PHONETIC_CALLSIGN` the only variable:**
+
+| arm | precision | recall | correct | wrong | missed | declined |
+|-----|-----------|--------|---------|-------|--------|----------|
+| off | 82.0%     | 71.6%  | 73      | 16    | 13     | 41       |
+| on  | 87.6%     | 76.5%  | 78      | 11    | 13     | 41       |
+
+Per transmission, **exactly 5 of 143 changed, all of them `wrong` -> `correct`, and all five
+are the same conversation** -- the BERGE TOWNSEND call of 10:17:50, every turn of which had
+been resolving as VISION. Nothing regressed. Correct declines are 41 in all six runs.
+
+**Two claims made earlier the same day were wrong, from single-run measurements:**
+
+- *"Correct declines fell 41 -> 30, so a longer candidate list makes the adjudicator readier
+  to name a ship."* No such effect exists. 30 came from one anomalous run and never recurred.
+- *"Aggregate precision/recall is a wash-to-slightly-down."* It is +5.6 and +4.9 points.
+
+Both survived because `--out-json` wrote aggregates only. It now emits a row per scored
+transmission (time, conversation, label, prediction, outcome), which is what turned a
+plausible story about adjudicator behaviour into "five turns of one conversation, all fixed".
+Aggregates cannot tell you *which* transmissions moved, and the arithmetic that made the
+decline story sound mechanical -- declines down 11 while `wrong` rose only 3 -- was impossible
+to begin with, since a turn's bucket family is fixed by its label.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`

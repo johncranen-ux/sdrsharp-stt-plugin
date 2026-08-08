@@ -271,11 +271,20 @@ def _turn_times(exchange: dict) -> list[datetime.datetime]:
 
 
 def score(labels: list[Label], exchanges: list[dict]) -> dict:
-    """Per-transmission identification accuracy, plus how badly conversations were split."""
+    """Per-transmission identification accuracy, plus how badly conversations were split.
+
+    Also returns a `turns` row per scored transmission. The aggregates alone cannot answer
+    "which transmissions changed, and how", which is the only useful question when comparing
+    two arms -- and they can actively mislead: on 2026-08-08 an A/B showed correct declines
+    falling 41 to 30 while `wrong` rose only 3, arithmetic that is impossible while a turn
+    stays under one label, and which turned out to mean segmentation had moved turns between
+    label windows. Rows are keyed by timestamp so two runs can be joined directly.
+    """
     correct = wrong = missed = correct_null = 0
     fragments = 0
     labels_with_no_turns = 0
     exchange_counts: list[int] = []
+    turns: list[dict] = []
 
     for label in labels:
         covering: dict[int, dict] = {}
@@ -291,16 +300,30 @@ def score(labels: list[Label], exchanges: list[dict]) -> dict:
                     if label.identifiable:
                         if predicted is None:
                             missed += 1
+                            outcome = "missed"
                         elif str(predicted) == label.mmsi:
                             correct += 1
+                            outcome = "correct"
                         else:
                             wrong += 1
+                            outcome = "wrong"
                     else:
                         # Nobody was identifiable, so naming anyone at all is an error.
                         if predicted is None:
                             correct_null += 1
+                            outcome = "correct_null"
                         else:
                             wrong += 1
+                            outcome = "wrong"
+                    turns.append({
+                        "time": when.strftime(_TS_FMT),
+                        "conversation": label.start.strftime(_TS_FMT),
+                        "label": label.mmsi,
+                        "identifiable": label.identifiable,
+                        "predicted": str(predicted) if predicted is not None else None,
+                        "predicted_name": ex.get("vessel"),
+                        "outcome": outcome,
+                    })
 
         if turns_here == 0:
             labels_with_no_turns += 1
@@ -324,6 +347,7 @@ def score(labels: list[Label], exchanges: list[dict]) -> dict:
         "exchanges_per_conversation": (
             sum(exchange_counts) / len(exchange_counts)) if exchange_counts else None,
         "labels_with_no_turns": labels_with_no_turns,
+        "turns": turns,
     }
 
 
