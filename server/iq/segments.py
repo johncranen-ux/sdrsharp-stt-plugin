@@ -53,7 +53,11 @@ def detect_segments(audio: np.ndarray, rate: float, threshold: float = 0.02,
                 start = None
                 silent = 0
     if start is not None:
-        out.append((start, len(active)))
+        # The recording can end mid-hangover: fewer than hang_frames of trailing silence.
+        # A terminated segment already excludes its hangover (end = i - silent + 1 above);
+        # do the same here, or the last clip of every recording carries a slab of dead air
+        # that then gets pad_ms added on top of it.
+        out.append((start, len(active) - silent))
 
     pad = pad_ms / 1000.0
     limit = len(audio) / rate
@@ -85,12 +89,18 @@ def read_segments(path: str | Path) -> list[tuple[float, float]]:
 def cut(audio: np.ndarray, rate: float,
         segments: list[tuple[float, float]]) -> list[np.ndarray]:
     """Slice `audio` at the given boundaries. Out-of-range ends are clipped, not an error:
-    arms can differ in length by a sample or two after resampling."""
+    arms can differ in length by a sample or two after resampling.
+
+    Every segment yields exactly one entry, in order -- including an empty array when the
+    segment starts past a shorter arm's end. clip_id downstream (bench_prompt_ab.py) is
+    assigned by enumeration order, so dropping an entry here would shift every later index
+    in that arm and silently pair unrelated transmissions across arms under the same id.
+    """
     audio = np.asarray(audio, dtype=np.float64)
+    n = len(audio)
     out = []
     for start_s, end_s in segments:
-        a = max(0, int(start_s * rate))
-        b = min(len(audio), int(end_s * rate))
-        if b > a:
-            out.append(audio[a:b])
+        a = min(n, max(0, int(start_s * rate)))
+        b = min(n, max(a, int(end_s * rate)))
+        out.append(audio[a:b])
     return out
