@@ -13,6 +13,18 @@
 - **The production audio rate is 37,500 Hz, not 48,000.** `_raw.wav` files in `D:\SDR\SdrSharp\Plugins\SttPlugin\captures\` are 37500 Hz mono 16-bit; `_sent.wav` are 16000 Hz mono 16-bit. Never hard-code 48000; read the rate from the file or take it as a parameter. The spec says "48 kHz" in places — the spec is wrong on this point and this plan supersedes it.
 - **37500 → 16000 is a non-integer ratio (2.34375)**, so `Decimator.Resample` takes the convolve-then-linear-interpolate path, *not* the polyphase path. Port both, but the non-integer path is the one production uses here.
 - **Clip output format is exactly:** mono, 16000 Hz, 16-bit signed PCM, little-endian. Filenames `NNNN_sent.wav` with `NNNN` a zero-padded 4-digit index starting at `0000`.
+- **The capture is RF64, not plain WAV.** A 60-minute 250 kSPS recording is ~3.6 GB and
+  SDR#'s "WAV SDR# Compatible" format tops out at 2–4 GB, so the operator records
+  `WAV RF64` (File Format index 2). Python's `wave` module **cannot read RF64** — it has an
+  `RF64` magic instead of `RIFF`, a placeholder `0xFFFFFFFF` size, and a `ds64` chunk
+  carrying the real 64-bit sizes. The reader in Task 1 parses chunks itself and handles both.
+- **Never load a whole capture into memory.** 60 min @ 250 kSPS is 900M complex samples:
+  3.6 GB on disk, **14.4 GB as complex128**. All IQ processing is block-streamed. Verified:
+  `scipy.signal.lfilter` with a carried `zi` reproduces whole-signal output with a maximum
+  absolute difference of **exactly 0.0**, so streaming costs no accuracy at all.
+- **Demodulated audio goes to a temp wav, not a list.** At 37500 Hz int16 an hour is 270 MB
+  on disk; held as float64 in RAM it would be 1.1 GB and grows with capture length. Segment
+  and cut by reading that file.
 - **All new tests live in `server/tests/` and must pass under `py -m pytest server/tests`.** CI runs Python 3.10 and 3.12.
 - **No network calls in any test.** Synthetic IQ and the committed golden clips only.
 - Follow the repo's comment style: explain *why*, and cite the measurement or bug that motivated the code.
@@ -30,9 +42,12 @@
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `read_baseband(path: str | Path) -> tuple[np.ndarray, float, float | None]` returning `(complex128 samples, sample_rate_hz, centre_freq_hz_or_None)`.
+  - `BasebandInfo` dataclass: `rate: float`, `centre_hz: float | None`, `channels: int`, `bits: int`, `data_offset: int`, `data_bytes: int`, `frames: int`.
+  - `open_baseband(path: str | Path) -> BasebandInfo` — parses RIFF **and** RF64 headers without reading sample data.
+  - `iter_baseband(path: str | Path, block_frames: int = 1 << 20) -> Iterator[np.ndarray]` — yields `complex128` blocks. **The only safe way to read a real capture.**
+  - `read_baseband(path: str | Path) -> tuple[np.ndarray, float, float | None]` — whole-file convenience for tests and short captures. Raises on files over `MAX_EAGER_BYTES` (256 MB) so it can never be the thing that OOMs an hour-long recording.
   - `parse_centre_freq(filename: str) -> float | None`.
-  - `synth_nfm(audio: np.ndarray, audio_rate: float, iq_rate: float, deviation_hz: float = 3000.0, offset_hz: float = 0.0, noise_db: float | None = None) -> np.ndarray` returning complex128 IQ. Used by every later task's tests.
+  - `synth_nfm(audio, audio_rate, iq_rate, deviation_hz=3000.0, offset_hz=0.0, noise_db=None) -> np.ndarray` returning complex128 IQ. Used by every later task's tests.
 
 - [ ] **Step 1: Add scipy to requirements**
 
@@ -85,6 +100,30 @@ def _write_iq_wav(path, iq, rate):
         w.writeframes(pcm.tobytes())
 
 
+def _to_rf64(path):
+    """Rewrite a plain RIFF wav as RF64 in place: 'RF64' magic, 0xFFFFFFFF placeholder
+    sizes, and a ds64 chunk carrying the real 64-bit values. This is what SDR#'s
+    'WAV RF64' file format produces, and it is what an hour-long capture must be, because
+    'WAV SDR# Compatible' tops out at 2-4 GB and 60 min @ 250 kSPS is ~3.6 GB."""
+    raw = bytearray(path.read_bytes())
+    riff_size = int.from_bytes(raw[4:8], "little")
+    data_at = raw.find(b"data")
+    data_size = int.from_bytes(raw[data_at + 4:data_at + 8], "little")
+
+    ds64 = (b"ds64" + (28).to_bytes(4, "little")
+            + riff_size.to_bytes(8, "little")
+            + data_size.to_bytes(8, "little")
+            + (data_size // 4).to_bytes(8, "little")
+            + (0).to_bytes(4, "little"))
+
+    raw[0:4] = b"RF64"
+    raw[4:8] = (0xFFFFFFFF).to_bytes(4, "little")
+    raw[data_at + 4:data_at + 8] = (0xFFFFFFFF).to_bytes(4, "little")
+    out = raw[:12] + ds64 + raw[12:]
+    out[4:8] = (0xFFFFFFFF).to_bytes(4, "little")
+    path.write_bytes(bytes(out))
+
+
 def test_a_baseband_wav_round_trips(tmp_path):
     rate = 250_000.0
     iq = np.exp(2j * np.pi * 10_000.0 * np.arange(2000) / rate) * 0.5
@@ -96,6 +135,53 @@ def test_a_baseband_wav_round_trips(tmp_path):
     assert got.dtype == np.complex128
     assert len(got) == 2000
     assert np.max(np.abs(got - iq)) < 1e-3, "16-bit quantisation only"
+
+
+def test_an_rf64_capture_reads_identically(tmp_path):
+    """The real capture format. Python's wave module cannot read RF64 at all, so this is
+    the difference between a working harness and one that fails on the only input that
+    matters."""
+    rate = 250_000.0
+    iq = np.exp(2j * np.pi * 10_000.0 * np.arange(2000) / rate) * 0.5
+
+    plain = tmp_path / "plain_160650000Hz.wav"
+    _write_iq_wav(plain, iq, rate)
+    expected, _, _ = baseband.read_baseband(plain)
+
+    big = tmp_path / "rf64_160650000Hz.wav"
+    _write_iq_wav(big, iq, rate)
+    _to_rf64(big)
+
+    info = baseband.open_baseband(big)
+    assert info.rate == rate and info.channels == 2 and info.frames == 2000
+    got, _, _ = baseband.read_baseband(big)
+    assert np.array_equal(got, expected)
+
+
+def test_streaming_blocks_reassemble_into_the_whole_file(tmp_path):
+    """An hour of IQ is 14.4 GB as complex128, so streaming is the only viable path and
+    it must be exact, not merely close."""
+    rate = 250_000.0
+    iq = np.exp(2j * np.pi * 3_000.0 * np.arange(5000) / rate) * 0.4
+    p = tmp_path / "cap_160650000Hz.wav"
+    _write_iq_wav(p, iq, rate)
+
+    blocks = list(baseband.iter_baseband(p, block_frames=512))
+    assert len(blocks) > 1, "the test is pointless with a single block"
+    whole, _, _ = baseband.read_baseband(p)
+    assert np.array_equal(np.concatenate(blocks), whole)
+
+
+def test_reading_a_huge_file_eagerly_is_refused(tmp_path):
+    """read_baseband must never be the thing that OOMs on a real capture."""
+    p = tmp_path / "cap_160650000Hz.wav"
+    _write_iq_wav(p, np.zeros(16, dtype=np.complex128), 250_000.0)
+    baseband.MAX_EAGER_BYTES, saved = 8, baseband.MAX_EAGER_BYTES
+    try:
+        with pytest.raises(ValueError, match="iter_baseband"):
+            baseband.read_baseband(p)
+    finally:
+        baseband.MAX_EAGER_BYTES = saved
 
 
 def test_the_centre_frequency_comes_from_the_filename():
@@ -149,23 +235,53 @@ Create `server/iq/baseband.py`:
 ```python
 """Reading SDR# baseband (raw IQ) recordings, and synthesising IQ for tests.
 
-SDR#'s BasebandRecorder writes interleaved I/Q as an ordinary wav: two channels, 16-bit
-signed for sampleFormat=1. The sample rate is in the wav header; the CENTRE FREQUENCY is
-not, and lives only in the filename, which is why parse_centre_freq exists and why it
-returns None rather than a default -- a guessed centre would mistune every arm by the same
-amount, producing a set of results that are self-consistent and uniformly wrong.
+SDR#'s BasebandRecorder writes interleaved I/Q. Two things about the real captures shape
+this module, and neither is optional:
+
+* **They are RF64, not plain wav.** 60 min at 250 kSPS is ~3.6 GB and SDR#'s
+  "WAV SDR# Compatible" format tops out at 2-4 GB, so the operator records "WAV RF64".
+  RF64 replaces the RIFF magic, writes 0xFFFFFFFF where the 32-bit sizes would overflow,
+  and puts the real 64-bit sizes in a `ds64` chunk. Python's `wave` module cannot read it,
+  hence the chunk walker below.
+* **They do not fit in memory.** 900M complex samples is 14.4 GB as complex128. Everything
+  real goes through iter_baseband; read_baseband refuses anything large so that it can
+  never quietly become the thing that exhausts RAM.
+
+The sample rate is in the header; the CENTRE FREQUENCY is not, and lives only in the
+filename. parse_centre_freq returns None rather than a default, because a guessed centre
+would mistune every arm by the same amount -- a set of results that is self-consistent and
+uniformly wrong.
 """
 
 from __future__ import annotations
 
 import re
-import wave
+import struct
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 
+# Refuse to eagerly read more than this; real captures are gigabytes.
+MAX_EAGER_BYTES = 256 * 1024 * 1024
+
 # SDR# names recordings like SDRSharp_20260808_120000Z_160650000Hz_IQ.wav
 _CENTRE_RE = re.compile(r"_(\d+)Hz", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class BasebandInfo:
+    rate: float
+    centre_hz: float | None
+    channels: int
+    bits: int
+    data_offset: int
+    data_bytes: int
+
+    @property
+    def frames(self) -> int:
+        return self.data_bytes // (self.channels * self.bits // 8)
 
 
 def parse_centre_freq(filename: str) -> float | None:
@@ -174,25 +290,98 @@ def parse_centre_freq(filename: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def read_baseband(path: str | Path) -> tuple[np.ndarray, float, float | None]:
-    """(complex samples, sample rate, centre frequency or None)."""
+def open_baseband(path: str | Path) -> BasebandInfo:
+    """Parse a RIFF or RF64 header without touching the sample data."""
     path = Path(path)
-    with wave.open(str(path), "rb") as w:
-        if w.getnchannels() != 2:
-            raise ValueError(f"{path.name}: expected 2 channels (I/Q), got {w.getnchannels()}")
-        width = w.getsampwidth()
-        rate = float(w.getframerate())
-        raw = w.readframes(w.getnframes())
+    with open(path, "rb") as fh:
+        magic = fh.read(4)
+        if magic not in (b"RIFF", b"RF64"):
+            raise ValueError(f"{path.name}: not a RIFF/RF64 file")
+        fh.read(4)                                  # riff size, 0xFFFFFFFF for RF64
+        if fh.read(4) != b"WAVE":
+            raise ValueError(f"{path.name}: not a WAVE file")
 
-    if width == 2:
+        rate = channels = bits = 0
+        data_offset = data_bytes = 0
+        ds64_data_bytes: int | None = None
+
+        while True:
+            header = fh.read(8)
+            if len(header) < 8:
+                break
+            chunk_id, size = struct.unpack("<4sI", header)
+            body_at = fh.tell()
+
+            if chunk_id == b"ds64":
+                # riffSize, dataSize, sampleCount -- the real 64-bit sizes.
+                _, ds64_data_bytes, _ = struct.unpack("<QQQ", fh.read(24))
+            elif chunk_id == b"fmt ":
+                fmt = fh.read(min(size, 16))
+                _, channels, rate_i, _, _, bits = struct.unpack("<HHIIHH", fmt)
+                rate = float(rate_i)
+            elif chunk_id == b"data":
+                data_offset = body_at
+                data_bytes = size
+                if size == 0xFFFFFFFF:
+                    if ds64_data_bytes is None:
+                        raise ValueError(f"{path.name}: RF64 data chunk with no ds64")
+                    data_bytes = ds64_data_bytes
+                break                                # data is last; stop before reading it
+
+            fh.seek(body_at + size + (size & 1))      # chunks are word-aligned
+
+    if channels != 2:
+        raise ValueError(f"{path.name}: expected 2 channels (I/Q), got {channels}")
+    if bits not in (8, 16, 32):
+        raise ValueError(f"{path.name}: unsupported sample width {bits} bits")
+
+    return BasebandInfo(rate, parse_centre_freq(path.name), channels, bits,
+                        data_offset, data_bytes)
+
+
+def _decode(raw: bytes, bits: int) -> np.ndarray:
+    """Interleaved I/Q bytes -> complex128, matching SDR#'s three Sample Format options."""
+    if bits == 16:
         flat = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
-    elif width == 1:
-        # 8-bit wav is unsigned, centred on 128.
+    elif bits == 8:
         flat = (np.frombuffer(raw, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
     else:
-        raise ValueError(f"{path.name}: unsupported sample width {width} bytes")
+        flat = np.frombuffer(raw, dtype="<f4").astype(np.float64)
+    return flat[0::2] + 1j * flat[1::2]
 
-    return flat[0::2] + 1j * flat[1::2], rate, parse_centre_freq(path.name)
+
+def iter_baseband(path: str | Path, block_frames: int = 1 << 20) -> Iterator[np.ndarray]:
+    """Stream a capture as complex128 blocks. The only safe way to read a real recording."""
+    info = open_baseband(path)
+    frame_bytes = info.channels * info.bits // 8
+    remaining = info.data_bytes
+    with open(path, "rb") as fh:
+        fh.seek(info.data_offset)
+        while remaining > 0:
+            want = min(block_frames * frame_bytes, remaining)
+            raw = fh.read(want)
+            if not raw:
+                break                                 # truncated file; use what we have
+            raw = raw[: len(raw) - (len(raw) % frame_bytes)]
+            remaining -= len(raw)
+            yield _decode(raw, info.bits)
+
+
+def read_baseband(path: str | Path) -> tuple[np.ndarray, float, float | None]:
+    """Whole file at once: (complex samples, sample rate, centre or None).
+
+    For tests and short captures only. Refuses anything over MAX_EAGER_BYTES, because an
+    hour of 250 kSPS IQ is 14.4 GB in complex128 and a convenience function is exactly the
+    sort of thing that ends up called on it by accident.
+    """
+    info = open_baseband(path)
+    if info.data_bytes > MAX_EAGER_BYTES:
+        raise ValueError(
+            f"{Path(path).name}: {info.data_bytes/1e9:.2f} GB is too large to read at once; "
+            f"use iter_baseband()")
+    blocks = list(iter_baseband(path))
+    samples = np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.complex128)
+    return samples, info.rate, info.centre_hz
 
 
 def synth_nfm(audio: np.ndarray, audio_rate: float, iq_rate: float,
@@ -228,12 +417,12 @@ def synth_nfm(audio: np.ndarray, audio_rate: float, iq_rate: float,
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `py -m pytest server/tests/test_iq_baseband.py -v`
-Expected: 5 passed
+Expected: 9 passed
 
 - [ ] **Step 7: Run the whole suite for regressions**
 
 Run: `py -m pytest server/tests -q`
-Expected: all pass (468 existing + 5 new)
+Expected: all pass (468 existing + 9 new)
 
 - [ ] **Step 8: Commit**
 
@@ -565,8 +754,19 @@ git commit -m "Port the plugin's DSP chain, pinned against real production clips
 - Create: `server/tests/test_iq_demod.py`
 
 **Interfaces:**
-- Consumes: `iq.baseband.synth_nfm` (tests only).
-- Produces: `demodulate(iq: np.ndarray, iq_rate: float, bandwidth_hz: float, offset_hz: float = 0.0, audio_rate: float = 37500.0, deemphasis_us: float | None = 750.0) -> np.ndarray` returning float64 audio at `audio_rate`.
+- Consumes: `iq.baseband.synth_nfm`, `iq.baseband.iter_baseband`.
+- Produces:
+  - `Demodulator(iq_rate, bandwidth_hz, offset_hz=0.0, audio_rate=37500.0, deemphasis_us=750.0)` with `.process(block: np.ndarray) -> np.ndarray` and `.flush() -> np.ndarray`. Carries mixer phase, filter state, the discriminator's previous sample and the resampler's overlap across blocks.
+  - `demodulate(iq, iq_rate, bandwidth_hz, offset_hz=0.0, audio_rate=37500.0, deemphasis_us=750.0) -> np.ndarray` — one-shot convenience over `Demodulator`, used by tests.
+  - `apply_squelch(...)` (Task 4).
+
+**Streaming is not optional here** — see the Global Constraints. The state that must be
+carried is: the mixer's phase (a per-block restart puts a discontinuity into every block
+boundary, which the discriminator turns into a click), the channel filter's `zi`, the
+de-emphasis `zi`, the last IQ sample (the discriminator is a one-sample difference), and the
+resampler's input overlap. `lfilter` with `zi` was measured to reproduce whole-signal output
+with a maximum absolute difference of **exactly 0.0**, so the only approximation is the
+resampler edge, which `test_streaming_matches_one_shot` bounds.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -600,6 +800,13 @@ AUDIO_RATE = 37_500.0
 def _tone(freq, seconds, rate):
     t = np.arange(int(seconds * rate)) / rate
     return np.sin(2 * np.pi * freq * t)
+
+
+def _speech_like(seconds, rate=8000.0):
+    """Two tones and an envelope: enough spectral structure that a boundary artefact or a
+    filter difference has somewhere to show up."""
+    t = np.arange(int(seconds * rate)) / rate
+    return (np.sin(2 * np.pi * 400 * t) + 0.5 * np.sin(2 * np.pi * 1800 * t)) * 0.5
 
 
 def _recovered_tone_power(audio, freq, rate):
@@ -671,6 +878,39 @@ def test_deemphasis_tilts_the_spectrum_down():
 
 def test_empty_input_is_not_a_crash():
     assert len(demod.demodulate(np.zeros(0, dtype=np.complex128), IQ_RATE, 16_000.0)) == 0
+
+
+def test_streaming_matches_one_shot():
+    """An hour of IQ is 14.4 GB, so the real capture is demodulated in blocks. If block
+    processing differed from whole-signal processing, every arm would carry a boundary
+    artefact every N samples and the WER difference between arms would be measuring that."""
+    audio_in = _speech_like(2.0)
+    iq = baseband.synth_nfm(audio_in, 8000.0, IQ_RATE, deviation_hz=3000.0, offset_hz=30_000.0)
+
+    one_shot = demod.demodulate(iq, IQ_RATE, 16_000.0, offset_hz=30_000.0,
+                                audio_rate=AUDIO_RATE)
+
+    d = demod.Demodulator(IQ_RATE, 16_000.0, offset_hz=30_000.0, audio_rate=AUDIO_RATE)
+    parts = [d.process(b) for b in np.array_split(iq, 9)]
+    parts.append(d.flush())
+    streamed = np.concatenate([p for p in parts if len(p)])
+
+    n = min(len(one_shot), len(streamed))
+    assert abs(len(one_shot) - len(streamed)) <= 2, "block splitting must not change length"
+    assert np.max(np.abs(one_shot[:n] - streamed[:n])) < 1e-9, (
+        "block boundaries must be invisible")
+
+
+def test_the_mixer_phase_is_continuous_across_blocks():
+    """Restarting the mixer phase each block puts a step at every boundary, and the FM
+    discriminator turns a phase step into a loud click."""
+    iq = baseband.synth_nfm(np.zeros(20_000), IQ_RATE, IQ_RATE, deviation_hz=0.0,
+                            offset_hz=30_000.0)
+    d = demod.Demodulator(IQ_RATE, 16_000.0, offset_hz=30_000.0, audio_rate=AUDIO_RATE,
+                          deemphasis_us=None)
+    out = np.concatenate([d.process(b) for b in np.array_split(iq, 8)] + [d.flush()])
+    settled = out[len(out) // 4: -len(out) // 4]
+    assert np.max(np.abs(settled)) < 0.05, "a perfectly tuned unmodulated carrier is silent"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -700,54 +940,116 @@ import numpy as np
 from scipy import signal
 
 DEFAULT_AUDIO_RATE = 37_500.0   # what SDR# actually feeds the plugin on this setup
+_FIR_TAPS = 255
+
+
+class Demodulator:
+    """Stateful NFM demodulator, so a capture can be processed in blocks.
+
+    An hour of 250 kSPS IQ is 900M complex samples -- 14.4 GB as complex128 -- so the real
+    input is never held in memory. Every stage that has memory carries it across blocks:
+    the mixer's phase, the channel filter's zi, the de-emphasis zi, the discriminator's
+    previous sample, and the resampler's input overlap. Restarting any of them per block
+    would stamp an artefact at every boundary, and since all arms share the block size, the
+    artefact would be common-mode and invisible in the A/B while still degrading every arm.
+    """
+
+    def __init__(self, iq_rate: float, bandwidth_hz: float, offset_hz: float = 0.0,
+                 audio_rate: float = DEFAULT_AUDIO_RATE,
+                 deemphasis_us: float | None = 750.0):
+        nyquist = iq_rate / 2.0
+        if bandwidth_hz / 2.0 >= nyquist:
+            raise ValueError(f"bandwidth {bandwidth_hz} Hz exceeds the recording's Nyquist")
+
+        self.iq_rate = iq_rate
+        self.audio_rate = audio_rate
+        self.offset_hz = offset_hz
+
+        # Channel filter -- THE variable under test. Half the occupied bandwidth either side
+        # of DC, so `bandwidth_hz` means what SDR#'s bandwidth control means.
+        self._taps = signal.firwin(_FIR_TAPS, (bandwidth_hz / 2.0) / nyquist,
+                                   window="blackmanharris")
+        self._zi_ch = np.zeros(len(self._taps) - 1, dtype=np.complex128)
+
+        if deemphasis_us:
+            alpha = 1.0 / (1.0 + iq_rate * deemphasis_us * 1e-6)
+            self._de_b, self._de_a = [alpha], [1.0, -(1.0 - alpha)]
+            self._zi_de = np.zeros(1)
+        else:
+            self._de_b = None
+
+        from math import gcd
+        g = gcd(int(audio_rate), int(iq_rate))
+        self._up, self._down = int(audio_rate) // g, int(iq_rate) // g
+
+        self._n = 0                                   # samples mixed so far, for phase
+        self._prev_iq = np.zeros(0, dtype=np.complex128)
+        self._pending = np.zeros(0)                   # pre-resample overlap
+        # Overlap must be a whole number of decimation phases, or the resampler's output
+        # grid shifts between blocks and the concatenation develops a slow drift.
+        self._overlap = self._down * 64
+
+    def process(self, block: np.ndarray) -> np.ndarray:
+        block = np.asarray(block, dtype=np.complex128)
+        if len(block) == 0:
+            return np.zeros(0)
+
+        # 1. Mix to DC, with the phase continuing from wherever the last block ended.
+        if self.offset_hz:
+            t = (self._n + np.arange(len(block))) / self.iq_rate
+            block = block * np.exp(-2j * np.pi * self.offset_hz * t)
+        self._n += len(block)
+
+        # 2. Channel filter, state carried.
+        block, self._zi_ch = signal.lfilter(self._taps, 1.0, block, zi=self._zi_ch)
+
+        # 3. FM discriminator: instantaneous frequency is the phase step between samples.
+        #    The previous block's last sample supplies the first difference.
+        joined = np.concatenate([self._prev_iq, block])
+        self._prev_iq = block[-1:]
+        audio = np.angle(joined[1:] * np.conj(joined[:-1]))
+
+        # 4. De-emphasis, state carried.
+        if self._de_b is not None:
+            audio, self._zi_de = signal.lfilter(self._de_b, self._de_a, audio, zi=self._zi_de)
+
+        # 5. Resample to the plugin's tap rate, keeping an overlap so the polyphase filter
+        #    has history. Emit only the settled middle; the tail is held for next time.
+        self._pending = np.concatenate([self._pending, audio])
+        if len(self._pending) <= 2 * self._overlap:
+            return np.zeros(0)
+        usable = len(self._pending) - self._overlap
+        usable -= usable % self._down
+        chunk, self._pending = self._pending[:usable + self._overlap], self._pending[usable:]
+        out = signal.resample_poly(chunk, self._up, self._down)
+        keep = usable * self._up // self._down
+        return np.asarray(out[:keep], dtype=np.float64)
+
+    def flush(self) -> np.ndarray:
+        """Whatever is left in the overlap buffer, at the end of the capture."""
+        if len(self._pending) == 0:
+            return np.zeros(0)
+        out = signal.resample_poly(self._pending, self._up, self._down)
+        self._pending = np.zeros(0)
+        return np.asarray(out, dtype=np.float64)
 
 
 def demodulate(iq: np.ndarray, iq_rate: float, bandwidth_hz: float,
                offset_hz: float = 0.0, audio_rate: float = DEFAULT_AUDIO_RATE,
                deemphasis_us: float | None = 750.0) -> np.ndarray:
-    """Demodulate NFM at `offset_hz` from centre, through a `bandwidth_hz` channel filter."""
+    """One-shot convenience over Demodulator. For tests and short signals only -- a real
+    capture must go through Demodulator.process block by block."""
     iq = np.asarray(iq, dtype=np.complex128)
     if len(iq) == 0:
         return np.zeros(0)
-
-    # 1. Mix the wanted channel down to DC.
-    if offset_hz:
-        t = np.arange(len(iq)) / iq_rate
-        iq = iq * np.exp(-2j * np.pi * offset_hz * t)
-
-    # 2. Channel filter -- THE variable under test. Half the occupied bandwidth either side
-    #    of DC, so `bandwidth_hz` means the same thing SDR#'s bandwidth control means.
-    cutoff = bandwidth_hz / 2.0
-    nyquist = iq_rate / 2.0
-    if cutoff >= nyquist:
-        raise ValueError(f"bandwidth {bandwidth_hz} Hz exceeds the recording's Nyquist")
-    taps = signal.firwin(255, cutoff / nyquist, window="blackmanharris")
-    iq = signal.lfilter(taps, 1.0, iq)
-
-    # 3. FM discriminator: instantaneous frequency is the phase step between samples.
-    #    np.angle of x[n]*conj(x[n-1]) is the standard form and needs no unwrapping.
-    audio = np.angle(iq[1:] * np.conj(iq[:-1]))
-
-    # 4. De-emphasis. Marine NFM is transmitted pre-emphasised; undoing it restores the
-    #    spectral balance speech models expect. One-pole IIR with the standard time constant.
-    if deemphasis_us:
-        alpha = 1.0 / (1.0 + iq_rate * deemphasis_us * 1e-6)
-        audio = signal.lfilter([alpha], [1.0, -(1.0 - alpha)], audio)
-
-    # 5. Down to the plugin's tap rate. resample_poly needs an integer ratio, so reduce
-    #    the rates to their lowest terms rather than assuming one.
-    from math import gcd
-    up, down = int(audio_rate), int(iq_rate)
-    g = gcd(up, down)
-    audio = signal.resample_poly(audio, up // g, down // g)
-
-    return np.asarray(audio, dtype=np.float64)
+    d = Demodulator(iq_rate, bandwidth_hz, offset_hz, audio_rate, deemphasis_us)
+    return np.concatenate([d.process(iq), d.flush()])
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `py -m pytest server/tests/test_iq_demod.py -v`
-Expected: 6 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -860,7 +1162,7 @@ def apply_squelch(audio: np.ndarray, rate: float, threshold_db: float | None,
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `py -m pytest server/tests/test_iq_demod.py -v`
-Expected: 10 passed
+Expected: 12 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1259,7 +1561,24 @@ def write_clip(path: str | Path, samples: np.ndarray, rate: int = WHISPER_RATE) 
         w.writeframes(pcm.tobytes())
 
 
-def plan_segments(iq: np.ndarray, iq_rate: float, bandwidth_hz: float,
+def _demodulate_capture(iq, iq_rate: float, bandwidth_hz: float, offset_hz: float,
+                        audio_rate: float) -> np.ndarray:
+    """Demodulate either an in-memory array or a stream of blocks.
+
+    `iq` is a path for real captures -- an hour of 250 kSPS is 14.4 GB as complex128, so it
+    is streamed from disk and only the demodulated audio is held (270 MB/hour at 37500 Hz,
+    which is affordable). Tests pass an array.
+    """
+    d = demod.Demodulator(iq_rate, bandwidth_hz, offset_hz=offset_hz, audio_rate=audio_rate)
+    if isinstance(iq, (str, Path)):
+        parts = [d.process(block) for block in baseband.iter_baseband(iq)]
+    else:
+        parts = [d.process(np.asarray(iq))]
+    parts.append(d.flush())
+    return np.concatenate([p for p in parts if len(p)]) if parts else np.zeros(0)
+
+
+def plan_segments(iq, iq_rate: float, bandwidth_hz: float,
                   offset_hz: float, audio_rate: float = demod.DEFAULT_AUDIO_RATE
                   ) -> list[tuple[float, float]]:
     """Compute the shared cut list from one reference arm.
@@ -1269,8 +1588,7 @@ def plan_segments(iq: np.ndarray, iq_rate: float, bandwidth_hz: float,
     are made. The reference text is a property of the transmission, not of the arm, so this
     introduces no bias toward any arm.
     """
-    audio = demod.demodulate(iq, iq_rate, bandwidth_hz, offset_hz=offset_hz,
-                             audio_rate=audio_rate)
+    audio = _demodulate_capture(iq, iq_rate, bandwidth_hz, offset_hz, audio_rate)
     return segmod.detect_segments(audio, audio_rate)
 
 
@@ -1282,8 +1600,7 @@ def replay_arm(iq: np.ndarray, iq_rate: float, out_dir: str | Path, bandwidth_hz
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    audio = demod.demodulate(iq, iq_rate, bandwidth_hz, offset_hz=offset_hz,
-                             audio_rate=audio_rate)
+    audio = _demodulate_capture(iq, iq_rate, bandwidth_hz, offset_hz, audio_rate)
     audio = demod.apply_squelch(audio, audio_rate, squelch_db)
 
     if segments is None:
@@ -1318,7 +1635,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="SDR# audio rate to emulate (default 37500, this setup's rate)")
     args = ap.parse_args(argv)
 
-    iq, iq_rate, centre = baseband.read_baseband(args.capture)
+    # Header only. The samples are streamed later; a real capture is gigabytes.
+    info = baseband.open_baseband(args.capture)
+    iq, iq_rate, centre = args.capture, info.rate, info.centre_hz
+    print(f"{args.capture}: {info.frames/info.rate/60:.1f} min at {info.rate/1000:.0f} kSPS, "
+          f"{info.bits}-bit, centre "
+          f"{'unknown' if centre is None else f'{centre/1e6:.4f} MHz'}")
+
     if args.freq is not None and centre is None:
         print("warning: no centre frequency in the filename; treating --freq as the offset",
               file=sys.stderr)
@@ -1353,7 +1676,7 @@ Expected: 4 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `py -m pytest server/tests -q`
-Expected: all pass (468 existing + 30 new)
+Expected: all pass (468 existing + ~36 new)
 
 - [ ] **Step 6: Document the harness**
 
