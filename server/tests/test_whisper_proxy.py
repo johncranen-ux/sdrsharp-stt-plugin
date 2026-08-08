@@ -1219,6 +1219,125 @@ def test_pattern_match_is_anchored_at_both_ends(pattern_cache):
     assert proxy.match_by_callsign_pattern("PAB") is None
 
 
+# ---------------------------------------------------------------------------
+# Phonetic-run callsign anchor
+#
+# From the BERGE TOWNSEND conversation of 2026-08-07 10:17:50, root-caused in full. The
+# correct ship was in the cache the whole time and two independent paths to it failed:
+#
+#   - The callsign path never ran. `_CALLSIGN_ANCHOR_RE` needs the literal word "callsign",
+#     but it was transcribed "call time two" and "all time two", so the anchor was False on
+#     all three turns and the spelled-out characters were never even looked at.
+#   - "Papa Bravo 8" was spoken twice. Callsigns CONTAINING PB8 = 79 cached vessels, useless.
+#     Callsigns ENDING in PB8 = exactly 1, 2FPB8, BERGE TOWNSEND. Verified against the live
+#     cache on 2026-08-08: 8,008 callsigns, 79 containing, 1 ending.
+#
+# So: anchor on the phonetic run itself rather than a keyword that STT can eat, and match
+# tail-anchored. A 3-character tail is unique for only 23% of the cache, which is why
+# ambiguity must return None and why the name-corroboration gate stays in front of this.
+
+
+def test_phonetic_runs_need_no_callsign_keyword():
+    """The whole point: 'callsign' was heard as 'call time two' and the path died there.
+
+    The run is "2PB8", not "PB8": the "two" of "all time two" is the callsign's own leading
+    2, and the Foxtrot between it and the Papa was lost to noise.
+    """
+    assert proxy._phonetic_callsign_probes("all time two, Papa Bravo 8") == ["2PB8"]
+
+
+def test_callsign_tails_are_peeled_from_the_left_longest_first():
+    """2FPB8 arrived as the run 2PB8, which is a tail of nothing; PB8 is a tail of one."""
+    assert proxy._callsign_tail_candidates("2PB8") == ["2PB8", "PB8"]
+
+
+def test_callsign_tails_never_go_below_the_probe_floor():
+    assert all(len(t) >= proxy.PHONETIC_PROBE_MIN_LEN
+               for t in proxy._callsign_tail_candidates("ABCDE"))
+
+
+def test_phonetic_runs_ignore_ordinary_speech():
+    """Ordinary words must not be assembled into a callsign probe."""
+    assert proxy._phonetic_callsign_probes("we have the Townsend proceeding inbound") == []
+
+
+def test_phonetic_runs_require_real_phonetic_letters():
+    """Spoken digits alone are a channel number or a time, not a callsign."""
+    assert proxy._phonetic_callsign_probes("switch to one six all the way") == []
+
+
+def test_phonetic_runs_reject_a_single_letter():
+    """One phonetic word plus digits does not discriminate; two letters is the floor."""
+    assert proxy._phonetic_callsign_probes("Papa 8 8") == []
+
+
+def test_phonetic_runs_break_on_ordinary_words():
+    """'Papa Bravo' and 'Charlie Delta' are two probes, not one six-character run."""
+    probes = proxy._phonetic_callsign_probes("Papa Bravo 8 inbound Charlie Delta 4")
+    assert "PB8" in probes and "CD4" in probes
+    assert not any(len(p) > 3 for p in probes)
+
+
+def test_suffix_match_finds_the_one_vessel_whose_callsign_ends_that_way(pattern_cache):
+    """5LRK9 and 5LCP9 both contain 'K9'-ish noise; only one ends 'RK9'."""
+    assert proxy.match_by_callsign_suffix("RK9")["name"] == "MSC TEMA VIII"
+
+
+def test_suffix_match_refuses_when_several_vessels_fit(monkeypatch):
+    """Ambiguity is not an identification, even when the tail is long enough to be checked."""
+    monkeypatch.setattr(ais, "_callsign_cache", {
+        "2FPB8": {"name": "BERGE TOWNSEND", "mmsi": "1", "callsign": "2FPB8"},
+        "9XPB8": {"name": "SOMEONE ELSE",   "mmsi": "2", "callsign": "9XPB8"},
+    })
+    assert proxy.match_by_callsign_suffix("PB8") is None
+
+
+def test_suffix_match_is_a_tail_not_a_substring(pattern_cache):
+    """The 79-vs-1 distinction. 'PAB' is inside PABC but PABC does not end with it."""
+    assert proxy.match_by_callsign_suffix("PAB") is None
+
+
+@pytest.mark.parametrize("probe", ["", None, "XY"])
+def test_suffix_match_returns_nothing_when_it_cannot_match(probe, pattern_cache):
+    assert proxy.match_by_callsign_suffix(probe) is None
+
+
+def test_the_berge_townsend_conversation_now_resolves(monkeypatch):
+    """The end-to-end regression: the real transcript, the real callsign, the real cache entry.
+
+    Both gates must pass -- the phonetic run gives the callsign tail, and the shore station
+    saying 'Townsend' corroborates the name. Neither alone may identify a ship.
+    """
+    monkeypatch.setattr(ais, "_callsign_cache", {
+        "2FPB8": {"name": "BERGE TOWNSEND", "mmsi": "235093069", "callsign": "2FPB8"},
+        "FM6432": {"name": "VISION", "mmsi": "226003310", "callsign": "FM6432"},
+    })
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    # Verbatim decoder output for clips 0003/0004/0005 of the 2026-08-07 capture. Not
+    # paraphrased: "call time two" and "Bergy Township" are what the mis-hearing actually
+    # looks like, and a cleaned-up version of it would not exercise this path.
+    chunks = [
+        _chunk(10, "Maaas Approach, Maaas Approach, motor vision, Berkey Fountain, "
+                   "call time two, backstreet Papa Bravo 8, calling you over."),
+        _chunk(20, "Mahaas Aproach, Mahaas Aproach, Otterbeesel, Bergy Township, "
+                   "all time two, Pax Trat, Papa Bravo Eight, pulling over."),
+        _chunk(30, "We have the Townsend Maaas approach, good morning."),
+    ]
+    found = proxy._partial_callsign_candidates(chunks)
+    assert "235093069" in found, "BERGE TOWNSEND was in the cache the whole time"
+    assert found["235093069"]["name"] == "BERGE TOWNSEND"
+
+
+def test_a_phonetic_run_alone_does_not_identify_a_ship(monkeypatch):
+    """Without the name spoken, a unique tail is still only a guess wearing evidence's clothes."""
+    monkeypatch.setattr(ais, "_callsign_cache", {
+        "2FPB8": {"name": "BERGE TOWNSEND", "mmsi": "235093069", "callsign": "2FPB8"}})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    chunks = [_chunk(10, "Maaas Approach, Maaas Approach, motor vision, call time two, "
+                         "backstreet Papa Bravo 8, calling you over.")]
+    assert proxy._partial_callsign_candidates(chunks) == {}
+
+
 def test_invented_callsigns_are_not_promoted_to_evidence(monkeypatch):
     """Measured: the live pass emitted callsigns for transmissions containing none, and they
     hit the AIS table exactly. Marking those 'via callsign' would launder a guess."""

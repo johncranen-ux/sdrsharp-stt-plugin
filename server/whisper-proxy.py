@@ -112,6 +112,7 @@ from stt_proxy.conversations import (  # noqa: E402
     _html_escape,
     _is_maas_response,
     _load_conversations,
+    _partial_callsign_candidates,
     _record_chunk,
     _render_resolver_input,
     _resolver_candidates,
@@ -157,6 +158,7 @@ from stt_proxy.ais import (  # noqa: E402
     _save_cache,
     match_by_callsign,
     match_by_callsign_pattern,
+    match_by_callsign_suffix,
     match_by_mmsi,
     match_by_name,
 )
@@ -202,7 +204,10 @@ from stt_proxy.corrections import (  # noqa: E402
     _decode_spoken_word,
     _is_hallucination,
     _is_prompt_echo,
+    PHONETIC_PROBE_MIN_LEN,
+    _callsign_tail_candidates,
     _partial_callsign_pattern,
+    _phonetic_callsign_probes,
     _prompt_echo_tokens,
     _spelled_out_runs,
 )

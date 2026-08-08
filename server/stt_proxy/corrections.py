@@ -310,6 +310,66 @@ def _spelled_out_runs(text: str) -> list[str]:
     return runs
 
 
+# Phonetic runs as their own anchor
+#
+# `_CALLSIGN_ANCHOR_RE` below needs the literal word "callsign", which is exactly what STT
+# eats on a noisy channel: on 2026-08-07 BERGE TOWNSEND said it twice and it arrived as
+# "call time two" and "all time two", so the whole partial-callsign path never ran even
+# though "Papa Bravo 8" was in the text, twice.
+#
+# An unbroken run of NATO phonetic words is itself strong evidence that characters are being
+# spelled out -- nobody says "Papa Bravo" in ordinary maritime speech. That makes it a
+# keyword-free anchor. It is deliberately stricter than `_spelled_out_runs`, which also
+# accepts already-compact forms like "9HF5093": those are safe when a keyword has already
+# bounded the span, and far too loose when the run has to justify itself.
+#
+# Two phonetic letters is the floor. One letter plus digits ("Papa 8 8") does not
+# discriminate, and digits alone are a channel number or a time, not a callsign.
+PHONETIC_PROBE_MIN_LETTERS = 2
+PHONETIC_PROBE_MIN_LEN     = 3
+
+
+def _phonetic_callsign_probes(text: str) -> list[str]:
+    """Character runs spelled out phonetically, usable as callsign tails without a keyword."""
+    probes, current, letters = [], [], 0
+
+    def flush():
+        nonlocal current, letters
+        if len(current) >= PHONETIC_PROBE_MIN_LEN and letters >= PHONETIC_PROBE_MIN_LETTERS:
+            probes.append("".join(current))
+        current, letters = [], 0
+
+    for word in re.findall(r"[A-Za-z0-9'-]+", (text or "").lower()):
+        if word in _PHONETIC_LETTERS:
+            current.append(_PHONETIC_LETTERS[word])
+            letters += 1
+        elif word in _SPOKEN_DIGITS:
+            current.append(_SPOKEN_DIGITS[word])
+        elif len(word) == 1 and word.isalnum():
+            # A bare character the decoder wrote out rather than spelling: the "8" in
+            # "Papa Bravo 8". It extends a run but never justifies one on its own.
+            current.append(word.upper())
+        else:
+            flush()
+    flush()
+    return probes
+
+
+def _callsign_tail_candidates(run: str) -> list[str]:
+    """Tails of a phonetic run to try against the cache, longest first.
+
+    A spelled-out callsign loses its opening characters first: the start of a transmission
+    is where the squelch tail, the AGC and the operator's own hesitation all land. BERGE
+    TOWNSEND's 2FPB8 arrived as "two ... Papa Bravo 8" -- the leading 2 survived but the
+    Foxtrot did not, so the run is "2PB8", which is a tail of no callsign at all. Peeling
+    from the left gives "PB8", which is a tail of exactly one.
+
+    Longest first so the most specific probe that can match is the one that does.
+    """
+    run = (run or "").upper()
+    return [run[i:] for i in range(len(run) - PHONETIC_PROBE_MIN_LEN + 1)]
+
+
 def _callsign_supported_by_text(callsign: str, text: str) -> bool:
     """True only if `callsign` can be read out of `text`."""
     wanted = _ALNUM_RE.sub("", callsign or "").upper()

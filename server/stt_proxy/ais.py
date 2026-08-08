@@ -603,6 +603,32 @@ def match_by_callsign_pattern(pattern: str) -> dict | None:
     return found
 
 
+def match_by_callsign_suffix(suffix: str) -> dict | None:
+    """The one cached vessel whose callsign ENDS with `suffix`, or None.
+
+    Tail-anchored, and that is the whole point. On 2026-08-08 the live cache held 8,008
+    callsigns: 79 of them contain "PB8", so a substring search identifies nothing, while
+    exactly one ends with it -- 2FPB8, BERGE TOWNSEND, the ship that was actually calling.
+    A spelled-out callsign that survives STT only partly tends to lose its opening
+    characters to the noise at the start of a transmission, so the tail is what is left.
+
+    Ambiguity returns None, as with `match_by_callsign_pattern`. It has to: a 3-character
+    tail is unique for only 23% of the cache, so this is a filter that usually declines.
+    """
+    wanted = (suffix or "").upper()
+    if len(wanted) < 3:
+        return None
+    with _cache_lock:
+        entries = list(_callsign_cache.items())
+    found = None
+    for callsign, entry in entries:
+        if callsign.upper().endswith(wanted):
+            if found is not None:
+                return None
+            found = entry
+    return found
+
+
 # AIS hint matching
 #
 # Hints are candidate vessels shown to Claude alongside a transcript. The original

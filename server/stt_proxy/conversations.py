@@ -22,9 +22,11 @@ import threading
 from rapidfuzz import fuzz as rf_fuzz
 
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
-                           match_by_callsign, match_by_callsign_pattern, match_by_mmsi)
+                           match_by_callsign, match_by_callsign_pattern,
+                           match_by_callsign_suffix, match_by_mmsi)
 from stt_proxy.claude import _get_claude
-from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern,
+from stt_proxy.corrections import (_callsign_supported_by_text, _callsign_tail_candidates,
+                                   _partial_callsign_pattern, _phonetic_callsign_probes,
                                    _spelled_out_runs)
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
 from stt_proxy.markup import VESSELFINDER_URL, _html_escape, _vessel_link  # noqa: F401
@@ -342,19 +344,31 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
     if not AIS_PARTIAL_CALLSIGN:
         return found
     for chunk in chunks:
-        decoded = _partial_callsign_pattern(chunk.get("text", ""))
-        if not decoded:
-            continue
-        pattern, _known = decoded
-        entry = match_by_callsign_pattern(pattern)
-        if not entry or not entry.get("mmsi"):
-            continue
-        if not _name_corroborates(entry["name"], chunks):
-            continue
-        marked = dict(entry)
-        marked["via_partial_callsign"] = True
-        marked["partial_pattern"] = pattern
-        found[entry["mmsi"]] = marked
+        text = chunk.get("text", "")
+
+        # Keyword-anchored first: it bounds the span, so it is the more trustworthy of the
+        # two and gets to claim the vessel before the keyword-free path is tried.
+        probes: list[tuple[str, str]] = []
+        decoded = _partial_callsign_pattern(text)
+        if decoded:
+            probes.append(("pattern", decoded[0]))
+        for run in _phonetic_callsign_probes(text):
+            probes += [("suffix", tail) for tail in _callsign_tail_candidates(run)]
+
+        for kind, probe in probes:
+            entry = (match_by_callsign_pattern(probe) if kind == "pattern"
+                     else match_by_callsign_suffix(probe))
+            if not entry or not entry.get("mmsi"):
+                continue
+            # Both gates, always. A unique callsign tail with no name spoken anywhere in the
+            # window is still a guess -- see the VISION/BERGE TOWNSEND conversation, where
+            # the wrong ship scored exactly as well as the right one on name alone.
+            if not _name_corroborates(entry["name"], chunks):
+                continue
+            marked = dict(entry)
+            marked["via_partial_callsign"] = True
+            marked["partial_pattern"] = probe
+            found.setdefault(entry["mmsi"], marked)
     return found
 
 
