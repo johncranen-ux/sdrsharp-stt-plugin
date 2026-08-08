@@ -3,3 +3,5 @@ anthropic
 websockets
 certifi
 pip-system-certs
+numpy
+scipy
