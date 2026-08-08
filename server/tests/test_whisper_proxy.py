@@ -1329,6 +1329,19 @@ def test_the_berge_townsend_conversation_now_resolves(monkeypatch):
     assert found["235093069"]["name"] == "BERGE TOWNSEND"
 
 
+def test_the_phonetic_anchor_can_be_switched_off_for_an_ab(monkeypatch):
+    """It has to be isolatable, or --resolve measures every change since the stored verdicts."""
+    monkeypatch.setattr(ais, "_callsign_cache", {
+        "2FPB8": {"name": "BERGE TOWNSEND", "mmsi": "235093069", "callsign": "2FPB8"}})
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(conversations, "AIS_PHONETIC_CALLSIGN", False)
+    chunks = [
+        _chunk(10, "Maaas Approach, motor vision, call time two, backstreet Papa Bravo 8."),
+        _chunk(20, "We have the Townsend Maaas approach, good morning."),
+    ]
+    assert proxy._partial_callsign_candidates(chunks) == {}
+
+
 def test_a_phonetic_run_alone_does_not_identify_a_ship(monkeypatch):
     """Without the name spoken, a unique tail is still only a guess wearing evidence's clothes."""
     monkeypatch.setattr(ais, "_callsign_cache", {
@@ -1644,8 +1657,10 @@ class _StubClaude:
     def __init__(self, reply):
         self._reply = reply
         self.messages = self
+        self.kwargs = None
 
     def create(self, **kwargs):
+        self.kwargs = kwargs
         text = self._reply
         return type("R", (), {"content": [type("C", (), {"text": text})()]})()
 
@@ -1653,8 +1668,25 @@ class _StubClaude:
 @pytest.fixture
 def stub_claude(monkeypatch):
     def _install(reply):
-        monkeypatch.setattr(conversations, "_get_claude", lambda: _StubClaude(reply))
+        stub = _StubClaude(reply)
+        monkeypatch.setattr(conversations, "_get_claude", lambda: stub)
+        return stub
     return _install
+
+
+def test_the_resolver_samples_deterministically(stub_claude, monkeypatch):
+    """Left at the API default of 1.0 until 2026-08-08, while identify.py pinned 0 all along.
+
+    Repeatability matters more here than a point of accuracy: without it, every
+    `bench_identify.py --resolve` A/B measures the change *plus* the sampling noise with no
+    way to separate them. Two runs that day named different off-list vessels from identical
+    inputs. The queued adjudicator-precedence work is unmeasurable until this holds.
+    """
+    stub = stub_claude(_EXCHANGE)
+    monkeypatch.setattr(ais, "_vessel_cache", {"SERENADA": {"name": "SERENADA",
+                                                            "mmsi": "275545000"}})
+    proxy.resolve_conversation([_chunk(30, "Maas Approach, Serenada.", cid=1)])
+    assert stub.kwargs["temperature"] == 0
 
 
 _EXCHANGE = ('{"exchanges": [{"chunk_ids": [1, 2], "vessel": "SERENADA", '

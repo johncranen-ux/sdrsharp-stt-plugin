@@ -320,6 +320,13 @@ def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
 #
 # Set AIS_PARTIAL_CALLSIGN=off to disable this pass entirely.
 AIS_PARTIAL_CALLSIGN            = os.environ.get("AIS_PARTIAL_CALLSIGN", "on").strip().lower() != "off"
+
+# The keyword-free phonetic-run anchor, separately switchable from the keyword-anchored
+# pattern path above it. It exists as its own knob so the two can be A/B'd against each
+# other with `bench_identify.py --resolve`: comparing the new code to verdicts STORED days
+# ago measures every change since, not this one, and the prompt override fixed on 2026-08-07
+# alone was worth 11 WER points. One variable at a time or the number means nothing.
+AIS_PHONETIC_CALLSIGN           = os.environ.get("AIS_PHONETIC_CALLSIGN", "on").strip().lower() != "off"
 PARTIAL_CALLSIGN_MIN_NAME_SCORE = int(os.environ.get("PARTIAL_CALLSIGN_MIN_NAME_SCORE", "60"))
 
 
@@ -351,7 +358,8 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
         decoded = _partial_callsign_pattern(text)
         if decoded:
             probes.append(("pattern", decoded[0]))
-        probes += [("suffix", run) for run in _phonetic_callsign_probes(text)]
+        if AIS_PHONETIC_CALLSIGN:
+            probes += [("suffix", run) for run in _phonetic_callsign_probes(text)]
 
         for kind, probe in probes:
             entry = (match_by_callsign_pattern(probe) if kind == "pattern"
@@ -487,6 +495,15 @@ def resolve_conversation(chunks: list[dict]) -> list[dict]:
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
+            # Sampling default is 1.0, and this call had been leaving it there while
+            # identify.py:140 has pinned temperature=0 all along. That made the resolver
+            # non-repeatable, which matters far more here than a point of accuracy: every
+            # A/B run with `bench_identify.py --resolve` was measuring the change plus the
+            # sampling noise, with no way to tell them apart. Two runs on 2026-08-08 named
+            # different off-list vessels ('NORDIC SAGA' vs 'ST NIKOLAI') from identical
+            # inputs, which is exactly that noise made visible. Adjudicating identity is a
+            # judgement over fixed evidence -- there is nothing here that wants sampling.
+            temperature=0,
             system=RESOLVER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _render_resolver_input(chunks, candidates)}],
         )
