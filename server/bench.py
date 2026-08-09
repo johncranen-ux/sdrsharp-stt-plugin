@@ -172,6 +172,41 @@ def _normalize(text: str) -> list[str]:
     return _WORD_RE.findall(text.lower())
 
 
+def run_health(rows: list[dict]) -> tuple[bool, str] | None:
+    """(fatal, message) if this run's numbers cannot be trusted, else None.
+
+    Exists because on 2026-08-09 every clip of a 97-clip run failed before the request left
+    the machine -- Git Bash rewrote `--path /v1/audio/transcriptions` into a Windows path --
+    and bench.py printed its summary table, wrote the JSON and HTML, and exited 0. Two such
+    runs then compared as "identical", which reads exactly like a clean null result.
+
+    The distinction this draws, and the reason the old empty-text warning was not enough: a
+    clip that ERRORED means the run is broken, while a clip that merely transcribed to empty
+    text may hold no speech. The replay harness writes silence for a segment lying past a
+    shorter arm's end, so some empty output is correct and flagging it would only train the
+    operator to scroll past the warning.
+    """
+    n = len(rows)
+    if n == 0:
+        return True, "no clips were transcribed"
+
+    failed = [r for r in rows if r.get("error")]
+    if len(failed) == n:
+        return True, (f"all {n} clips failed: {failed[0]['error']} "
+                      f"— nothing reached the backend, so there is no result here")
+    if failed:
+        # No threshold here on purpose. WER is pooled across clips, so a failed clip is
+        # silently dropped from the denominator rather than scoring badly -- there is no
+        # count of failures small enough to be worth saying nothing about.
+        return False, (f"{len(failed)} of {n} clips failed, e.g. {failed[0]['error']} "
+                       f"— pooled WER is computed over the survivors only")
+
+    if all(not (r.get("text") or "").strip() for r in rows):
+        return True, (f"all {n} clips transcribed as empty with no error reported "
+                      f"— check the backend is answering with content")
+    return None
+
+
 def word_error_counts(reference: str, hypothesis: str) -> tuple[int, int] | None:
     """Returns (edit_distance, ref_word_count), or None if there's no usable reference.
     Exposed separately from word_error_rate so callers can pool edits/words across many
@@ -386,17 +421,26 @@ def run(args: argparse.Namespace) -> int:
             err_note = f"  [{error}]" if error else ""
             print(f"  {clip_id}  {elapsed:5.2f}s  {status:12s}  {text[:70]!r}{err_note}")
 
-        n = len(results[config_name])
-        empty = sum(1 for r in results[config_name] if not r["text"])
-        if n > 0 and empty / n > 0.5:
-            print(f"  WARNING: {empty}/{n} clips returned empty text for '{config_name}' — "
-                  f"check server connectivity/params before trusting this config's numbers.")
+        health = run_health(results[config_name])
+        if health:
+            fatal, message = health
+            print(f"  {'ERROR' if fatal else 'WARNING'}: {config_name}: {message}")
         print()
 
     print_summary(results)
     write_json(results, args.out_json, args.model_label)
     write_html_report(results, args.out_html, args.model_label)
     print(f"\nwrote {args.out_json} and {args.out_html}")
+
+    # Written first, then failed: the per-clip `error` field is how a broken run gets
+    # diagnosed at all, so the JSON is more useful on disk than withheld. What must not
+    # happen is exiting 0 and letting a downstream tool read those numbers as a result.
+    broken = sorted(name for name, rows in results.items()
+                    if (h := run_health(rows)) and h[0])
+    if broken:
+        print(f"\nFAILED: no usable result for {', '.join(broken)} — see the errors above",
+              file=sys.stderr)
+        return 1
     return 0
 
 

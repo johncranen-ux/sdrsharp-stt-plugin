@@ -153,3 +153,69 @@ def test_superseded_prompts_are_kept_for_reproducibility():
     # those numbers unreproducible.
     assert bench.PROMPTS["v1_names"] != bench.MARITIME_PROMPT
     assert "neptune" in bench.PROMPTS["v1_names"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Refusing to present a broken run as a result
+#
+# On 2026-08-09 every clip of a 97-clip run failed before the request left the machine
+# (Git Bash rewrote the --path argument into a Windows path), and bench.py printed its
+# usual summary table, wrote the JSON and the HTML, and exited 0. It did warn -- but a
+# warning scrolls past, the exit code said success, and the written JSON is indistinguishable
+# to any downstream tool from a run that genuinely found nothing to transcribe. Comparing two
+# such runs shows them "identical", which reads as a clean null result.
+#
+# The distinction that matters and was missing: a clip that ERRORED is a broken run, while a
+# clip that transcribed to empty text may simply have held no speech -- the replay harness
+# writes silence for a segment past a short arm's end, so empty output is expected sometimes.
+# ---------------------------------------------------------------------------
+
+def _row(clip_id, text="something said", error=None):
+    return {"clip_id": clip_id, "text": text, "elapsed": 0.4,
+            "wer": None, "error": error, "reference": None}
+
+
+def test_a_healthy_run_says_nothing():
+    rows = [_row(f"{i:04d}") for i in range(10)]
+    assert bench.run_health(rows) is None
+
+
+def test_a_run_where_every_clip_errored_is_fatal():
+    """THE case. All 97 failed identically and the run still exited 0."""
+    rows = [_row(f"{i:04d}", text="", error="InvalidURL: bad path") for i in range(97)]
+    fatal, message = bench.run_health(rows)
+    assert fatal is True
+    assert "97" in message and "InvalidURL" in message
+
+
+def test_a_few_failures_are_reported_but_not_fatal():
+    """One clip timing out does not invalidate the other ninety-six."""
+    rows = [_row(f"{i:04d}") for i in range(20)]
+    rows[3] = _row("0003", text="", error="timeout")
+    fatal, message = bench.run_health(rows)
+    assert fatal is False
+    assert "1" in message and "20" in message
+
+
+def test_every_clip_empty_without_an_error_is_still_fatal():
+    """A server that answers 200 with nothing produces no error and no text. The numbers
+    from that run are not a result either."""
+    rows = [_row(f"{i:04d}", text="") for i in range(30)]
+    fatal, message = bench.run_health(rows)
+    assert fatal is True
+    assert "empty" in message.lower()
+
+
+def test_some_empty_clips_are_normal_and_not_flagged():
+    """segments.cut() yields an empty clip for a segment past a shorter arm's end, and
+    iq_replay writes silence for it. Silence transcribing to nothing is correct behaviour,
+    not a broken run -- flagging it would train the operator to ignore the warning."""
+    rows = [_row(f"{i:04d}") for i in range(20)]
+    for i in (2, 7, 11):
+        rows[i] = _row(f"{i:04d}", text="")
+    assert bench.run_health(rows) is None
+
+
+def test_no_clips_at_all_is_fatal():
+    fatal, message = bench.run_health([])
+    assert fatal is True and "no clips" in message.lower()
