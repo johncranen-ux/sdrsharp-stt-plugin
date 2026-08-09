@@ -163,7 +163,17 @@ def start() -> None:
     if not AIS_LOCAL_ENABLED:
         print("[AIS-local] disabled (AIS_LOCAL_ENABLED=off)", flush=True)
         return
-    sock = bind(AIS_LOCAL_UDP_PORT)
+    try:
+        sock = bind(AIS_LOCAL_UDP_PORT)
+    except OSError as exc:
+        # Fatal is correct -- something really does already own this port -- but a bare
+        # `OSError: [WinError 10048]` traceback leaves the operator guessing what. Name
+        # the likely culprit and the port before it propagates and kills the proxy.
+        print(f"[AIS-local] FATAL: could not bind 127.0.0.1:{AIS_LOCAL_UDP_PORT}: {exc}. "
+              f"Is AIS-catcher (or another instance of this proxy) already using that "
+              f"port? Set AIS_LOCAL_UDP_PORT to change it, or AIS_LOCAL_ENABLED=off to "
+              f"disable the local feed.", flush=True)
+        raise
     global _started_at
     _started_at = time.time()
     threading.Thread(target=_listen, args=(sock,), daemon=True,

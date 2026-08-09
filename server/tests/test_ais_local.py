@@ -249,3 +249,47 @@ def test_the_watchdog_is_disabled_at_zero(local_state, monkeypatch):
     monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 0)
     monkeypatch.setattr(ais_local, "_started_at", 1000.0)
     assert ais_local.silence_report(now=99999.0) is None
+
+
+# ---------------------------------------------------------------------------
+# start() -- the kill switch, and a bound port's failure mode
+# ---------------------------------------------------------------------------
+
+def test_start_is_a_no_op_when_disabled(monkeypatch):
+    """AIS_LOCAL_ENABLED=off is the operator's only way to disable a feature that now
+    owns a port and can abort proxy startup (see the FATAL-bind test below). Nothing
+    drives this path today; if it silently bound anyway, the kill switch would not
+    actually switch anything off."""
+    monkeypatch.setattr(ais_local, "AIS_LOCAL_ENABLED", False)
+
+    def _must_not_be_called(port):
+        raise AssertionError("bind() must not be called when AIS_LOCAL_ENABLED is off")
+    monkeypatch.setattr(ais_local, "bind", _must_not_be_called)
+
+    before = {t.ident for t in threading.enumerate()}
+    ais_local.start()
+    after = {t.ident for t in threading.enumerate()}
+
+    assert after == before, "start() left a thread running while disabled"
+
+
+def test_a_taken_port_names_the_culprit_before_it_propagates(monkeypatch, capsys):
+    """Fatal is correct -- something really does own the port -- but a bare
+    `OSError: [WinError 10048]` traceback leaves the operator guessing what. The message
+    printed before it propagates must name AIS-catcher and the port so the operator does
+    not have to go source-diving to find out what collided."""
+    monkeypatch.setattr(ais_local, "AIS_LOCAL_ENABLED", True)
+    monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 0)  # no watchdog thread needed
+
+    holder = ais_local.bind(0)
+    port = holder.getsockname()[1]
+    monkeypatch.setattr(ais_local, "AIS_LOCAL_UDP_PORT", port)
+    try:
+        with pytest.raises(OSError):
+            ais_local.start()
+    finally:
+        holder.close()
+
+    out = capsys.readouterr().out
+    assert "AIS-catcher" in out
+    assert str(port) in out
