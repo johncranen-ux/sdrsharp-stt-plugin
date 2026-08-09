@@ -51,6 +51,9 @@ identification-labels-verified.txt
 # note field carries transcript text and it falls under exactly the restriction above.
 identification-labels*.txt
 bench-identify-results*.json
+# --repeats writes one of these per run set. Same reason as the line above: the per-turn
+# rows carry real vessel names and MMSIs, and this repo is public.
+bench-identify-repeats*.json
 
 # bench.py / stress.py output (generated locally; captures are user data)
 bench-results*.json

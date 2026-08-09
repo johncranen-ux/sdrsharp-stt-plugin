@@ -1354,6 +1354,23 @@ Three details that are deliberate rather than incidental:
   one conversation" (see above); keeping them means the next such question is answerable
   without paying for the API calls again.
 
+**Measured on the 08-07 verified corpus, 3 runs (2026-08-09):** precision 87.6 / 87.6 / 84.8
+(**spread 2.9 points**), recall 76.5 in all three (**spread 0.0**), 140 of 143 transmissions
+stable, and the three that moved are exactly the 10:48:19–10:48:30 turns flipping `nobody` ↔
+`NOORDSTROOM`. The long-standing "~2.8 precision points" estimate measures at 2.9.
+
+Three things that run established:
+
+* **Recall is the trustworthy metric at this corpus size; precision carries all the noise.**
+  `correct` is 78 in every run — the flip is between two kinds of *wrong* (declining vs
+  naming NOORDSTROOM), so recall (`correct/identifiable`) cannot move while precision
+  (`correct/named`) drops as soon as three more turns get named. Judge an A/B on recall, and
+  treat a precision delta under ~3 points as noise.
+* **The flip costs measurement stability, not accuracy** — that conversation scores wrong in
+  every run regardless, it only changes bucket.
+* **Two repeats would have been actively misleading.** Runs 1 and 2 were identical, so
+  `--repeats 2` reports a spread of 0.0. Three is the demonstrated minimum, not a guess.
+
 Ruled out on the way to the provider explanation, so they need not be re-checked: candidate
 ordering is deterministic end to end (`_resolver_candidates` builds an insertion-ordered
 dict, `_find_ais_hints`' `seen` set is membership-only and never iterated, `_fresh_snapshot`
