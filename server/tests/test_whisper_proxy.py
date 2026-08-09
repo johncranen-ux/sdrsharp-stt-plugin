@@ -34,7 +34,7 @@ proxy = _load_proxy_module()
 # Submodules are imported directly where a test needs to patch module-level state: a flag
 # is read inside the module that owns it, so patching the re-export on `proxy` would have
 # no effect. Patch the owner.
-from stt_proxy import ais, backends, conversations, corrections, identify, vessel_log  # noqa: E402
+from stt_proxy import ais, ais_local, backends, conversations, corrections, identify, vessel_log  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -2807,13 +2807,34 @@ def server(tmp_path, monkeypatch):
     ("/identified-vessels", b"<"),
     # Missing from this list, and so still broken by the same split: the handler read
     # _cache_lock/_vessel_cache as bare globals and answered 500.
-    ("/api/ais-cache", b"["),
+    # Task 5 wrapped the bare vessel array in an object so per-provider health
+    # ("providers") could sit alongside it -- see test_ais_cache_reports_provider_health.
+    ("/api/ais-cache", b'"vessels"'),
 ])
 def test_get_routes_respond(server, path, expect):
     import urllib.request
     with urllib.request.urlopen(server + path, timeout=10) as r:
         assert r.status == 200
         assert expect in r.read()
+
+
+def test_ais_cache_reports_provider_health(server, monkeypatch):
+    """/api/ais-cache is the seam the (future) webapp reads for provider health -- see
+    design doc 'Observability'. Per-provider counters must sit alongside the vessel
+    list, not replace it, and each provider's own liveness value must pass through
+    unmodified (ais._last_message_at is monotonic time, not wall-clock; this route must
+    not convert it)."""
+    monkeypatch.setattr(ais, "_last_message_at", 12345.0)
+    monkeypatch.setattr(ais_local, "_stats",
+                         {"messages": 3, "last_message_at": 999.0,
+                          "rejected": 1, "errors": 0})
+    import urllib.request
+    with urllib.request.urlopen(server + "/api/ais-cache", timeout=10) as r:
+        payload = json.loads(r.read())
+    assert payload["providers"]["aisstream"] == {"last_message_at": 12345.0}
+    assert payload["providers"]["local"] == {
+        "messages": 3, "last_message_at": 999.0, "rejected": 1, "errors": 0,
+    }
 
 
 # Every one of these is live state that changes second to second, and none of them carried

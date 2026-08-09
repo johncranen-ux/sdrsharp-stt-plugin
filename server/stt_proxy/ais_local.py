@@ -164,6 +164,57 @@ def start() -> None:
         print("[AIS-local] disabled (AIS_LOCAL_ENABLED=off)", flush=True)
         return
     sock = bind(AIS_LOCAL_UDP_PORT)
+    global _started_at
+    _started_at = time.time()
     threading.Thread(target=_listen, args=(sock,), daemon=True,
                      name="ais-local").start()
     print(f"[AIS-local] listening on 127.0.0.1:{AIS_LOCAL_UDP_PORT}", flush=True)
+    # Mirrors ais.py's _watch_silence for aisstream: a feed that fails by going quiet is
+    # indistinguishable from a quiet channel unless something is watching the clock.
+    # AIS_LOCAL_UDP_PORT sits idle whether AIS-catcher never started or died mid-stream,
+    # so this is the only thing that will ever say so.
+    if AIS_SILENCE_WARN_SEC > 0:
+        threading.Thread(target=_watch_silence, daemon=True,
+                         name="ais-local-silence").start()
+
+
+AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "60"))
+
+_started_at: float | None = None
+
+
+def silence_report(now: float) -> str | None:
+    """A message if the local feed has gone quiet, else None.
+
+    Two distinct faults, and telling them apart is the point: 'AIS-catcher was never
+    started or cannot reach us' looks identical to 'it was running and stopped' unless you
+    say so. That distinction is what made the aisstream outage diagnosable.
+    """
+    if AIS_SILENCE_WARN_SEC <= 0 or _started_at is None:
+        return None
+    last = stats()["last_message_at"]
+    if last is None:
+        quiet = now - _started_at
+        if quiet >= AIS_SILENCE_WARN_SEC:
+            return (f"local AIS has never received a message, {quiet:.0f}s since start "
+                    f"-- is AIS-catcher running and pointed at "
+                    f"127.0.0.1:{AIS_LOCAL_UDP_PORT}?")
+        return None
+    quiet = now - last
+    if quiet >= AIS_SILENCE_WARN_SEC:
+        return f"local AIS went quiet {quiet:.0f}s ago after {stats()['messages']} messages"
+    return None
+
+
+def _watch_silence() -> None:
+    """Print silence_report()'s message, for as long as it keeps returning one.
+
+    Bare polling loop, deliberately untested directly (silence_report itself, the pure
+    decision, is what Task 5's tests cover) -- same shape as ais.py's `_watch_silence`.
+    """
+    interval = max(AIS_SILENCE_WARN_SEC, 5)
+    while True:
+        time.sleep(interval)
+        report = silence_report(time.time())
+        if report:
+            print(f"[AIS-local] {report}", flush=True)

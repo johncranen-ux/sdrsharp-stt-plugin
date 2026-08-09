@@ -141,6 +141,7 @@ from stt_proxy.conversations import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 from stt_proxy import ais  # noqa: E402
+from stt_proxy import ais_local  # noqa: E402
 from stt_proxy.ais import (  # noqa: E402
     AIS_CACHE_FILE,
     AIS_HINT_FILTER,
@@ -337,7 +338,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # rebinds these, so an imported name would freeze a snapshot (see ais.py).
                 with ais._cache_lock:
                     entries = list(ais._vessel_cache.values())
-                data = json.dumps(entries).encode("utf-8")
+                payload = {
+                    "vessels": entries,
+                    "providers": {
+                        "aisstream": {"last_message_at": ais._last_message_at},
+                        "local": ais_local.stats(),
+                    },
+                }
+                data = json.dumps(payload).encode("utf-8")
                 self.send_response(200)
                 self._send_live_headers("application/json", len(data), cors=True)
                 self.wfile.write(data)
@@ -512,6 +520,11 @@ if __name__ == "__main__":
         print("AIS feed: starting...", flush=True)
     else:
         print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
+
+    # Local AIS receiver: AIS-catcher's decoded JSON over loopback UDP, onto the same
+    # recorder aisstream uses (see stt_proxy/ais_local.py). Independent of the aisstream
+    # thread above -- either, both, or neither can be running.
+    ais_local.start()
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed

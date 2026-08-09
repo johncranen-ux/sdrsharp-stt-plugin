@@ -214,3 +214,38 @@ def test_the_listener_thread_survives_an_unexpected_handler_exception(local_stat
     finally:
         sock.close()
         thread.join(timeout=1.0)
+
+
+def test_silence_is_reported_when_nothing_has_ever_arrived(local_state, monkeypatch):
+    """AIS-catcher not running looks exactly like a quiet channel. Distinguishing 'never
+    received anything' from 'went quiet mid-stream' is what made the aisstream fault
+    diagnosable at all."""
+    monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 60)
+    monkeypatch.setattr(ais_local, "_started_at", 1000.0)
+    msg = ais_local.silence_report(now=1100.0)
+    assert msg is not None and "never" in msg.lower()
+
+
+def test_silence_is_reported_when_the_feed_stops_mid_stream(local_state, monkeypatch):
+    monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 60)
+    monkeypatch.setattr(ais_local, "_started_at", 1000.0)
+    ais_local.handle_datagram(json.dumps(POSITION).encode())
+    with ais_local._stats_lock:
+        ais_local._stats["last_message_at"] = 1010.0
+    msg = ais_local.silence_report(now=1100.0)
+    assert msg is not None and "never" not in msg.lower()
+
+
+def test_a_healthy_feed_reports_no_silence(local_state, monkeypatch):
+    monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 60)
+    monkeypatch.setattr(ais_local, "_started_at", 1000.0)
+    ais_local.handle_datagram(json.dumps(POSITION).encode())
+    with ais_local._stats_lock:
+        ais_local._stats["last_message_at"] = 1090.0
+    assert ais_local.silence_report(now=1100.0) is None
+
+
+def test_the_watchdog_is_disabled_at_zero(local_state, monkeypatch):
+    monkeypatch.setattr(ais_local, "AIS_SILENCE_WARN_SEC", 0)
+    monkeypatch.setattr(ais_local, "_started_at", 1000.0)
+    assert ais_local.silence_report(now=99999.0) is None
