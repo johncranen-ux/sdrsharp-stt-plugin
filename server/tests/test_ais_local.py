@@ -94,3 +94,77 @@ def test_a_class_b_position_is_accepted():
     f = ais_local.parse_message({"class": "AIS", "type": 18, "mmsi": 244010000,
                                  "lat": 52.0, "lon": 3.9, "speed": 4.2, "course": 90.0})
     assert f["mmsi"] == "244010000" and f["latitude"] == 52.0
+
+
+import json
+import socket
+
+from stt_proxy import ais  # noqa: E402
+
+
+@pytest.fixture
+def local_state(monkeypatch):
+    vessels = {}
+    monkeypatch.setattr(ais, "_vessel_cache", vessels)
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 0.0)   # filter off for transport tests
+    monkeypatch.setattr(ais_local, "_stats",
+                        {"messages": 0, "last_message_at": None,
+                         "rejected": 0, "errors": 0})
+    return vessels
+
+
+def test_a_datagram_reaches_the_cache(local_state):
+    ais_local.handle_datagram(json.dumps(STATIC).encode())
+    assert "MT.MITCHELL" in local_state
+
+
+def test_malformed_json_is_counted_and_survived(local_state):
+    """A garbled datagram must never kill the listener thread."""
+    assert ais_local.handle_datagram(b"{not json") is False
+    assert ais_local.stats()["errors"] == 1
+    assert local_state == {}
+
+
+def test_an_ignored_message_type_is_counted_as_rejected(local_state):
+    assert ais_local.handle_datagram(
+        json.dumps({"class": "AIS", "type": 4, "mmsi": 2442006}).encode()) is False
+    assert ais_local.stats()["rejected"] == 1
+
+
+def test_stats_track_messages_and_the_last_message_time(local_state):
+    assert ais_local.stats()["last_message_at"] is None
+    ais_local.handle_datagram(json.dumps(POSITION).encode())
+    assert ais_local.stats()["messages"] == 1
+    assert ais_local.stats()["last_message_at"] is not None
+
+
+def test_binding_a_port_someone_else_owns_fails_loudly():
+    """SO_REUSEADDR is deliberately NOT set. ThreadingHTTPServer sets it, and a second
+    proxy once bound alongside the first, silently took the port, and left the original
+    running as a zombie -- so "restart it" quietly did nothing. A listener that quietly
+    binds a port someone else owns is that bug in a new place."""
+    first = ais_local.bind(0)
+    port = first.getsockname()[1]
+    try:
+        with pytest.raises(OSError):
+            ais_local.bind(port)
+    finally:
+        first.close()
+
+
+def test_a_bound_socket_receives_over_loopback(local_state):
+    sock = ais_local.bind(0)
+    try:
+        port = sock.getsockname()[1]
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender.sendto(json.dumps(STATIC).encode(), ("127.0.0.1", port))
+        sender.close()
+        sock.settimeout(2.0)
+        raw, _ = sock.recvfrom(65535)
+        assert ais_local.handle_datagram(raw) is True
+        assert "MT.MITCHELL" in local_state
+    finally:
+        sock.close()

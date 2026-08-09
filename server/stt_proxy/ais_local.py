@@ -10,6 +10,14 @@ and emits decoded JSON with `-o 5`. This module is an adapter, not a decoder.
 
 from __future__ import annotations
 
+import json
+import os
+import socket
+import threading
+import time
+
+from . import ais
+
 # Message types that describe a VESSEL. Everything else is ignored, and two exclusions are
 # load-bearing: type 4 is a shore base station, and type 21 is an aid to navigation -- a
 # buoy, which carries a `name` and would otherwise enter the name-keyed cache and become a
@@ -62,3 +70,79 @@ def parse_message(msg: dict) -> dict | None:
                 fields[dst] = msg[src]
 
     return fields
+
+
+AIS_LOCAL_ENABLED  = os.environ.get("AIS_LOCAL_ENABLED", "on").strip().lower() != "off"
+AIS_LOCAL_UDP_PORT = int(os.environ.get("AIS_LOCAL_UDP_PORT", "10110"))
+
+# Owned by this module and read through it, never via an imported name: it is written by
+# the listener thread.
+_stats: dict = {"messages": 0, "last_message_at": None, "rejected": 0, "errors": 0}
+_stats_lock = threading.Lock()
+
+_MALFORMED_LOG_LIMIT = 5
+_malformed_logged = 0
+
+
+def stats() -> dict:
+    with _stats_lock:
+        return dict(_stats)
+
+
+def bind(port: int) -> socket.socket:
+    """A UDP socket on loopback, WITHOUT SO_REUSEADDR.
+
+    Deliberately not reusable. ThreadingHTTPServer sets allow_reuse_address, and a second
+    proxy once bound alongside the first on the same port, silently took it, and left the
+    original running as a zombie -- so restarting quietly did nothing. Binding a port
+    someone else owns must fail loudly here.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", port))
+    return sock
+
+
+def handle_datagram(raw: bytes) -> bool:
+    """Parse one datagram and record it. True if it produced a recorder call."""
+    global _malformed_logged
+    try:
+        msg = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        with _stats_lock:
+            _stats["errors"] += 1
+        if _malformed_logged < _MALFORMED_LOG_LIMIT:
+            _malformed_logged += 1
+            print(f"[AIS-local] malformed datagram: {exc}", flush=True)
+        return False
+
+    fields = parse_message(msg) if isinstance(msg, dict) else None
+    if fields is None:
+        with _stats_lock:
+            _stats["rejected"] += 1
+        return False
+
+    ais.record(fields, source="local")
+    with _stats_lock:
+        _stats["messages"] += 1
+        _stats["last_message_at"] = time.time()
+    return True
+
+
+def _listen(sock: socket.socket) -> None:
+    while True:
+        try:
+            raw, _ = sock.recvfrom(65535)
+        except OSError:
+            return
+        handle_datagram(raw)
+
+
+def start() -> None:
+    """Start the listener thread. Called once at proxy startup."""
+    if not AIS_LOCAL_ENABLED:
+        print("[AIS-local] disabled (AIS_LOCAL_ENABLED=off)", flush=True)
+        return
+    sock = bind(AIS_LOCAL_UDP_PORT)
+    threading.Thread(target=_listen, args=(sock,), daemon=True,
+                     name="ais-local").start()
+    print(f"[AIS-local] listening on 127.0.0.1:{AIS_LOCAL_UDP_PORT}", flush=True)
