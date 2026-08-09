@@ -510,7 +510,15 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
         entry = _pending.pop(mmsi)
         entry.pop("_touched", None)
         entry.setdefault("callsign", "")
-        for key in ("type", "imo", "length", "beam"):
+        # Every static field gets a key even when no observation ever carried a value for
+        # it, not just the four checked here: consumers (the /identified-vessels page, the
+        # tests) index these directly rather than through .get, the way the pre-record()
+        # code always populated them via a dict literal. draught and destination were
+        # missing from this list originally, which left the key absent entirely for a
+        # vessel whose first ShipStaticData had no draught or an all-padding destination --
+        # a KeyError on the direct index, caught by
+        # test_destination_padding_is_stripped[None cases].
+        for key in ("type", "imo", "length", "beam", "draught", "destination"):
             entry.setdefault(key, None)
         _vessel_cache[entry["name"].upper()] = entry
         _mmsi_index[mmsi] = entry
@@ -547,6 +555,11 @@ def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
 
 
 def _process_ais(msg: dict) -> None:
+    """aisstream adapter over record(). Kept thin on purpose: the merge lives in one place.
+
+    aisstream enriches PositionReport with MetaData.ShipName, which raw AIS does not --
+    that difference is exactly why the recorder holds an MMSI index.
+    """
     global _last_message_at
     try:
         msg_type = msg.get("MessageType", "")
@@ -554,70 +567,39 @@ def _process_ais(msg: dict) -> None:
             _report_unrecognised_frame(msg)
             return
 
-        # Before the MMSI guard below, deliberately: this records that the feed is ALIVE,
-        # which is true of any well-formed frame whether or not it names a usable vessel.
+        # Before the MMSI guard, deliberately: this records that the feed is ALIVE, which
+        # is true of any well-formed frame whether or not it names a usable vessel.
         _last_message_at = time.monotonic()
 
-        meta     = msg.get("MetaData", {})
-        mmsi     = str(meta.get("MMSI", "")).strip()
+        meta = msg.get("MetaData", {})
+        mmsi = str(meta.get("MMSI", "")).strip()
         if not mmsi:
             return
 
         if msg_type == "ShipStaticData":
-            ship     = msg.get("Message", {}).get("ShipStaticData", {})
-            name     = (ship.get("Name") or meta.get("ShipName") or "").strip()
-            callsign = ship.get("CallSign", "").strip()
-            if name:
-                dim    = ship.get("Dimension", {})
-                imo    = ship.get("ImoNumber")
-                stype  = ship.get("Type")
-                length = (dim.get("A", 0) + dim.get("B", 0)) or None
-                beam   = (dim.get("C", 0) + dim.get("D", 0)) or None
-                # Draught and destination are what CH01 actually asks about, on nearly every
-                # call: "what is your maximum draught" and where the ship is bound.
-                entry  = {"name": name, "callsign": callsign, "mmsi": mmsi,
-                          "type": stype, "imo": imo, "length": length, "beam": beam,
-                          "draught": ship.get("MaximumStaticDraught"),
-                          "destination": _clean_destination(ship.get("Destination", "")),
-                          "last_seen": _now()}
-                with _cache_lock:
-                    # MERGE, never replace. Static data carries no position, so assigning
-                    # this dict wholesale deleted whatever PositionReport had recorded --
-                    # and static messages repeat every ~6 minutes, so a vessel sitting in
-                    # the box lost its position over and over. Measured before this fix:
-                    # 25% of the vessels in the labelled conversations had no position at
-                    # all, which is the failure that made distance data unusable.
-                    existing = _vessel_cache.get(name.upper())
-                    if existing is not None:
-                        existing.update(entry)
-                        entry = existing
-                    else:
-                        _vessel_cache[name.upper()] = entry
-                    if callsign:
-                        _callsign_cache[callsign.upper()] = entry
+            ship = msg.get("Message", {}).get("ShipStaticData", {})
+            name = (ship.get("Name") or meta.get("ShipName") or "").strip()
+            if not name:
+                return
+            dim = ship.get("Dimension", {})
+            record({
+                "mmsi": mmsi, "name": name,
+                "callsign": ship.get("CallSign", "").strip(),
+                "type": ship.get("Type"), "imo": ship.get("ImoNumber"),
+                "length": (dim.get("A", 0) + dim.get("B", 0)) or None,
+                "beam": (dim.get("C", 0) + dim.get("D", 0)) or None,
+                "draught": ship.get("MaximumStaticDraught"),
+                "destination": _clean_destination(ship.get("Destination", "")),
+            }, source="aisstream")
 
         elif msg_type == "PositionReport":
-            name = meta.get("ShipName", "").strip()
-            if name:
-                key = name.upper()
-                pos = msg.get("Message", {}).get("PositionReport", {})
-                lat = pos.get("Latitude")
-                lon = pos.get("Longitude")
-                sog = pos.get("Sog")
-                cog = pos.get("Cog")
-                heading = pos.get("TrueHeading")
-                with _cache_lock:
-                    if key not in _vessel_cache:
-                        _vessel_cache[key] = {"name": name, "callsign": "", "mmsi": mmsi,
-                                              "type": None, "imo": None, "length": None, "beam": None,
-                                              "latitude": lat, "longitude": lon, "sog": sog,
-                                              "cog": cog, "heading": heading,
-                                              "last_seen": _now()}
-                    else:
-                        e = _vessel_cache[key]
-                        e["latitude"] = lat; e["longitude"] = lon
-                        e["sog"] = sog; e["cog"] = cog; e["heading"] = heading
-                        e["last_seen"] = _now()
+            pos = msg.get("Message", {}).get("PositionReport", {})
+            record({
+                "mmsi": mmsi, "name": meta.get("ShipName", "").strip(),
+                "latitude": pos.get("Latitude"), "longitude": pos.get("Longitude"),
+                "sog": pos.get("Sog"), "cog": pos.get("Cog"),
+                "heading": pos.get("TrueHeading"),
+            }, source="aisstream")
     except Exception as exc:
         print(f"[AIS] process error: {exc}", flush=True)
 
