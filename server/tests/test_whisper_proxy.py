@@ -2981,3 +2981,25 @@ def test_unknown_post_path_is_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(req, timeout=10)
     assert e.value.code == 404
+
+
+# ---------------------------------------------------------------------------
+# On-disk AIS cache persistence must track EITHER feed, not just aisstream.
+#
+# _periodic_save and atexit's _save_cache used to live entirely inside `if ais_key:`,
+# even though the startup code's own comment already said either, both, or neither feed
+# can be running: an operator who drops the dead aisstream key and runs AIS-catcher alone
+# filled the cache with fresh local positions that were never once written to disk, so a
+# restart silently reverted identification to whatever snapshot existed before local AIS
+# was ever turned on.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ais_key,local_enabled,expected", [
+    ("secret", True, True),
+    ("secret", False, True),
+    ("", True, True),
+    ("", False, False),
+])
+def test_ais_persistence_tracks_either_feed(monkeypatch, ais_key, local_enabled, expected):
+    monkeypatch.setattr(ais_local, "AIS_LOCAL_ENABLED", local_enabled)
+    assert proxy._ais_persistence_enabled(ais_key) is expected

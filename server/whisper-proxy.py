@@ -486,6 +486,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pass  # suppress per-request access log noise
 
 
+def _ais_persistence_enabled(ais_key: str) -> bool:
+    """Whether server/ais_cache.json should be periodically saved and saved at exit.
+
+    Must track EITHER feed, not just aisstream. Persistence used to live entirely inside
+    `if ais_key:`, even though the call site's own comment already said either, both, or
+    neither of the two feeds can be running: an operator who drops the dead aisstream key
+    and runs AIS-catcher alone would fill the cache with fresh local positions that were
+    never once written to disk, so a restart silently reverted identification to whatever
+    snapshot existed before local AIS was ever turned on.
+    """
+    return bool(ais_key) or ais_local.AIS_LOCAL_ENABLED
+
+
 if __name__ == "__main__":
     if STT_BACKEND not in ("groq", "whisper_cpp"):
         raise SystemExit(
@@ -515,8 +528,6 @@ if __name__ == "__main__":
     ais_key = os.environ.get("AISSTREAM_API_KEY", "")
     if ais_key:
         threading.Thread(target=_ais_thread, args=(ais_key,), daemon=True).start()
-        threading.Thread(target=_periodic_save, daemon=True).start()
-        atexit.register(_save_cache)
         print("AIS feed: starting...", flush=True)
     else:
         print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
@@ -525,6 +536,11 @@ if __name__ == "__main__":
     # recorder aisstream uses (see stt_proxy/ais_local.py). Independent of the aisstream
     # thread above -- either, both, or neither can be running.
     ais_local.start()
+
+    # Persistence tracks EITHER feed, not just aisstream -- see _ais_persistence_enabled.
+    if _ais_persistence_enabled(ais_key):
+        threading.Thread(target=_periodic_save, daemon=True).start()
+        atexit.register(_save_cache)
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed
