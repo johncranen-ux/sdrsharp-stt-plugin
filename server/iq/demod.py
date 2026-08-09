@@ -34,6 +34,19 @@ DEFAULT_AUDIO_RATE = 37_500.0   # what SDR# actually feeds the plugin on this se
 _FIR_TAPS = 511
 _FIR_WINDOW = "blackmanharris"
 
+# RF channel power measurement.
+#
+# 1 ms frames. Chosen from below by the squelch, not from above by the segmenter: the
+# squelch's attack is 5 ms and the whole point of that arm is to measure how much of a
+# transmission's opening the gate eats, so a frame coarser than a few ms would quantise the
+# damage being measured. The segmenter wants ~20 ms and just averages these down. An hour of
+# track is 3.6M float64 (29 MB), which is affordable where the IQ itself (14.4 GB) is not.
+_POWER_FRAME_MS = 1.0
+
+# Floor for the log conversion, so a frame of exact digital silence is a very negative
+# number rather than -inf. Well below any real receiver noise floor; not a tuned value.
+_POWER_FLOOR_DB = -300.0
+
 
 class Demodulator:
     """Stateful NFM demodulator, so a capture can be processed in blocks.
@@ -75,6 +88,19 @@ class Demodulator:
         g = gcd(int(audio_rate), int(iq_rate))
         self._up, self._down = int(audio_rate) // g, int(iq_rate) // g
 
+        # RF channel power, accumulated over the whole capture on the absolute input
+        # timeline -- deliberately NOT returned from process(). The emitted audio lags its
+        # input by the resampler's lookahead reserve, so a per-call return value would make
+        # the caller responsible for realigning power against audio; frame i here always
+        # means t = i / power_frame_rate from the start of the recording, whatever the
+        # blocking. Measured after the channel filter and before the discriminator, which is
+        # where a real squelch measures it and the last point at which amplitude still
+        # exists.
+        self._pow_frame = max(1, int(round(iq_rate * _POWER_FRAME_MS * 1e-3)))
+        self.power_frame_rate = iq_rate / self._pow_frame
+        self._pow_carry = np.zeros(0)                 # tail of a not-yet-complete frame
+        self._pow_parts: list[np.ndarray] = []
+
         self._n = 0                                   # samples mixed so far, for phase
         self._prev_iq = np.zeros(0, dtype=np.complex128)
         # resample_poly has no zi/streaming state of its own -- see process() step 5 for why
@@ -103,6 +129,11 @@ class Demodulator:
         #    output exactly (max abs diff 0.0) -- the measured fact this streaming design
         #    relies on for test_streaming_matches_one_shot.
         block, self._zi_ch = signal.lfilter(self._taps, 1.0, block, zi=self._zi_ch)
+
+        # 2a. Channel power, while the amplitude still exists. The next line destroys it:
+        #     np.angle() keeps only phase, which is why an FM discriminator is exactly as
+        #     loud with no carrier as with one.
+        self._accumulate_power(block)
 
         # 3. FM discriminator: instantaneous frequency is the phase step between samples.
         #    The previous block's last sample supplies the first difference.
@@ -145,10 +176,45 @@ class Demodulator:
         self._reserve = self._reserve[emit:]
         return np.asarray(out[front:keep], dtype=np.float64)
 
+    def _accumulate_power(self, filtered: np.ndarray) -> None:
+        """Mean-square the channel-filtered IQ into fixed frames, carrying the remainder.
+
+        The carry is what makes the track independent of block size: a block boundary
+        falling mid-frame must not start a short frame, or every frame after it would shift
+        and the times read off the track would drift against the audio.
+        """
+        squared = np.abs(filtered) ** 2
+        if len(self._pow_carry):
+            squared = np.concatenate([self._pow_carry, squared])
+        n_frames = len(squared) // self._pow_frame
+        if n_frames:
+            whole = squared[:n_frames * self._pow_frame].reshape(n_frames, self._pow_frame)
+            self._pow_parts.append(whole.mean(axis=1))
+        self._pow_carry = squared[n_frames * self._pow_frame:]
+
+    @property
+    def power_db(self) -> np.ndarray:
+        """The whole capture's channel power in dB, one value per 1/power_frame_rate second.
+
+        Recomputed on each access (a concatenate plus a log over ~3.6M values per hour), so
+        read it once and keep it rather than indexing into it in a loop.
+        """
+        if not self._pow_parts:
+            return np.zeros(0)
+        linear = np.concatenate(self._pow_parts)
+        return 10.0 * np.log10(np.maximum(linear, 10 ** (_POWER_FLOOR_DB / 10.0)))
+
     def flush(self) -> np.ndarray:
         """Whatever is left in the reserve buffer, at the end of the capture. No lookahead
         margin needed here: the capture really does end, so there is no future data whose
         edge accuracy the margin would have protected."""
+        # The final partial frame, so the power track spans the whole recording rather than
+        # stopping up to one frame short of it. Done before the early return below, which is
+        # about the audio reserve and says nothing about the power carry.
+        if len(self._pow_carry):
+            self._pow_parts.append(np.array([self._pow_carry.mean()]))
+            self._pow_carry = np.zeros(0)
+
         if len(self._reserve) == 0:
             return np.zeros(0)
         chunk = np.concatenate([self._history, self._reserve])
@@ -159,44 +225,68 @@ class Demodulator:
         return np.asarray(out[front:], dtype=np.float64)
 
 
-# Floor for the log-domain envelope, in dB. Only needs to sit well below any threshold_db
-# a caller would pass (and below float64 log(0) blowing up); -240dB is arbitrary margin,
-# not a tuned value.
-_SQUELCH_FLOOR_DB = -240.0
+def _expand_gate(open_frames: np.ndarray, audio: np.ndarray,
+                 power_frame_rate: float, audio_rate: float) -> np.ndarray:
+    """Apply a frame-rate boolean gate to audio-rate samples, by zeroing closed runs.
+
+    Deliberately not `audio * gate[indices]`: an hour of audio is 135M samples, so both the
+    index array and the expanded mask would be ~1 GB each on top of the audio itself. The
+    gate only changes state a few thousand times an hour, so walking its runs costs nothing
+    and allocates one copy.
+    """
+    out = audio.copy()
+    closed = ~open_frames
+    if not closed.any():
+        return out
+
+    edges = np.diff(np.concatenate([[0], closed.view(np.int8), [0]]))
+    scale = audio_rate / power_frame_rate
+    for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        i0 = min(len(out), int(a * scale))
+        # A closed run reaching the last frame extends to the end of the audio: the audio
+        # can outrun the power track by a fraction of a frame after resampling, and that
+        # tail must not come back un-gated.
+        i1 = len(out) if b >= len(closed) else min(len(out), int(b * scale))
+        out[i0:i1] = 0.0
+    return out
 
 
-def apply_squelch(audio: np.ndarray, rate: float, threshold_db: float | None,
+def apply_squelch(audio: np.ndarray, audio_rate: float, threshold_db: float | None,
+                  power_db: np.ndarray, power_frame_rate: float,
                   attack_ms: float = 5.0, release_ms: float = 100.0) -> np.ndarray:
-    """Gate audio below `threshold_db`, or return it untouched when squelch is off.
+    """Gate audio by RF CHANNEL POWER, or return it untouched when squelch is off.
 
-    Modelled on what a receiver squelch does to the audio the plugin sees, not on SDR#'s
-    internal implementation: an envelope follower with a fast attack and slow release. The
-    attack is what clips the opening syllables of a transmission, which is the damage this
-    arm exists to quantify -- the vessel name is almost always in the first words.
+    `threshold_db` is a level on `power_db` (Demodulator.power_db), not on the audio. That
+    is the whole correction: the first version of this function ran its envelope follower
+    over |audio|, and an FM discriminator emits full-scale hiss when there is no carrier, so
+    the gate stayed open through every second of dead air in the capture. Squelch exists
+    precisely because carrier presence is invisible in demodulated audio -- it lives in RF
+    amplitude, which the discriminator throws away. Same blind spot, same fix, as
+    segments.detect_segments.
 
-    threshold_db=None means squelch disabled, and must return the input unchanged so the
-    two arms differ by the gate alone.
+    Express the threshold relative to the capture's measured noise floor
+    (segments.noise_floor_db), the way a squelch knob behaves. An absolute value would have
+    to be retuned whenever RF gain changed.
 
-    The envelope is tracked in the dB domain, not linear. A linear |x| follower (the first
-    version tried here) makes attack_ms nearly meaningless for a squelch: the time to cross
-    threshold_db depends on the *linear gap* between the threshold and the signal, not on
-    attack_ms alone, so a threshold set far below the transmission's level (the realistic
-    case -- -40dB threshold under a -6dBFS signal, per test_squelch_clips_the_start_of_a_
-    transmission) is crossed in a handful of samples regardless of attack_ms, and the test
-    that exists to detect the very damage this arm is built to measure failed: only 7 of 750
-    samples in the first 20ms came out gated. Tracking level in dB makes the one-pole step
-    response's rise, in dB, independent of how far below the signal the threshold sits --
-    same physics as an analogue compressor's log-domain envelope follower -- so attack_ms
-    means what it says regardless of the threshold_db/signal-level gap. Verified against all
-    four squelch tests before switching from the linear version.
+    threshold_db=None means squelch disabled, and returns the input unchanged so the two
+    arms differ by the gate alone.
 
-    Not vectorised: the attack/release coefficient at each sample depends on comparing the
-    input to the *previous* envelope value, i.e. on the recurrence's own not-yet-computed
-    output, so scipy.signal.lfilter (fixed coefficients) cannot express it and there is no
-    reordering that lets numpy compute it without the sample-by-sample scan. Measured at
-    ~40s per hour of 37.5kHz audio -- the same order of magnitude as demodulate() itself
-    (~100s/hour for this harness's FIR channel filter), so judged acceptable for an offline
-    harness rather than trading correctness for speed. See task-4-report.md.
+    Fast attack, slow release, as any receiver squelch has. The attack is what clips the
+    opening syllables of a transmission, which is the damage this arm exists to quantify --
+    the vessel name is almost always in the first words.
+
+    The envelope is tracked in the dB domain. A linear follower (the first version) makes
+    attack_ms nearly meaningless: time-to-threshold then depends on the linear gap between
+    threshold and signal rather than on attack_ms, so a threshold well below the
+    transmission's level -- the realistic case -- is crossed in a handful of frames whatever
+    attack_ms says, and the test for the very damage this arm measures came out passing with
+    only 7 of 750 samples gated. In dB the one-pole step response's rise is independent of
+    that gap, same physics as an analogue compressor's log-domain follower.
+
+    Not vectorised: each frame's attack/release choice depends on the previous frame's
+    envelope, i.e. on the recurrence's own not-yet-computed output, so lfilter's fixed
+    coefficients cannot express it. It now runs over the 1 kHz power track rather than
+    37.5 kHz audio, which is ~4 s per captured hour instead of ~40 s.
     """
     if threshold_db is None:
         return audio
@@ -204,21 +294,23 @@ def apply_squelch(audio: np.ndarray, rate: float, threshold_db: float | None,
     if len(audio) == 0:
         return audio
 
-    # Envelope: one-pole follower over 20*log10(|x|), floored so silence doesn't log(0).
-    # Separate attack and release constants, as any squelch/compressor envelope needs.
-    attack = np.exp(-1.0 / max(1.0, rate * attack_ms * 1e-3))
-    release = np.exp(-1.0 / max(1.0, rate * release_ms * 1e-3))
-    mag = np.abs(audio)
-    floor_lin = 10 ** (_SQUELCH_FLOOR_DB / 20.0)
-    mag_db = 20.0 * np.log10(np.maximum(mag, floor_lin))
-    env_db = np.empty_like(mag_db)
-    level = _SQUELCH_FLOOR_DB
-    for i, m in enumerate(mag_db):
-        coeff = attack if m > level else release
-        level = coeff * level + (1.0 - coeff) * m
+    power_db = np.asarray(power_db, dtype=np.float64)
+    if len(power_db) == 0:
+        raise ValueError("squelch needs a channel-power track; pass Demodulator.power_db")
+
+    attack = np.exp(-1.0 / max(1.0, power_frame_rate * attack_ms * 1e-3))
+    release = np.exp(-1.0 / max(1.0, power_frame_rate * release_ms * 1e-3))
+    env_db = np.empty_like(power_db)
+    # Start at the capture's opening level rather than at -inf: the receiver has been on and
+    # its follower settled long before the recording began, so a cold start would gate the
+    # first moments of the file for a reason that has nothing to do with the squelch.
+    level = float(power_db[0])
+    for i, p in enumerate(power_db):
+        coeff = attack if p > level else release
+        level = coeff * level + (1.0 - coeff) * p
         env_db[i] = level
 
-    return audio * (env_db >= threshold_db)
+    return _expand_gate(env_db >= threshold_db, audio, power_frame_rate, audio_rate)
 
 
 def demodulate(iq: np.ndarray, iq_rate: float, bandwidth_hz: float,

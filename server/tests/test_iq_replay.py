@@ -17,7 +17,7 @@ sys.path.insert(0, str(_SERVER_DIR))
 
 import bench  # noqa: E402
 import iq_replay  # noqa: E402
-from iq import baseband  # noqa: E402
+from iq import baseband, segments  # noqa: E402
 
 IQ_RATE = 250_000.0
 
@@ -28,17 +28,47 @@ def _speechlike(seconds, rate=8000.0):
     return (np.sin(2 * np.pi * 400 * t) + 0.5 * np.sin(2 * np.pi * 1800 * t)) * 0.5
 
 
+_NOISE_DB = -20.0            # receiver noise floor, ~32 dB under a carrier in-channel
+_TALK_S = 1.2
+_CAPTURE_S = 0.5 + _TALK_S + 1.5 + _TALK_S + 0.5
+
+
 def _two_transmissions():
-    gap = np.zeros(int(1.5 * 8000))
-    audio = np.concatenate([np.zeros(4000), _speechlike(1.2), gap, _speechlike(1.2), np.zeros(4000)])
-    # deviation_hz=3000 (the brief's original value) measures at ~0.009 RMS after the
-    # demodulator's default 750us de-emphasis -- below detect_segments' default 0.02 RMS
-    # threshold, so nothing is ever detected as a transmission and every test using this
-    # fixture fails the same way regardless of what iq_replay.py does. 6000 clears the
-    # threshold with margin and reliably yields the intended two segments (checked over
-    # 6000-20000 Hz); it's still well inside the demodulator's Nyquist for both bandwidths
-    # under test here (12.5/25 kHz).
-    return baseband.synth_nfm(audio, 8000.0, IQ_RATE, deviation_hz=6000.0)
+    """Two keyed transmissions with DEAD AIR between them, which is what a real capture is.
+
+    The previous version of this fixture ran synth_nfm across the whole span and put
+    silence in the modulating audio for the gap -- so the "gap" was a carrier at full
+    strength, merely unmodulated. Nothing here was ever off the air. That is why the
+    audio-RMS segmenter looked fine on synthetic input and then cut 57.6 of 60.1 minutes of
+    a real hour into clips: the case it got wrong could not be expressed.
+    """
+    talk = lambda: baseband.synth_nfm(_speechlike(_TALK_S), 8000.0, IQ_RATE,
+                                      deviation_hz=5000.0, noise_db=_NOISE_DB)
+    return np.concatenate([
+        baseband.synth_noise(0.5, IQ_RATE, _NOISE_DB, seed=1),
+        talk(),
+        baseband.synth_noise(1.5, IQ_RATE, _NOISE_DB, seed=2),
+        talk(),
+        baseband.synth_noise(0.5, IQ_RATE, _NOISE_DB, seed=3),
+    ])
+
+
+def test_only_the_transmissions_become_clips(tmp_path):
+    """The end-to-end form of the bug this harness shipped with. On the real 2026-08-08
+    capture the audio-RMS segmenter produced 42 clips covering 57.6 of 60.1 minutes --
+    including single "clips" of 746, 451 and 378 seconds -- against an RF-measured truth of
+    23 transmissions at 4.8% duty. Here: 2.4 s of carrier in a 4.9 s capture."""
+    iq = _two_transmissions()
+    written = iq_replay.replay_arm(iq, IQ_RATE, tmp_path, bandwidth_hz=16_000.0,
+                                   offset_hz=0.0, squelch_over_floor_db=None, segments=None)
+    assert written == 2, f"{written} clips for two transmissions separated by dead air"
+
+    cuts = segments.read_segments(tmp_path / "segments.txt")
+    covered = sum(b - a for a, b in cuts)
+    # 2.4 s of carrier plus 300 ms of pad at each end of each segment = ~3.6 s of 4.9.
+    assert covered < 0.8 * _CAPTURE_S, (
+        f"segments cover {covered:.1f}s of a {_CAPTURE_S:.1f}s capture that is only "
+        f"{2 * _TALK_S:.1f}s carrier -- dead air is being cut into clips")
 
 
 def test_a_clip_is_written_in_the_format_bench_expects(tmp_path):
@@ -51,7 +81,7 @@ def test_bench_discovers_what_the_harness_writes(tmp_path):
     """The integration that matters: the existing scorer must find these clips unchanged."""
     iq = _two_transmissions()
     segs = iq_replay.replay_arm(iq, IQ_RATE, tmp_path, bandwidth_hz=16_000.0,
-                                offset_hz=0.0, squelch_db=None, segments=None)
+                                offset_hz=0.0, squelch_over_floor_db=None, segments=None)
     assert segs >= 1
     found = bench.discover_clips(tmp_path)
     assert len(found) == segs
@@ -67,7 +97,7 @@ def test_every_arm_produces_the_same_clip_ids(tmp_path):
     for bw, name in ((12_500.0, "narrow"), (25_000.0, "wide")):
         out = tmp_path / name
         iq_replay.replay_arm(iq, IQ_RATE, out, bandwidth_hz=bw, offset_hz=0.0,
-                             squelch_db=None, segments=shared)
+                             squelch_over_floor_db=None, segments=shared)
         ids.append([cid for cid, _ in bench.discover_clips(out)])
 
     assert ids[0] == ids[1], "clip ids must be identical across arms or pairing is invalid"
@@ -83,7 +113,7 @@ def test_arms_actually_differ_in_content(tmp_path):
     for bw, name in ((12_500.0, "narrow"), (25_000.0, "wide")):
         out = tmp_path / name
         iq_replay.replay_arm(iq, IQ_RATE, out, bandwidth_hz=bw, offset_hz=0.0,
-                             squelch_db=None, segments=shared)
+                             squelch_over_floor_db=None, segments=shared)
         with wave.open(str(out / "0000_sent.wav"), "rb") as w:
             audio[name] = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
 
@@ -113,7 +143,7 @@ def test_a_segment_past_every_arms_end_still_gets_a_valid_indexed_clip(tmp_path)
     segments_with_tail = shared + [(100.0, 101.0)]  # far past a ~5s synthetic capture
 
     written = iq_replay.replay_arm(iq, IQ_RATE, tmp_path, bandwidth_hz=25_000.0,
-                                   offset_hz=0.0, squelch_db=None,
+                                   offset_hz=0.0, squelch_over_floor_db=None,
                                    segments=segments_with_tail)
     assert written == len(segments_with_tail)
 

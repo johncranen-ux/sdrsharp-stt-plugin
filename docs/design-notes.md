@@ -1356,6 +1356,61 @@ protect. It writes a short burst of silence instead, at the same index.
 Cannot be measured this way: RF gain (applied before the ADC, so baked into the recording)
 and the SDR# audio-NR plugins (downstream of the tap point).
 
+### "Is anyone transmitting?" is an RF question, not an audio one (2026-08-09)
+
+The first version of this harness answered it in the audio domain and was wrong in a way
+that looked healthy. On the real hour capture it cut **57.6 of 60.1 minutes into 42 clips**,
+three of them over six minutes long, against an independently measured truth of **23
+transmissions at 4.8% duty**.
+
+An FM discriminator computes `angle(x[n] * conj(x[n-1]))` — phase only. With no carrier the
+phase of successive noise samples is uniformly random, so the discriminator emits
+**full-scale hiss**. Measured on synthetic IQ, dead air comes out of it **1.44x louder than
+speech**. Both `detect_segments` and `apply_squelch` gated on demodulated-audio amplitude,
+where noise and speech are equally loud, so **no threshold value could have worked** — the
+measurement was in the wrong domain, and tuning would only have moved which minutes were
+wrong. `plugin_dsp.normalize` then peak-normalised every clip to −1 dBFS, so the RMS of the
+garbage looked perfectly healthy (median 0.191).
+
+This is what a squelch is for, and the fix is what a squelch does: `Demodulator` now
+measures mean-square **channel power on the IQ, after the channel filter and before the
+discriminator** — the last point at which amplitude still exists — into 1 ms frames on the
+absolute capture timeline (`Demodulator.power_db`, 29 MB/hour). Segmentation and the squelch
+both gate on that track. The threshold is the capture's own noise floor (20th percentile)
+plus a margin, so it is independent of RF gain.
+
+**Re-measured on the real hour capture, through the shipped code path:**
+
+| | audio RMS (was) | RF channel power (now) | independent truth |
+|---|---|---|---|
+| clips | 42 | 39 | 23 transmissions¹ |
+| covered | 57.6 of 60.1 min | **3.3 of 60.1 min** | ~3.3 min |
+| duty | 95.8% | **4.83%** | **4.8%** |
+| longest clip | 746 s | 19.9 s | — |
+
+¹ The survey script bridges gaps under 3 s, so it merges consecutive overs into one
+"transmission"; `detect_segments` uses a 600 ms hangover and keeps them separate, which is
+closer to how production clips are cut. 39 vs 23 is that setting, not a disagreement — the
+duty cycle, which does not depend on it, agrees to 0.03 percentage points, and the two
+numbers come from completely different code (the survey takes FFT bin power at the channel
+offset, with no channel filter and no demodulator at all).
+
+The floor-to-peak gap on real data is ~19 dB (floor −38.9, strongest transmission −20.0),
+not the ~32 dB a synthetic fixture shows — worth knowing before trusting a margin chosen
+against synthetic input.
+
+**Why no test caught it:** every fixture was built with `synth_nfm`, which always emits a
+carrier. "No transmission" — the state the radio is in for ~95% of a captured hour — was a
+case the test suite could not express. `baseband.synth_noise` now exists solely to express
+it, and `test_dead_air_is_not_a_segment` is the regression. The lesson generalises past this
+bug: a synthesiser that can only produce the working case makes a whole class of failure
+untestable, and the coverage number will not show it.
+
+The frame length is 1 ms because the **squelch** needs it, not the segmenter: the squelch
+arm exists to quantify how much of a transmission's opening the gate eats, so a frame
+coarser than a few ms would quantise away the thing being measured. The segmenter wants
+~20 ms and just averages down.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`

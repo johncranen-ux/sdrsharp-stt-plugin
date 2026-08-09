@@ -144,3 +144,36 @@ def test_synth_nfm_has_constant_envelope():
     iq = baseband.synth_nfm(audio, 8000.0, rate, deviation_hz=3000.0)
     env = np.abs(iq)
     assert np.std(env) < 1e-9
+
+
+# The gap that let the segmentation bug ship. synth_nfm ALWAYS emits a carrier, so
+# "no transmission" -- the state the radio is actually in for ~95% of a captured hour --
+# did not exist in any fixture, and no synthetic test could have caught a segmenter that
+# calls dead air speech. These two build that missing case.
+
+
+def test_synth_noise_sits_at_the_requested_level():
+    """The level is what a threshold gets compared against, so it has to mean something."""
+    noise = baseband.synth_noise(0.2, 250_000.0, level_db=-30.0)
+    measured_db = 10 * np.log10(np.mean(np.abs(noise) ** 2))
+    assert measured_db == pytest.approx(-30.0, abs=0.5)
+
+
+def test_synth_noise_has_no_carrier():
+    """The defining property: power is spread across the band instead of concentrated in
+    one bin. Asserted against synth_nfm on the same length, so the contrast is the claim."""
+    rate = 250_000.0
+    noise = baseband.synth_noise(8192 / rate, rate, level_db=-30.0)
+    carrier = baseband.synth_nfm(np.zeros(8192), rate, rate, deviation_hz=0.0)
+
+    def peak_over_mean(iq):
+        # Mean, not median: a pure carrier puts every other bin at exactly zero, so a
+        # median denominator is 0.0 and the ratio is a divide-by-zero warning.
+        power = np.abs(np.fft.fft(iq)) ** 2
+        return float(np.max(power) / np.mean(power))
+
+    # A pure carrier concentrates all N bins' worth of power into one, so peak/mean = N
+    # (8192 here). Noise spreads it, and the largest of N exponential bins sits near ln(N),
+    # about 9. Two orders of magnitude apart, so these bounds are not finely tuned.
+    assert peak_over_mean(noise) < 100.0
+    assert peak_over_mean(carrier) > 1000.0

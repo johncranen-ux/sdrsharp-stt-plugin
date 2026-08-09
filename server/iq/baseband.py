@@ -177,3 +177,25 @@ def synth_nfm(audio: np.ndarray, audio_rate: float, iq_rate: float,
         rng = np.random.default_rng(0xC0FFEE)   # fixed: a flaky DSP test is worthless
         iq = iq + amp * (rng.normal(size=n_out) + 1j * rng.normal(size=n_out)) / np.sqrt(2)
     return iq
+
+
+def synth_noise(seconds: float, iq_rate: float, level_db: float = -30.0,
+                seed: int = 0xDEADBEE) -> np.ndarray:
+    """Receiver noise with NO carrier in it, for tests.
+
+    This exists because its absence caused a bug. Every fixture in this harness was built
+    with synth_nfm, which always emits a carrier -- so "no transmission", the state the
+    radio is in for ~95% of a captured hour, was a case no synthetic test could construct.
+    A segmenter that treats dead air as speech passed every test and then cut 57.6 of 60.1
+    minutes of a real capture into "clips".
+
+    `level_db` is a POWER level, matching synth_nfm's noise_db: 10*log10(mean|x|^2). The
+    seed differs from synth_nfm's so that concatenating the two does not join a block of
+    noise to a bit-identical copy of itself.
+    """
+    n = int(seconds * iq_rate)
+    if n <= 0:
+        return np.zeros(0, dtype=np.complex128)
+    amp = 10 ** (level_db / 20.0)
+    rng = np.random.default_rng(seed)
+    return amp * (rng.normal(size=n) + 1j * rng.normal(size=n)) / np.sqrt(2)

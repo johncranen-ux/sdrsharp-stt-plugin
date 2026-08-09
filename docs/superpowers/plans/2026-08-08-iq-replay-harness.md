@@ -1,5 +1,16 @@
 # IQ Replay Harness Implementation Plan
 
+> **HISTORICAL RECORD — DO NOT IMPLEMENT AS WRITTEN.** This plan was executed on 2026-08-09
+> and its Task 4 (`apply_squelch`) and Task 5 (`detect_segments`) specify the wrong thing:
+> both gate on **demodulated-audio amplitude**. An FM discriminator emits full-scale hiss
+> when there is no carrier, so dead air and speech are equally loud in that domain and no
+> threshold value can separate them. Running it segmented 57.6 of 60.1 minutes of the real
+> capture into 42 "clips" against a truth of 23 transmissions. Both now gate on RF channel
+> power measured on the IQ; see `docs/design-notes.md`, *"Is anyone transmitting?" is an RF
+> question, not an audio one*. The signatures below (`detect_segments(audio, rate, …)`,
+> `apply_squelch(audio, rate, threshold_db, …)`, `replay_arm(…, squelch_db, …)`) are all
+> superseded. Kept unedited as the record of what was planned and what the plan got wrong.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replay one raw-IQ recording through different demodulator settings so the receiver's channel bandwidth and squelch can be measured against transcription accuracy, paired, from a single set of hand-verified references.
