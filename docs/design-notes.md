@@ -1412,6 +1412,63 @@ protect. It writes a short burst of silence instead, at the same index.
 Cannot be measured this way: RF gain (applied before the ADC, so baked into the recording)
 and the SDR# audio-NR plugins (downstream of the tap point).
 
+### What the harness actually found: both receiver hypotheses are dead (2026-08-09)
+
+Run against a 61.8 min daytime capture — 97 transmissions, 9.8 min of speech, 15.8% duty.
+
+**Bandwidth: null, and this one does not rest on WER.** A 12.5 kHz channel filter retains a
+**median 96.56%** of in-channel power on the real capture (worst 94.81%). Carson's rule
+predicted ~16 kHz occupancy, but Carson is a conservative *bound*, not a description of the
+signal — independent-phase speech components rarely add constructively enough to drive full
+deviation. There is nothing there to recover.
+
+**Squelch: no detectable difference, on a test with poor power.** Squelch-off vs squelch-on at
+floor+6 dB, scored on 29–30 hand-verified clips, two independent transcription runs:
+
+| | off | on | delta | 95% CI |
+|---|---|---|---|---|
+| fresh run | 21.2% | 25.8% | +4.6 pts | [−2.8, +13.8] |
+| draft run | 21.3% | 27.1% | +5.8 pts | [−2.0, +16.1] |
+
+The CI spans zero both times. Note what that does and does not license: it rules out
+squelch-on being *much* better, but could not have detected a penalty smaller than ~14 points.
+"No significant difference" is not "no difference". The ~1.2-point gap between the two runs is
+decoder non-determinism plus one clip lost to a 429 — the decoder has its own noise floor,
+like the resolver.
+
+**The hypothesis was refuted on mechanism, not just on WER.** "Squelch clips the opening
+syllables where the vessel name is" does not reproduce: across 97 real transmissions the gate
+opens ~1 ms after carrier-up, always before the first word, and **0 of 97** clips had it close
+mid-carrier. The 08-08 figure of "53% of the first 20 ms" came from synthetic *abrupt-onset*
+audio where speech starts on the same sample as the carrier. Real operators key up, then speak.
+
+What the arms actually differ by is the segmenter's 300 ms pad, which starts each clip
+*before* the carrier — so in the squelch-off arm that region is discriminator hiss at **7.45x
+the RMS of the speech that follows**.
+
+**Squelch cannot be switched off regardless**, and this outranks the WER result.
+`ReadSquelchOpen()` returns `null` when squelch is disabled and `VoiceActivityDetector` falls
+back to an audio-RMS gate — which ends up **stuck wide open**: `NoiseFloor` starts at 0 and is
+only updated by `if (!active) UpdateNoiseFloor(rms)`, so once hiss clears the 0.010 absolute
+floor no frame is ever inactive, the floor never calibrates, `endOfSpeech` never fires, and
+only `MaxSpeechSec` flushes — a 30 s chunk of pure hiss every 30 s, ~120 hallucinated STT
+requests an hour. Verified live by the operator: toggling squelch off and back on emits a
+chunk transcribed as "Muaah".
+
+This is the same defect as the segmentation bug above, and it **cannot be fixed the same way**:
+the plugin is an `IRealProcessor` on demodulated audio and never sees the RF, so it has no
+channel-power signal to gate on. **SDR#'s squelch is that gate.** The fallback should refuse
+loudly rather than stream noise; making the floor calibrate would only swap stuck-open for
+stuck-shut, because the audio domain does not contain the information.
+
+**Neighbouring channels are empty**, so 0.25 MSPS stays. Coast-station channels sit 50 kHz
+apart and the capture spans centre ±125 kHz, so Ch 02–05 are already recorded. Measured over
+the hour: Ch 01 has a 14.5 dB peak-to-floor gap at 14.1% duty; **Ch 02, 03, 04 and 05 all show
+1.0–1.6 dB and 0.0% duty.** No traffic to recover, so there is no case for a higher rate or a
+re-centre. (A vessel *was* directed to "channel zero two, pilot Maas" during the hour and Ch 02
+still shows nothing — following that traffic would need the ship side at 156.100 MHz, 4.6 MHz
+away and out of reach at any RTL sample rate.)
+
 ### "Is anyone transmitting?" is an RF question, not an audio one (2026-08-09)
 
 The first version of this harness answered it in the audio domain and was wrong in a way

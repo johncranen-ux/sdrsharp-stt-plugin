@@ -88,12 +88,22 @@ jobs:
         # transcript per clip, and the cache stores every model reply raw. The gate is a list
         # of known-bad names rather than a content scan, so it must grow whenever a new kind
         # of output starts holding transcripts.
+        #
+        # Grown 2026-08-09 for the IQ replay harness: draft-*/score-* are bench.py runs over
+        # replayed arms (score-* additionally embeds the hand-verified reference for every
+        # clip), and the bench-identify-* families carry real vessel names and MMSIs.
         run: |
           bad=$(git ls-files \
                   'server/references*.txt' \
                   'server/bench-results*.json' \
                   'server/bench-correct-results*.json' \
-                  'server/bench-correct-cache/*' || true)
+                  'server/bench-correct-cache/*' \
+                  'server/bench-identify-results*.json' \
+                  'server/bench-identify-repeats*.json' \
+                  'server/draft-*.json' \
+                  'server/draft-*.html' \
+                  'server/score-*.json' \
+                  'server/score-*.html' || true)
           if [ -n "$bad" ]; then
             echo "::error::Files containing received radio traffic are committed: $bad"
             echo "No transcript file belongs in the repository. See docs/user-manual.md."

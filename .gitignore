@@ -54,10 +54,13 @@ bench-identify-results*.json
 # --repeats writes one of these per run set. Same reason as the line above: the per-turn
 # rows carry real vessel names and MMSIs, and this repo is public.
 bench-identify-repeats*.json
-# Draft transcript runs over replayed IQ arms -- these are verbatim recordings of real
-# vessel traffic, which is the same reason the golden DSP fixtures are not committed.
+# Draft and scored transcript runs over replayed IQ arms -- these are verbatim recordings of
+# real vessel traffic, which is the same reason the golden DSP fixtures are not committed.
+# score-*.json additionally embeds the hand-verified reference for every clip.
 draft-*.json
 draft-*.html
+score-*.json
+score-*.html
 
 # bench.py / stress.py output (generated locally; captures are user data)
 bench-results*.json
