@@ -579,6 +579,129 @@ def test_scheveningen_sits_inside_forty_km_and_the_filter_does_not_pretend_other
     assert ais._km_from_maas(52.0992, 4.2659) == pytest.approx(27.8, abs=1.0)
 
 
+def test_a_pending_position_is_flushed_when_the_vessel_is_later_named(ais_caches):
+    """record()'s name-adoption path used to orphan a position that arrived before the
+    vessel had a name: adopting the existing entry by name never popped _pending[mmsi],
+    so the held fix was silently discarded and the dict sat there until the 2000-cap
+    eventually evicted it. Class-B vessels (type 18), which never send the static message
+    that triggers this adoption path, got no position update for the entire run."""
+    vessels, _ = ais_caches
+    # An already-admitted, name-only entry with no recorded MMSI -- legacy shape that lets
+    # the candidate.get("mmsi") in (mmsi, None, "") check in record() adopt it by name.
+    vessels["MISTRAL"] = {"name": "MISTRAL", "mmsi": "", "callsign": "", "type": None,
+                          "imo": None, "length": None, "beam": None, "draught": None,
+                          "destination": None}
+
+    # A position arrives for that vessel's MMSI before anything has named it to record()
+    # -- not found via the (empty) mmsi index, so it is held rather than applied.
+    ais.record({"mmsi": "244010000", "latitude": 52.0, "longitude": 3.9}, source="local")
+    assert "244010000" in ais._pending
+    assert "244010000" not in ais._mmsi_index
+
+    # The name arrives next, and record() adopts the existing MISTRAL entry by name.
+    ais.record({"mmsi": "244010000", "name": "MISTRAL"}, source="local")
+
+    entry = vessels["MISTRAL"]
+    assert entry["latitude"] == 52.0 and entry["longitude"] == 3.9, (
+        "the position held in _pending before the vessel had a name was discarded")
+    assert "244010000" not in ais._pending, "the pending entry was never popped"
+
+
+# ---------------------------------------------------------------------------
+# On-disk cache persistence: _load_cache / _save_cache
+#
+# Had zero tests before this branch, despite being the only thing that survives a
+# restart. The mmsi index in particular is rebuilt here rather than loaded, since it
+# never existed on disk: without doing so, every restart starts with an empty index and
+# a nameless local position for a vessel already on disk finds nothing, landing in
+# _pending instead of updating the entry directly.
+# ---------------------------------------------------------------------------
+
+def test_load_cache_populates_the_vessel_and_callsign_caches(ais_caches, tmp_path,
+                                                              monkeypatch):
+    vessels, callsigns = ais_caches
+    cache_file = tmp_path / "ais_cache.json"
+    cache_file.write_text(json.dumps([
+        {"name": "MISTRAL", "mmsi": "244010000", "callsign": "PB1234", "type": None,
+         "imo": None, "length": None, "beam": None, "draught": None, "destination": None},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+
+    ais._load_cache()
+
+    assert "MISTRAL" in vessels
+    assert callsigns["PB1234"] is vessels["MISTRAL"]
+
+
+def test_load_cache_rebuilds_the_mmsi_index(ais_caches, tmp_path, monkeypatch):
+    """The index used to start empty on every restart -- see the module docstring above
+    this section -- so a nameless local position for a vessel already on disk landed in
+    _pending instead of updating the entry directly."""
+    vessels, _ = ais_caches
+    cache_file = tmp_path / "ais_cache.json"
+    cache_file.write_text(json.dumps([
+        {"name": "MISTRAL", "mmsi": "244010000", "callsign": "", "type": None,
+         "imo": None, "length": None, "beam": None, "draught": None, "destination": None},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+
+    ais._load_cache()
+
+    assert ais._mmsi_index.get("244010000") is vessels["MISTRAL"]
+
+    # The practical consequence: a nameless position for that MMSI updates the existing
+    # entry directly, and never touches _pending at all.
+    ais.record({"mmsi": "244010000", "latitude": 52.0, "longitude": 3.9}, source="local")
+    assert vessels["MISTRAL"]["latitude"] == 52.0
+    assert "244010000" not in ais._pending
+
+
+def test_load_cache_tolerates_a_missing_file(ais_caches, tmp_path, monkeypatch):
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(tmp_path / "does-not-exist.json"))
+    ais._load_cache()  # must not raise
+
+
+def test_save_cache_writes_what_load_cache_reads_back(ais_caches, tmp_path, monkeypatch):
+    vessels, _ = ais_caches
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    vessels["MISTRAL"] = {"name": "MISTRAL", "mmsi": "244010000", "callsign": ""}
+
+    ais._save_cache()
+
+    on_disk = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert on_disk == [{"name": "MISTRAL", "mmsi": "244010000", "callsign": ""}]
+
+
+def test_save_cache_serialises_copies_not_the_live_shared_entries(ais_caches, tmp_path,
+                                                                   monkeypatch):
+    """_save_cache used to copy only the LIST inside the lock, then let json.dump iterate
+    the SAME shared entry dicts outside it -- while _apply() could still be adding a key
+    to one from another thread, raising `RuntimeError: dictionary changed size during
+    iteration`, caught by the broad except so the save silently did nothing. This branch
+    made it likely: every disk-loaded entry lacks position_at/source, so the first local
+    write to each adds two keys. Checked directly (identity), rather than racing a thread
+    against the GIL for the RuntimeError itself."""
+    vessels, _ = ais_caches
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    live_entry = {"name": "MISTRAL", "mmsi": "244010000"}
+    vessels["MISTRAL"] = live_entry
+
+    captured = {}
+    real_dump = json.dump
+
+    def spy_dump(obj, fp, *a, **kw):
+        captured["entries"] = obj
+        return real_dump(obj, fp, *a, **kw)
+
+    monkeypatch.setattr(ais.json, "dump", spy_dump)
+    ais._save_cache()
+
+    assert captured["entries"][0] is not live_entry, (
+        "_save_cache serialised the SAME dict object _apply() mutates concurrently")
+
+
 # ---------------------------------------------------------------------------
 # Feed silence detection
 #

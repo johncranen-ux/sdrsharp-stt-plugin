@@ -90,6 +90,15 @@ def _load_cache() -> None:
                 _vessel_cache[entry["name"].upper()] = entry
                 if entry.get("callsign"):
                     _callsign_cache[entry["callsign"].upper()] = entry
+                # Without this, the index starts empty on every restart: a nameless
+                # local position report (types 1/2/3/18) for a vessel already on disk
+                # finds nothing here, lands in _pending instead of updating the entry
+                # directly, and is only reunited with it if and when a later static
+                # message re-triggers the name-adoption path in record() -- which
+                # Class-B vessels (type 18) may never send.
+                mmsi = str(entry.get("mmsi") or "").strip()
+                if mmsi:
+                    _mmsi_index[mmsi] = entry
         print(f"[AIS] loaded {len(_vessel_cache)} vessels from cache", flush=True)
     except FileNotFoundError:
         pass
@@ -100,7 +109,13 @@ def _load_cache() -> None:
 def _save_cache() -> None:
     try:
         with _cache_lock:
-            entries = list(_vessel_cache.values())
+            # Copies of the entry dicts, not the shared objects themselves: the lock
+            # only covers this snapshot, and json.dump below runs outside it while
+            # _apply() can still be adding a key to a live entry from another thread.
+            # Iterating the SAME dict json.dump was serialising raised `RuntimeError:
+            # dictionary changed size during iteration`, caught by the broad except
+            # below so the save silently did nothing.
+            entries = [dict(entry) for entry in _vessel_cache.values()]
         with open(AIS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(entries, f)
     except Exception as exc:
@@ -479,6 +494,20 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
                     entry = candidate
 
         if entry is not None:
+            # A position (or other observation) for this MMSI seen before it was
+            # admitted -- held in _pending because nothing existed yet to attach it to
+            # -- must not be silently discarded now that something does. Flushed BEFORE
+            # the current observation so _apply's newest-wins position logic still picks
+            # whichever is actually newer; using pending's own recorded position_at (not
+            # `when`) keeps that comparison honest. Without this, the held fix sat
+            # orphaned in _pending until the 2000-cap eventually evicted it -- and a
+            # Class-B vessel (type 18), which never sends the static message that would
+            # retrigger this adoption path, got no position update for the entire run.
+            pending = _pending.pop(mmsi, None)
+            if pending is not None:
+                _apply(entry, pending, pending.get("position_at", when),
+                       pending.get("source", source))
+
             # Already admitted: the radius gates admission, not later updates. Rejecting
             # an update for a vessel that has moved out would freeze a stale fix.
             _apply(entry, fields, when, source)
