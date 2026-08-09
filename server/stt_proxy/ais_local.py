@@ -22,8 +22,10 @@ def parse_message(msg: dict) -> dict | None:
     """AIS-catcher JSON -> recorder fields, or None if the message should be ignored."""
     # AIS-catcher still decodes a sentence whose checksum failed and flags it with `error`.
     # Observed 2026-08-09: a corrupted checksum produced a full, plausible decode. A wrong
-    # vessel name out of a corrupt payload is the failure that costs most here.
-    if msg.get("error") is not None:
+    # vessel name out of a corrupt payload is the failure that costs most here. Guard checks
+    # truthiness, not presence: if AIS-catcher uses `error: 0` to mean "no error", presence
+    # check would silently reject every clean message and kill the feed.
+    if msg.get("error"):
         return None
 
     msg_type = msg.get("type")

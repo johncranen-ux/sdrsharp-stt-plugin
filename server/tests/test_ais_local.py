@@ -58,6 +58,14 @@ def test_a_message_flagged_with_an_error_is_rejected():
     assert ais_local.parse_message({**STATIC, "error": 2}) is None
 
 
+def test_a_message_with_error_zero_is_accepted():
+    """Guard checks truthiness, not presence: `error: 0` means no error and must be
+    accepted. Observed v0.66 output had no `error` key for clean messages, but if
+    AIS-catcher ever uses 0 to mean "no error", this prevents silent feed loss."""
+    f = ais_local.parse_message({**POSITION, "error": 0})
+    assert f is not None and f["mmsi"] == "366053209"
+
+
 def test_a_base_station_report_is_ignored():
     """Type 4 is a shore station, not a vessel. It carries an MMSI and would otherwise
     create a cache entry that no transmission can ever refer to."""
