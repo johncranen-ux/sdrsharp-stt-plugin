@@ -314,9 +314,11 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 
 aisstream.io stopped delivering data on 2026-08-05 with no fix in sight (see
 `docs/design-notes.md`), so a second, local feed can run alongside it — or in place of it,
-with `AISSTREAM_API_KEY` left unset. It reads AIS-catcher's decoded JSON over loopback UDP
-and writes into the same on-disk cache, through the same provider-neutral merge, as
-aisstream. Either feed, both, or neither can be running.
+with `AISSTREAM_API_KEY` left unset. It reads AIS-catcher's UDP output over loopback (started
+with `JSON on` -- without it AIS-catcher sends raw NMEA with no envelope and every datagram
+is counted malformed), decodes the NMEA itself with `pyais`, and writes into the same
+on-disk cache, through the same provider-neutral merge, as aisstream. Either feed, both, or
+neither can be running.
 
 | Variable | Default | Meaning |
 |---|---|---|

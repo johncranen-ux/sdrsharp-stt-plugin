@@ -1,11 +1,15 @@
-"""Local AIS reception: AIS-catcher's decoded JSON into the shared recorder.
+"""Local AIS reception: AIS-catcher's UDP envelope into the shared recorder.
 
 aisstream has delivered nothing since 2026-08-05 and the upstream issue describing that
 exact symptom has been open since 2026-03-13 with no maintainer response. This reads a
 locally-received feed instead.
 
-AIS-catcher does all the AIVDM work -- 6-bit unpacking, multi-part reassembly, checksums --
-and emits decoded JSON with `-o 5`. This module is an adapter, not a decoder.
+Verified live against the real dongle 2026-08-09: `-o 5` ("JSON Full") only ever affected
+AIS-catcher's own screen output, not the UDP payload -- with `-o 5` AND `JSON on` together
+the envelope was still sparse. Over UDP, `JSON on` gives a thin envelope wrapping the raw
+NMEA sentence(s) in `msg["nmea"]`; the full decode AIS-catcher shows on screen never reaches
+this process. So this module decodes the NMEA itself, using `pyais`, rather than trusting
+decoded fields that were never actually there.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ import os
 import socket
 import threading
 import time
+
+from pyais import decode as ais_decode
 
 from . import ais
 
@@ -27,7 +33,8 @@ _STATIC_TYPES   = {5, 19, 24}
 
 
 def parse_message(msg: dict) -> dict | None:
-    """AIS-catcher JSON -> recorder fields, or None if the message should be ignored."""
+    """AIS-catcher JSON envelope -> recorder fields, or None if the message should be
+    ignored. `msg["nmea"]` is decoded with `pyais`; see the module docstring for why."""
     # AIS-catcher still decodes a sentence whose checksum failed and flags it with `error`.
     # Observed 2026-08-09: a corrupted checksum produced a full, plausible decode. A wrong
     # vessel name out of a corrupt payload is the failure that costs most here. Guard checks
@@ -36,38 +43,84 @@ def parse_message(msg: dict) -> dict | None:
     if msg.get("error"):
         return None
 
+    # The envelope's own `type` mirrors the AIS message type (confirmed live 2026-08-09)
+    # and is cheap to check, so types we're never going to keep -- a type 4 shore station,
+    # a type 21 aid to navigation (a buoy, which carries a `name` and would otherwise enter
+    # the name-keyed cache) -- are rejected before spending a decode on them.
     msg_type = msg.get("type")
     if msg_type not in _POSITION_TYPES and msg_type not in _STATIC_TYPES:
         return None
 
-    mmsi = str(msg.get("mmsi") or "").strip()
+    # AIS-catcher groups every part of a multi-part sentence (a type 5's two fragments,
+    # say) into this one list in a single datagram -- verified live 2026-08-09, where a
+    # type 5 arrived as one datagram carrying both parts. So no reassembly is needed here:
+    # the whole list goes to pyais in one call.
+    nmea = msg.get("nmea")
+    if not nmea:
+        return None
+
+    try:
+        decoded = ais_decode(*nmea)
+    except Exception:
+        # pyais raises its own exception hierarchy (AISBaseException and subclasses) for a
+        # bad checksum, an unrecognised message type, a missing fragment, and so on, and
+        # plain TypeError for a shape it can't even attempt (e.g. a non-string list entry).
+        # All of them mean the same thing here: this sentence can't be used. Caught broadly
+        # so a malformed or unsupported datagram becomes a dropped message, not an
+        # exception -- the listener's own catch-all exists for handler bugs, not for
+        # ordinary bad input turning into a logged error every time it occurs.
+        return None
+
+    mmsi = str(msg.get("mmsi") or getattr(decoded, "mmsi", "") or "").strip()
     if not mmsi:
         return None
 
     fields: dict = {"mmsi": mmsi}
 
     if msg_type in _STATIC_TYPES:
-        name = (msg.get("shipname") or "").strip()
+        name = (getattr(decoded, "shipname", "") or "").strip()
         if name:
             fields["name"] = name
-        callsign = (msg.get("callsign") or "").strip()
+        callsign = (getattr(decoded, "callsign", "") or "").strip()
         if callsign:
             fields["callsign"] = callsign
-        for src, dst in (("imo", "imo"), ("shiptype", "type"),
-                         ("draught", "draught"), ("destination", "destination")):
-            if msg.get(src) is not None:
-                fields[dst] = msg[src]
-        if msg.get("to_bow") is not None and msg.get("to_stern") is not None:
-            fields["length"] = (msg["to_bow"] + msg["to_stern"]) or None
-        if msg.get("to_port") is not None and msg.get("to_starboard") is not None:
-            fields["beam"] = (msg["to_port"] + msg["to_starboard"]) or None
+        destination = (getattr(decoded, "destination", "") or "").strip()
+        if destination:
+            fields["destination"] = destination
 
-    if msg.get("lat") is not None and msg.get("lon") is not None:
-        fields["latitude"] = msg["lat"]
-        fields["longitude"] = msg["lon"]
-        for src, dst in (("speed", "sog"), ("course", "cog"), ("heading", "heading")):
-            if msg.get(src) is not None:
-                fields[dst] = msg[src]
+        imo = getattr(decoded, "imo", None)
+        if imo is not None:
+            fields["imo"] = imo
+        # pyais's ship type is an IntEnum (e.g. ShipType.OtherType_NoAdditionalInformation);
+        # stored as a plain int since nothing downstream expects the enum wrapper.
+        ship_type = getattr(decoded, "ship_type", None)
+        if ship_type is not None:
+            fields["type"] = int(ship_type)
+        draught = getattr(decoded, "draught", None)
+        if draught is not None:
+            fields["draught"] = draught
+
+        to_bow, to_stern = getattr(decoded, "to_bow", None), getattr(decoded, "to_stern", None)
+        if to_bow is not None and to_stern is not None:
+            fields["length"] = (to_bow + to_stern) or None
+        to_port, to_starboard = (getattr(decoded, "to_port", None),
+                                  getattr(decoded, "to_starboard", None))
+        if to_port is not None and to_starboard is not None:
+            fields["beam"] = (to_port + to_starboard) or None
+
+    lat, lon = getattr(decoded, "lat", None), getattr(decoded, "lon", None)
+    if lat is not None and lon is not None:
+        fields["latitude"] = lat
+        fields["longitude"] = lon
+        speed = getattr(decoded, "speed", None)
+        if speed is not None:
+            fields["sog"] = speed
+        course = getattr(decoded, "course", None)
+        if course is not None:
+            fields["cog"] = course
+        heading = getattr(decoded, "heading", None)
+        if heading is not None:
+            fields["heading"] = heading
 
     return fields
 

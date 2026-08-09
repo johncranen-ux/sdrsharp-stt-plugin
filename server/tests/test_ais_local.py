@@ -1,7 +1,23 @@
-"""Tests for ais_local.py -- AIS-catcher JSON into the shared recorder.
+"""Tests for ais_local.py -- AIS-catcher's UDP envelope into the shared recorder.
 
-Field names below are from real AIS-catcher v0.66 `-o 5` output, captured 2026-08-09 by
-feeding the standard AIVDM test sentences over UDP. They are not guessed.
+The envelope shape below is the real one, captured live against AIS-catcher v0.66 with
+`JSON on` on 2026-08-09: a sparse wrapper around the raw NMEA sentence(s) in `nmea`. `-o 5`
+("JSON Full") never reached the UDP payload -- the full decode is screen-only -- so
+`parse_message` decodes the NMEA itself with `pyais`, and these fixtures decode with it too.
+
+The NMEA sentences are the standard, publicly documented AIVDM test vectors (not
+intercepted traffic):
+
+  type 1  !AIVDM,1,1,,B,15M67FC000G?ufbE`FepT@3n00Sa,0*5C
+          -> MMSI 366053209, lat 37.80212, lon -122.341614
+
+  type 5 (two parts, both delivered in one `nmea` list per AIS-catcher's own batching --
+          verified live, no reassembly needed here):
+          !AIVDM,2,1,1,A,55P5TL01VIaAL@7WKO@mBplU@<PDhh000000001S;AJ::4A80?4i@E53,0*3E
+          !AIVDM,2,2,1,A,1@0000000000000,2*55
+          -> MMSI 369190000, shipname MT.MITCHELL, callsign WDA9674, IMO 6710932,
+             destination SEATTLE, draught 6.0, to_bow/to_stern 90/90, to_port/to_starboard
+             10/10 (length 180, beam 20)
 """
 
 import sys
@@ -14,26 +30,49 @@ sys.path.insert(0, str(_SERVER_DIR))
 
 from stt_proxy import ais_local  # noqa: E402
 
-POSITION = {"class": "AIS", "type": 1, "mmsi": 366053209, "status": 3, "speed": 0.0,
-            "lon": -122.341614, "lat": 37.802120, "course": 219.3, "heading": 1,
-            "channel": "B"}
 
-STATIC = {"class": "AIS", "type": 5, "mmsi": 369190000, "imo": 6710932,
-          "callsign": "WDA9674", "shipname": "MT.MITCHELL", "shiptype": 99,
-          "to_bow": 90, "to_stern": 90, "to_port": 10, "to_starboard": 10,
-          "draught": 6.0, "destination": "SEATTLE", "channel": "A"}
+def _envelope(mmsi: int, msg_type: int, nmea: list, **extra) -> dict:
+    """The real AIS-catcher `JSON on` envelope shape, minimally filled in."""
+    return {
+        "class": "AIS", "device": "AIS-catcher", "version": 66, "driver": 1,
+        "hardware": "Blog V4", "channel": "A", "repeat": 0,
+        "rxuxtime": 1786309534.492077, "rxtime": "20260809210534",
+        "signalpower": -22.3979, "ppm": -1.44676,
+        "mmsi": mmsi, "type": msg_type, "nmea": nmea,
+        **extra,
+    }
+
+
+POSITION = _envelope(366053209, 1,
+                      ["!AIVDM,1,1,,B,15M67FC000G?ufbE`FepT@3n00Sa,0*5C"])
+
+STATIC = _envelope(369190000, 5,
+                    ["!AIVDM,2,1,1,A,55P5TL01VIaAL@7WKO@mBplU@<PDhh000000001S;AJ::4A80?4i@E53,0*3E",
+                     "!AIVDM,2,2,1,A,1@0000000000000,2*55"])
+
+# Generated with pyais.encode.encode_dict(shipname="") -- a genuine type 5 decode whose
+# shipname field is empty, for test 10 (empty shipname must not become a `name` key). The
+# same values as STATIC otherwise, so it isn't confused with real intercepted traffic.
+STATIC_BLANK_NAME = _envelope(
+    369190000, 5,
+    ["!AIVDM,2,1,0,A,55P5TL01VIaAL@7WKO@00000000000000000001S;AJ::0000?4i@E531@00,0*0E",
+     "!AIVDM,2,2,0,A,00000000000,2*26"])
 
 
 def test_a_position_report_maps_to_recorder_fields():
     f = ais_local.parse_message(POSITION)
     assert f["mmsi"] == "366053209"
-    assert f["latitude"] == pytest.approx(37.80212)
-    assert f["longitude"] == pytest.approx(-122.341614)
-    assert f["sog"] == 0.0 and f["cog"] == pytest.approx(219.3) and f["heading"] == 1
+    assert f["latitude"] == pytest.approx(37.80212, abs=1e-4)
+    assert f["longitude"] == pytest.approx(-122.341614, abs=1e-4)
+    assert f["sog"] == pytest.approx(0.0)
+    assert f["cog"] == pytest.approx(219.3)
+    assert f["heading"] == 1
     assert "name" not in f
 
 
-def test_a_static_report_maps_name_callsign_and_dimensions():
+def test_a_static_report_with_both_parts_in_one_nmea_list_maps_all_static_fields():
+    """The multi-part case: both fragments of the type 5 arrive in one `nmea` list in one
+    datagram (verified live), and pyais is handed the whole list in a single decode call."""
     f = ais_local.parse_message(STATIC)
     assert f["name"] == "MT.MITCHELL"
     assert f["callsign"] == "WDA9674"
@@ -46,8 +85,10 @@ def test_a_static_report_maps_name_callsign_and_dimensions():
 
 
 def test_the_mmsi_is_a_string_because_the_cache_stores_strings():
-    """AIS-catcher emits mmsi as an integer; every cache lookup compares strings."""
-    assert ais_local.parse_message(POSITION)["mmsi"] == "366053209"
+    """AIS-catcher's envelope carries mmsi as an integer; every cache lookup compares
+    strings."""
+    f = ais_local.parse_message(POSITION)
+    assert f["mmsi"] == "366053209" and isinstance(f["mmsi"], str)
 
 
 def test_a_message_flagged_with_an_error_is_rejected():
@@ -68,32 +109,49 @@ def test_a_message_with_error_zero_is_accepted():
 
 def test_a_base_station_report_is_ignored():
     """Type 4 is a shore station, not a vessel. It carries an MMSI and would otherwise
-    create a cache entry that no transmission can ever refer to."""
-    assert ais_local.parse_message({"class": "AIS", "type": 4, "mmsi": 2442006}) is None
+    create a cache entry that no transmission can ever refer to. The type filter runs
+    before any NMEA decode, so the `nmea` payload here is a placeholder."""
+    assert ais_local.parse_message(
+        _envelope(2442006, 4, ["!AIVDM,1,1,,A,placeholder,0*00"])) is None
 
 
 def test_an_aid_to_navigation_is_ignored():
     """Type 21 is a buoy, and it carries a `name` -- so without this it would enter the
     name-keyed cache and become a candidate for vessel name matching."""
     assert ais_local.parse_message(
-        {"class": "AIS", "type": 21, "mmsi": 992441000, "name": "MAAS CENTER"}) is None
+        _envelope(992441000, 21, ["!AIVDM,1,1,,A,placeholder,0*00"])) is None
 
 
-def test_a_message_with_no_mmsi_is_ignored():
-    assert ais_local.parse_message({"class": "AIS", "type": 1}) is None
+def test_an_envelope_with_no_nmea_list_is_rejected_without_raising():
+    assert ais_local.parse_message(_envelope(366053209, 1, None)) is None
+
+
+def test_an_envelope_with_an_empty_nmea_list_is_rejected_without_raising():
+    assert ais_local.parse_message(_envelope(366053209, 1, [])) is None
+
+
+def test_unparseable_nmea_returns_none_rather_than_raising():
+    """A sentence pyais can't decode at all (garbage payload, not just a bad checksum --
+    pyais doesn't validate checksums by default) must not throw out of parse_message: the
+    listener's own catch-all exists for handler bugs, not routine bad input."""
+    assert ais_local.parse_message(
+        _envelope(366053209, 1, ["!AIVDM,1,1,,B,garbage_payload_here,0*00"])) is None
 
 
 def test_an_empty_shipname_is_not_recorded_as_a_name():
     """AIS pads unset strings; an empty name must not create a vessel called ''."""
-    f = ais_local.parse_message({**STATIC, "shipname": "   "})
+    f = ais_local.parse_message(STATIC_BLANK_NAME)
+    assert f is not None
     assert "name" not in f
 
 
 def test_a_class_b_position_is_accepted():
-    """Type 18 is Class B -- smaller vessels, common in the approach."""
-    f = ais_local.parse_message({"class": "AIS", "type": 18, "mmsi": 244010000,
-                                 "lat": 52.0, "lon": 3.9, "speed": 4.2, "course": 90.0})
-    assert f["mmsi"] == "244010000" and f["latitude"] == 52.0
+    """Type 18 is Class B -- smaller vessels, common in the approach. Standard AIVDM test
+    vector: MMSI 367430530, lat 37.785035, lon -122.26732."""
+    f = ais_local.parse_message(
+        _envelope(367430530, 18, ["!AIVDM,1,1,,B,B5NJ;PP005l4ot5Isbl03wsUkP06,0*76"]))
+    assert f["mmsi"] == "367430530"
+    assert f["latitude"] == pytest.approx(37.785035)
 
 
 import json
@@ -137,7 +195,7 @@ def test_malformed_json_is_counted_and_survived(local_state):
 
 def test_an_ignored_message_type_is_counted_as_rejected(local_state):
     assert ais_local.handle_datagram(
-        json.dumps({"class": "AIS", "type": 4, "mmsi": 2442006}).encode()) is False
+        json.dumps(_envelope(2442006, 4, ["!AIVDM,1,1,,A,placeholder,0*00"])).encode()) is False
     assert ais_local.stats()["rejected"] == 1
 
 
