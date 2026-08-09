@@ -449,6 +449,43 @@ def test_an_observation_with_no_mmsi_is_ignored(ais_caches):
     assert vessels == {}
 
 
+def test_a_name_shared_with_a_different_mmsi_does_not_alias_the_mmsi_index(ais_caches):
+    """Vessel names collide -- a fuzzy search for "mistral" in the live cache returns four
+    distinct vessels. Resolving a new MMSI to an existing entry by name alone, without
+    checking the MMSI agrees, would permanently merge two different ships under one MMSI
+    index entry (and "mmsi" is never corrected afterwards, since it isn't in
+    _STATIC_FIELDS)."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "100", "name": "MISTRAL", "latitude": 52.0, "longitude": 3.9},
+               source="local")
+    ais.record({"mmsi": "200", "name": "MISTRAL", "latitude": 10.0, "longitude": 10.0},
+               source="local")
+    assert ais._mmsi_index["200"] is not ais._mmsi_index["100"]
+    assert ais._mmsi_index["200"]["mmsi"] == "200"
+
+
+def test_pending_entries_are_bounded_and_evict_the_oldest_first(ais_caches, monkeypatch):
+    """A vessel that never gets named (or never enters an active radius filter) would
+    otherwise sit in _pending and be re-applied forever -- the proxy runs for days, so
+    unbounded growth here is real. The cap evicts by the observation's own timestamp, not
+    insertion order, so a vessel touched most recently always survives regardless of when
+    its MMSI first appeared."""
+    monkeypatch.setattr(ais, "_PENDING_MAX", 3)
+    ais.record({"mmsi": "1", "latitude": 52.0, "longitude": 3.9}, source="local",
+               observed_at=100.0)
+    ais.record({"mmsi": "2", "latitude": 52.0, "longitude": 3.9}, source="local",
+               observed_at=200.0)
+    ais.record({"mmsi": "3", "latitude": 52.0, "longitude": 3.9}, source="local",
+               observed_at=300.0)
+    assert set(ais._pending) == {"1", "2", "3"}
+
+    ais.record({"mmsi": "4", "latitude": 52.0, "longitude": 3.9}, source="local",
+               observed_at=400.0)
+    assert len(ais._pending) == 3
+    assert "1" not in ais._pending
+    assert set(ais._pending) == {"2", "3", "4"}
+
+
 # The radius filter. Its purpose is pool reduction, not excluding any particular port:
 # measured over the 7,205 cached vessels carrying a position, 40 km admits 1,116 of them --
 # an 85% cut. Pool size is where the documented NORDIC SIRA / NORDIC SAGA wrong match came

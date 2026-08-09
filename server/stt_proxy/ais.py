@@ -432,6 +432,18 @@ _STATIC_FIELDS   = ("name", "callsign", "type", "imo", "length", "beam",
                     "draught", "destination")
 _POSITION_FIELDS = ("latitude", "longitude", "sog", "cog", "heading")
 
+# Upper bound on _pending. A vessel that never gets a name, or is named but never enters
+# a radius filter that is switched on, would otherwise be re-applied and re-held on every
+# message forever -- the proxy is a long-running process, so "forever" is real unbounded
+# growth, not a rounding error. 2,000 is generously above the number of distinct MMSIs
+# plausible near one receiver at once (the admitted cache itself holds ~8,600 vessels
+# accumulated over weeks, not at once); if this cap is ever hit in practice that is a
+# signal something upstream is wrong -- a stuck stream or a radius set far too wide -- not
+# a reason to raise it blindly. Eviction is oldest-first by the observation's own
+# timestamp (`when`), not wall-clock arrival, so it stays deterministic under backdated
+# `observed_at` the same way position freshness already is.
+_PENDING_MAX = 2000
+
 
 def record(fields: dict, *, source: str, observed_at: float | None = None) -> None:
     """Merge one observation into the vessel cache, whatever provider saw it.
@@ -455,7 +467,16 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
         if entry is None:
             name = (fields.get("name") or "").strip()
             if name:
-                entry = _vessel_cache.get(name.upper())
+                candidate = _vessel_cache.get(name.upper())
+                # Adopt a name-keyed entry only if its MMSI agrees, or it doesn't have one
+                # yet. Vessel names collide -- a fuzzy search for "mistral" in the live
+                # cache returns four distinct vessels -- so matching on name alone would
+                # permanently alias a second vessel's MMSI onto the first's entry, and
+                # "mmsi" is not in _STATIC_FIELDS so nothing would ever correct it. A real
+                # name collision still collides in _vessel_cache as it always has; this
+                # only stops the MMSI index from silently merging two different ships.
+                if candidate is not None and candidate.get("mmsi") in (mmsi, None, ""):
+                    entry = candidate
 
         if entry is not None:
             # Already admitted: the radius gates admission, not later updates. Rejecting
@@ -470,6 +491,12 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
         # position inside the radius.
         held = _pending.setdefault(mmsi, {"mmsi": mmsi})
         _apply(held, fields, when, source)
+        held["_touched"] = when
+
+        if len(_pending) > _PENDING_MAX:
+            oldest_mmsi = min(_pending, key=lambda k: _pending[k].get("_touched", 0.0))
+            if oldest_mmsi != mmsi:
+                del _pending[oldest_mmsi]
 
         if not (held.get("name") or "").strip():
             return
@@ -481,6 +508,7 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
                 return
 
         entry = _pending.pop(mmsi)
+        entry.pop("_touched", None)
         entry.setdefault("callsign", "")
         for key in ("type", "imo", "length", "beam"):
             entry.setdefault(key, None)
