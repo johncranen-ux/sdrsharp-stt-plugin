@@ -534,11 +534,23 @@ def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
     a vessel heard locally two hours ago and now out of VHF range must not keep a stale fix
     over a fresh remote one. In practice local AIS is real-time and wins essentially
     always, so this delivers the intent without its pathological case.
+
+    A static field of "" is treated the same as absent (missing/None), never written.
+    2026-08-09: `_process_ais`'s PositionReport branch passes `meta.get("ShipName",
+    "").strip()` unconditionally, so a bare PositionReport with no MetaData.ShipName was
+    handing this "" for `name` -- and `fields.get(key) is not None` let it through, blanking
+    an already-admitted vessel's name. The old pre-record() code guarded that one case with
+    `if name:`. Generalised here rather than fixed only in the aisstream adapter: "" is
+    exactly as uninformative as a missing key for every field record() recognises -- none of
+    them has a legitimate use for an explicit empty string as data -- and `callsign` reaches
+    this function the same way (aisstream defaults `CallSign` to "" too), so a future
+    adapter hitting the same shape is safe by construction instead of by convention.
     """
     applied = False
     for key in _STATIC_FIELDS:
-        if fields.get(key) is not None:
-            entry[key] = fields[key]
+        value = fields.get(key)
+        if value is not None and value != "":
+            entry[key] = value
             applied = True
 
     if fields.get("latitude") is not None and fields.get("longitude") is not None:

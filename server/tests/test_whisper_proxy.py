@@ -370,6 +370,23 @@ def test_a_malformed_message_does_not_raise(ais_caches):
                         "Message": None})
 
 
+def test_position_report_without_shipname_does_not_blank_an_admitted_vessels_name(
+        ais_caches):
+    """2026-08-09 regression, caught in review before it shipped: the PositionReport branch
+    passes `meta.get("ShipName", "").strip()` through to record() unconditionally, so a bare
+    PositionReport with no MetaData.ShipName handed record() name="" for an already-admitted
+    vessel. The old pre-record() code guarded this with `if name:` and dropped such a
+    message untouched; this pins that the same observable behaviour survived the rewrite."""
+    vessels, _ = ais_caches
+    ais._process_ais(_static("ANOUK", mmsi=1))
+    assert vessels["ANOUK"]["name"] == "ANOUK"
+
+    ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
+                      "Message": {"PositionReport": {"Latitude": 52.0, "Longitude": 4.0}}})
+    assert vessels["ANOUK"]["name"] == "ANOUK", "must not be blanked by the missing ShipName"
+    assert vessels["ANOUK"]["latitude"] == 52.0, "the position itself must still land"
+
+
 # ---------------------------------------------------------------------------
 # The provider-neutral recorder
 #
@@ -417,6 +434,20 @@ def test_static_never_erases_a_known_position(ais_caches):
                source="local")
     ais.record({"mmsi": "1", "name": "SHIP", "callsign": "PBAA"}, source="local")
     assert vessels["SHIP"]["latitude"] == 52.0
+    assert vessels["SHIP"]["callsign"] == "PBAA"
+
+
+def test_an_empty_string_field_does_not_overwrite_an_existing_value(ais_caches):
+    """Pins the fix at the layer it actually lives in, not just through the aisstream path
+    that surfaced it (see test_position_report_without_shipname_does_not_blank_an_admitted_
+    vessels_name). _apply() must treat "" the same as an absent field for every static key,
+    not only `name` -- `callsign` reaches record() as "" from aisstream's own
+    `ship.get("CallSign", "").strip()` the same way `name` did, and any future adapter with
+    the same habit is covered by construction rather than needing its own guard."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "1", "name": "SHIP", "callsign": "PBAA"}, source="local")
+    ais.record({"mmsi": "1", "name": "", "callsign": ""}, source="local")
+    assert vessels["SHIP"]["name"] == "SHIP"
     assert vessels["SHIP"]["callsign"] == "PBAA"
 
 
