@@ -310,6 +310,27 @@ Turning `AIS_NAME_FILTER` or `AIS_PARTIAL_CALLSIGN` off restores the previous be
 exactly, which is what makes them a usable rollback rather than a rough approximation. The
 defaults were measured, not chosen — see `docs/design-notes.md`.
 
+### Local AIS receiver
+
+aisstream.io stopped delivering data on 2026-08-05 with no fix in sight (see
+`docs/design-notes.md`), so a second, local feed can run alongside it — or in place of it,
+with `AISSTREAM_API_KEY` left unset. It reads AIS-catcher's decoded JSON over loopback UDP
+and writes into the same on-disk cache, through the same provider-neutral merge, as
+aisstream. Either feed, both, or neither can be running.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AIS_LOCAL_ENABLED` | `on` | Enables the UDP listener. `off` is the kill switch — no bind, no thread |
+| `AIS_LOCAL_UDP_PORT` | `10110` | Loopback port AIS-catcher pushes decoded JSON to |
+| `AIS_LOCAL_MAX_KM` | `40` | Radius from Maas Center for cache admission of newly-seen vessels (same purpose as `AIS_MAX_AGE_MIN` above: pool reduction) |
+
+AIS-catcher itself is started from `start-all.bat`, which is gitignored and not documented
+here in full — but one rule from it is important enough to record somewhere committed:
+**select the dongle by serial (`-d <SERIAL>`), never by index (`-d:<index>`).** Index order
+is not guaranteed stable across a reboot, and a wrong pick lets AIS-catcher seize the same
+dongle SDR# is using. Set unique serials once with `rtl_eeprom` (one dongle plugged in at a
+time) and verify with `AIS-catcher.exe -l`.
+
 ### Conversation resolution
 
 | Variable | Default | Meaning |
