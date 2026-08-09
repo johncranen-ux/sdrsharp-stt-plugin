@@ -417,3 +417,138 @@ def test_bootstrapped_labels_round_trip(tmp_path):
     p = _write(tmp_path, "\n".join(bi.make_labels(stored)) + "\n")
     labels = bi.parse_labels(p, lookup=_LOOKUP)
     assert [l.mmsi for l in labels] == ["266248000", None]
+
+
+# ---------------------------------------------------------------------------
+# Repeat runs: measuring the instrument's own noise
+#
+# The resolver is not reproducible, and temperature=0 does not make it so -- Anthropic's
+# docs say plainly that temperature 0 "never guaranteed identical outputs", and there is no
+# seed parameter. Observed on the 2026-08-07 corpus: 143/143 transmissions repeat identically
+# except one conversation that flips between naming NOORDSTROOM and naming nobody, which
+# alone is worth ~2.8 precision points -- larger than most changes anyone would want to
+# measure. Scoring one run per arm therefore cannot distinguish a real difference from that
+# flip. These summarise N runs into a mean, an observed spread, and the specific turns that
+# moved, so the noise floor is a printed number instead of a footnote.
+# ---------------------------------------------------------------------------
+
+_REPEAT_LABELS = (
+    "2026-08-04 13:58:00\t2026-08-04 13:58:30\t266248000\tTHULELAND\n"
+    "2026-08-04 14:00:00\t2026-08-04 14:00:30\t244700270\tGOOILAND\n"
+)
+
+
+def _repeat_labels(tmp_path):
+    return bi.parse_labels(_write(tmp_path, _REPEAT_LABELS))
+
+
+def _run_both_correct():
+    return [_exchange("THULELAND", "266248000", ["13:58:14"]),
+            _exchange("GOOILAND", "244700270", ["14:00:14"])]
+
+
+def _run_second_wrong():
+    return [_exchange("THULELAND", "266248000", ["13:58:14"]),
+            _exchange("SHALOM", "244810551", ["14:00:14"])]
+
+
+def _run_second_declined():
+    return [_exchange("THULELAND", "266248000", ["13:58:14"]),
+            _exchange(None, None, ["14:00:14"])]
+
+
+def test_identical_runs_have_no_spread_and_nothing_unstable(tmp_path):
+    """The baseline claim: when the resolver does repeat itself, the summary must say so
+    rather than manufacturing an error bar out of nothing."""
+    labels = _repeat_labels(tmp_path)
+    runs = [bi.score(labels, _run_both_correct()) for _ in range(3)]
+
+    summary = bi.summarise_repeats(runs)
+    assert summary["runs"] == 3
+    assert summary["metrics"]["precision"]["spread"] == 0
+    assert summary["unstable"] == []
+    assert summary["turns_stable"] == summary["turns_seen"] == 2
+
+
+def test_a_flipping_turn_is_named(tmp_path):
+    """THE point of the flag. 'Something moved' is not actionable; 'this transmission moved,
+    and here is what it was called each time' is -- that is what turned a story about
+    adjudicator behaviour into 'five turns of one conversation'."""
+    labels = _repeat_labels(tmp_path)
+    runs = [bi.score(labels, _run_both_correct()),
+            bi.score(labels, _run_second_wrong()),
+            bi.score(labels, _run_both_correct())]
+
+    summary = bi.summarise_repeats(runs)
+    assert len(summary["unstable"]) == 1
+    row = summary["unstable"][0]
+    assert row["time"] == "2026-08-04 14:00:14"
+    assert row["outcomes"] == {"correct": 2, "wrong": 1}
+    assert summary["turns_stable"] == 1
+
+
+def test_the_spread_is_the_observed_range(tmp_path):
+    """An arm's number is only meaningful next to this. Two runs at 100% and 50% precision
+    must report a 50-point spread, not an average that looks like a measurement."""
+    labels = _repeat_labels(tmp_path)
+    runs = [bi.score(labels, _run_both_correct()), bi.score(labels, _run_second_wrong())]
+
+    precision = bi.summarise_repeats(runs)["metrics"]["precision"]
+    assert precision["min"] == pytest.approx(0.5)
+    assert precision["max"] == pytest.approx(1.0)
+    assert precision["mean"] == pytest.approx(0.75)
+    assert precision["spread"] == pytest.approx(0.5)
+
+
+def test_a_turn_that_changes_between_named_and_declined_is_unstable(tmp_path):
+    """The real observed failure: NOORDSTROOM vs nobody. The prediction changes from an MMSI
+    to None, which a comparison keyed only on 'was it correct' could miss when both readings
+    happen to score the same way."""
+    labels = _repeat_labels(tmp_path)
+    runs = [bi.score(labels, _run_both_correct()), bi.score(labels, _run_second_declined())]
+
+    row, = bi.summarise_repeats(runs)["unstable"]
+    assert set(row["predictions"]) == {"244700270", None}
+
+
+def test_a_turn_missing_from_one_run_is_unstable_not_ignored(tmp_path):
+    """Segmentation can move a turn out of a label window entirely, so it is scored in one
+    run and absent from the next. Silently dropping it would understate the noise on exactly
+    the runs that are least trustworthy."""
+    labels = _repeat_labels(tmp_path)
+    only_first = [_exchange("THULELAND", "266248000", ["13:58:14"])]
+    runs = [bi.score(labels, _run_both_correct()), bi.score(labels, only_first)]
+
+    summary = bi.summarise_repeats(runs)
+    row, = summary["unstable"]
+    assert row["time"] == "2026-08-04 14:00:14"
+    assert row["runs_present"] == 1
+    assert summary["turns_seen"] == 2
+
+
+def test_a_single_run_reports_no_noise_rather_than_refusing(tmp_path):
+    """--repeats 1 is the existing behaviour and must stay usable; one observation simply
+    cannot show a spread."""
+    labels = _repeat_labels(tmp_path)
+    summary = bi.summarise_repeats([bi.score(labels, _run_both_correct())])
+    assert summary["runs"] == 1
+    assert summary["metrics"]["precision"]["spread"] == 0
+    assert summary["unstable"] == []
+
+
+def test_summarising_nothing_is_an_error(tmp_path):
+    with pytest.raises(ValueError):
+        bi.summarise_repeats([])
+
+
+def test_repeats_without_resolve_is_refused(capsys):
+    """--repeats only means something when the resolver actually re-runs; against stored
+    verdicts every repeat reads the same JSON and would print a fake zero spread, which is
+    exactly the false confidence this flag exists to remove."""
+    assert bi.main(["--labels", "nonexistent.txt", "--repeats", "3"]) == 2
+    assert "resolve" in capsys.readouterr().err
+
+
+def test_repeats_must_be_at_least_one(capsys):
+    with pytest.raises(SystemExit):
+        bi.main(["--labels", "nonexistent.txt", "--resolve", "--repeats", "0"])

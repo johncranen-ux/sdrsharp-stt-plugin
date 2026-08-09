@@ -23,15 +23,27 @@ Usage:
     # 3. re-run the resolver over the same conversations and score that (costs API calls)
     py bench_identify.py --labels identification-labels.txt --resolve
 
+    # 4. the same, three times, with the noise floor printed (costs 3x the API calls)
+    py bench_identify.py --labels identification-labels.txt --resolve --repeats 3
+
 Mode 3 is the one that makes a resolver or prompt change measurable: run it, change
 something, run it again, compare. Mode 2 only ever reports what already happened.
+
+Use mode 4 before believing any of it. The resolver is not reproducible -- temperature 0
+makes sampling greedy but the API guarantees no bit-identical output and offers no seed, so
+a near-tie flips run to run. On the 2026-08-07 corpus that is one conversation out of 32,
+worth ~2.8 precision points, which is larger than most differences worth measuring. A
+single run per arm cannot tell that flip from a real change; --repeats prints the spread so
+the comparison has an error bar, and names the transmissions that moved.
 """
 
 import argparse
+import collections
 import datetime
 import json
 import os
 import re
+import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -352,6 +364,95 @@ def score(labels: list[Label], exchanges: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Repeat runs, so the instrument's own noise is a number
+# ---------------------------------------------------------------------------
+
+# The metrics worth an error bar. `turns` is excluded deliberately -- it is the per-row
+# detail that the stability pass consumes, not something to average.
+_REPEAT_METRICS = ("precision", "recall", "correct", "wrong", "missed", "correct_null",
+                   "scored_turns", "fragments")
+
+
+def summarise_repeats(results: list[dict]) -> dict:
+    """Fold N runs of score() into a mean, an observed spread, and the turns that moved.
+
+    The resolver does not repeat itself, and pinning temperature=0 does not make it: the API
+    documents that temperature 0 "never guaranteed identical outputs", and offers no seed
+    parameter, so a near-tie flips on floating-point noise in batched inference. Measured on
+    the 2026-08-07 corpus, that is 143/143 transmissions identical except one conversation
+    that alternates between naming NOORDSTROOM and naming nobody -- worth ~2.8 precision
+    points on its own, which is larger than most differences anyone wants to measure.
+
+    Scoring one run per arm therefore cannot separate a real change from that flip. This
+    reports `spread` (max - min over runs) as the noise floor: a difference between two arms
+    smaller than their spreads is not yet evidence of anything.
+
+    `unstable` names the specific transmissions that moved. That detail is the point, not a
+    nicety -- on 2026-08-08 the aggregates alone supported a confident, entirely fictional
+    story about adjudicator behaviour, and the per-turn rows are what reduced it to "five
+    turns of one conversation, all of them fixed".
+    """
+    if not results:
+        raise ValueError("summarise_repeats needs at least one run")
+
+    metrics: dict[str, dict] = {}
+    for name in _REPEAT_METRICS:
+        values = [r.get(name) for r in results]
+        present = [v for v in values if v is not None]
+        if not present:
+            # A metric that is undefined in every run (precision with nothing named, say)
+            # has no spread rather than a spread of zero -- but zero is what a caller
+            # printing an error bar needs, so report both honestly.
+            metrics[name] = {"mean": None, "min": None, "max": None, "spread": 0,
+                             "runs_defined": 0}
+            continue
+        metrics[name] = {
+            "mean": statistics.fmean(present),
+            "min": min(present),
+            "max": max(present),
+            "spread": max(present) - min(present),
+            "runs_defined": len(present),
+        }
+
+    # Per-transmission stability, joined on timestamp across runs. A turn is stable only if
+    # every run scored it AND agreed on both the outcome and the vessel named: a turn that
+    # vanishes from one run (segmentation moved it out of its label window) is unstable, not
+    # absent, and dropping it would understate noise on exactly the runs least worth trusting.
+    by_time: dict[str, list[dict]] = {}
+    for result in results:
+        for row in result.get("turns", []):
+            by_time.setdefault(row["time"], []).append(row)
+
+    unstable: list[dict] = []
+    stable = 0
+    for when in sorted(by_time):
+        rows = by_time[when]
+        outcomes = collections.Counter(row["outcome"] for row in rows)
+        # dict.fromkeys keeps first-seen order, so the list reads in run order.
+        predictions = list(dict.fromkeys(row["predicted"] for row in rows))
+        names = list(dict.fromkeys(row.get("predicted_name") for row in rows))
+        if len(rows) == len(results) and len(outcomes) == 1 and len(predictions) == 1:
+            stable += 1
+            continue
+        unstable.append({
+            "time": when,
+            "conversation": rows[0]["conversation"],
+            "runs_present": len(rows),
+            "outcomes": dict(outcomes),
+            "predictions": predictions,
+            "predicted_names": names,
+        })
+
+    return {
+        "runs": len(results),
+        "metrics": metrics,
+        "turns_seen": len(by_time),
+        "turns_stable": stable,
+        "unstable": unstable,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Re-resolving, so a resolver change can actually be measured
 # ---------------------------------------------------------------------------
 
@@ -446,7 +547,42 @@ def print_report(result: dict, label: str) -> None:
         print(f"  !! {result['labels_with_no_turns']} label(s) matched no stored transmission")
 
 
-def main() -> int:
+def _at_least_one(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return number
+
+
+def print_repeat_report(summary: dict) -> None:
+    runs = summary["runs"]
+    print(f"\nACROSS {runs} RUNS")
+    for name in ("precision", "recall"):
+        m = summary["metrics"][name]
+        print(f"  {name:22s} {_pct(m['mean'])}  "
+              f"(range {_pct(m['min'])}-{_pct(m['max'])}, "
+              f"spread {100 * m['spread']:.1f} points)")
+    for name in ("correct", "wrong", "missed", "correct_null"):
+        m = summary["metrics"][name]
+        print(f"  {name:22s} {m['mean']:.1f}  (range {m['min']}-{m['max']})")
+
+    print(f"  transmissions stable   {summary['turns_stable']} of {summary['turns_seen']}")
+    if not summary["unstable"]:
+        print("  every scored transmission repeated identically")
+        return
+
+    print(f"\n  {len(summary['unstable'])} transmission(s) moved between runs:")
+    for row in summary["unstable"]:
+        outcomes = ", ".join(f"{k} x{v}" for k, v in sorted(row["outcomes"].items()))
+        names = ", ".join("nobody" if n is None else str(n) for n in row["predicted_names"])
+        missing = "" if row["runs_present"] == runs else \
+            f", scored in only {row['runs_present']} of {runs} runs"
+        print(f"    {row['time']}  {outcomes}{missing}")
+        print(f"      named: {names}")
+    print("\n  A difference between two arms smaller than the spread above is not evidence.")
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--conversations", default=str(DEFAULT_CONVERSATIONS),
@@ -464,11 +600,22 @@ def main() -> int:
     ap.add_argument("--resolve", action="store_true",
                     help="re-run the resolver and score that instead of the stored verdicts "
                          "(makes API calls)")
+    ap.add_argument("--repeats", type=_at_least_one, default=1, metavar="N",
+                    help="re-resolve N times and report the mean, the spread, and which "
+                         "transmissions moved. The resolver is not reproducible even at "
+                         "temperature 0, so a single run cannot tell a real change from "
+                         "that noise. Costs N times the API calls; 3 is usually enough")
     ap.add_argument("--out-json", help="write the scores as JSON, for comparing two runs")
     ap.add_argument("--find", metavar="NAME",
                     help="look a vessel up in the AIS cache and exit, to get the spelling "
                          "field 3 needs. Fuzzy, so a misheard name still finds it")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # Checked before anything is read from disk, so the mistake is reported instantly rather
+    # than after loading the conversation store and the AIS cache.
+    if args.repeats > 1 and not args.resolve:
+        return _fail("--repeats only means something with --resolve; scoring stored verdicts "
+                     "repeatedly just re-reads the same JSON and reports a spread of zero")
 
     if args.find:
         from stt_proxy import ais
@@ -529,9 +676,24 @@ def main() -> int:
             return _fail("--resolve needs ANTHROPIC_API_KEY")
         from stt_proxy import ais
         ais._load_cache()
-        rerun = score(labels, _resolve_again(exchanges, labels))
-        print_report(rerun, "RE-RESOLVED NOW")
-        result = {"stored": result, "resolved": rerun}
+
+        runs = []
+        for attempt in range(args.repeats):
+            if args.repeats > 1:
+                print(f"\nrun {attempt + 1} of {args.repeats}...", file=sys.stderr, flush=True)
+            rerun = score(labels, _resolve_again(exchanges, labels))
+            print_report(rerun, f"RE-RESOLVED NOW"
+                                f"{f'  (run {attempt + 1})' if args.repeats > 1 else ''}")
+            runs.append(rerun)
+
+        result = {"stored": result, "resolved": runs[0]}
+        if args.repeats > 1:
+            summary = summarise_repeats(runs)
+            print_repeat_report(summary)
+            # Every run is kept, not just the summary: the per-turn rows are what make a
+            # later question answerable without paying for the API calls again.
+            result["resolved_runs"] = runs
+            result["repeats"] = summary
 
     if args.out_json:
         Path(args.out_json).write_text(json.dumps(result, indent=1), encoding="utf-8")

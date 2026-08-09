@@ -1323,6 +1323,45 @@ Aggregates cannot tell you *which* transmissions moved, and the arithmetic that 
 decline story sound mechanical -- declines down 11 while `wrong` rose only 3 -- was impossible
 to begin with, since a turn's bucket family is fixed by its label.
 
+## The resolver's noise floor is now a printed number (2026-08-09)
+
+`bench_identify.py --resolve --repeats N` runs the resolver N times, reports mean and
+observed spread per metric, and names the transmissions whose verdict moved between runs.
+
+**Why it has to exist: `temperature=0` does not make the resolver reproducible, and cannot.**
+Anthropic's API documentation states that temperature 0 *"never guaranteed identical
+outputs"*, and there is **no seed parameter**. Greedy sampling does not make batched GPU
+inference bit-reproducible, so a near-tie flips on floating-point noise. That matches what
+was observed exactly: 143/143 transmissions repeat identically except one conversation
+(10:48:19–10:48:30) that alternates between naming NOORDSTROOM and naming nobody — **worth
+~2.8 precision points on its own**, larger than most changes worth measuring.
+
+So a single run per arm cannot separate a real effect from that flip, and the old advice
+("repeat every run before believing a difference of a few points") depended on remembering
+to do it by hand. Now `spread` is printed next to the mean, and the rule is mechanical: *a
+difference between two arms smaller than their spreads is not evidence.*
+
+Three details that are deliberate rather than incidental:
+
+* **A turn that vanishes from one run counts as unstable, not absent.** Segmentation can move
+  a transmission out of its label window between runs; dropping it would understate noise on
+  precisely the runs least worth trusting.
+* **`--repeats` without `--resolve` is refused.** Re-scoring stored verdicts N times re-reads
+  the same JSON and would print a spread of zero — false confidence, which is the exact thing
+  this flag exists to remove.
+* **Every run is kept in `--out-json`, not just the summary.** The per-turn rows are what
+  reduced a confident, entirely fictional story about adjudicator behaviour to "five turns of
+  one conversation" (see above); keeping them means the next such question is answerable
+  without paying for the API calls again.
+
+Ruled out on the way to the provider explanation, so they need not be re-checked: candidate
+ordering is deterministic end to end (`_resolver_candidates` builds an insertion-ordered
+dict, `_find_ais_hints`' `seen` set is membership-only and never iterated, `_fresh_snapshot`
+returns `list(cache.keys())` off a JSON-loaded dict). The one genuine nondeterminism vector
+in that path — `cutoff = datetime.datetime.now()` in `_fresh_snapshot` — is inert because
+`AIS_MAX_AGE_MIN` defaults to `0` and short-circuits it. That stops being true if the default
+ever changes.
+
 ## Measuring receiver settings by IQ replay (2026-08-08)
 
 The plugin taps demodulated audio, so every receiver setting is baked in before anything
