@@ -83,6 +83,9 @@ _stats_lock = threading.Lock()
 _MALFORMED_LOG_LIMIT = 5
 _malformed_logged = 0
 
+_LISTENER_ERROR_LOG_LIMIT = 5
+_listener_errors_logged = 0
+
 
 def stats() -> dict:
     with _stats_lock:
@@ -129,12 +132,30 @@ def handle_datagram(raw: bytes) -> bool:
 
 
 def _listen(sock: socket.socket) -> None:
+    global _listener_errors_logged
     while True:
         try:
             raw, _ = sock.recvfrom(65535)
         except OSError:
             return
-        handle_datagram(raw)
+        try:
+            handle_datagram(raw)
+        except Exception as exc:
+            # A handler bug -- a TypeError from an unexpected value shape in otherwise
+            # well-formed JSON, or anything ais.record raises -- must not kill this bare
+            # daemon thread. If it does, the socket is abandoned, no further datagrams are
+            # read, and stats() freezes at its last value forever. Task 5's silence
+            # watchdog keys off last_message_at, so a dead thread would then be reported as
+            # "the feed went quiet" -- a true statement with a misleading cause, sending
+            # someone to check AIS-catcher, the dongle and the antenna, all of which are
+            # fine. Counted under "errors" and rate-limited so a persistent bad sender
+            # cannot flood the log.
+            with _stats_lock:
+                _stats["errors"] += 1
+            if _listener_errors_logged < _LISTENER_ERROR_LOG_LIMIT:
+                _listener_errors_logged += 1
+                print(f"[AIS-local] listener caught an unexpected error: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
 
 
 def start() -> None:

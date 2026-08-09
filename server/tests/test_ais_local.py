@@ -98,6 +98,8 @@ def test_a_class_b_position_is_accepted():
 
 import json
 import socket
+import threading
+import time
 
 from stt_proxy import ais  # noqa: E402
 
@@ -113,6 +115,11 @@ def local_state(monkeypatch):
     monkeypatch.setattr(ais_local, "_stats",
                         {"messages": 0, "last_message_at": None,
                          "rejected": 0, "errors": 0})
+    # Reset the log-rate-limit counters too: they accumulate across tests with no reset
+    # hook, so a future test exercising malformed/unexpected-error datagrams could
+    # silently inherit an already-exhausted log budget from an earlier test.
+    monkeypatch.setattr(ais_local, "_malformed_logged", 0)
+    monkeypatch.setattr(ais_local, "_listener_errors_logged", 0)
     return vessels
 
 
@@ -168,3 +175,42 @@ def test_a_bound_socket_receives_over_loopback(local_state):
         assert "MT.MITCHELL" in local_state
     finally:
         sock.close()
+
+
+def test_the_listener_thread_survives_an_unexpected_handler_exception(local_state, monkeypatch):
+    """A bug in the handler (a TypeError from an unexpected value shape, or anything
+    ais.record raises) must not kill this daemon thread. If it does, the socket is
+    abandoned, no further datagrams are read, and stats() freezes at its last value --
+    which the silence watchdog (next task) would report as "the feed went quiet" while
+    AIS-catcher, the dongle and the antenna are all fine. This project has already lost
+    time chasing exactly that shape of bug once today."""
+    calls = []
+    real_handle_datagram = ais_local.handle_datagram
+
+    def flaky_handle_datagram(raw):
+        calls.append(raw)
+        if len(calls) == 1:
+            raise TypeError("synthetic failure from an unexpected value shape")
+        return real_handle_datagram(raw)
+
+    monkeypatch.setattr(ais_local, "handle_datagram", flaky_handle_datagram)
+
+    sock = ais_local.bind(0)
+    thread = threading.Thread(target=ais_local._listen, args=(sock,), daemon=True)
+    thread.start()
+    try:
+        port = sock.getsockname()[1]
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender.sendto(b"first datagram -- triggers the synthetic failure", ("127.0.0.1", port))
+        sender.sendto(json.dumps(STATIC).encode(), ("127.0.0.1", port))
+        sender.close()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and "MT.MITCHELL" not in local_state:
+            time.sleep(0.01)
+
+        assert "MT.MITCHELL" in local_state, "second datagram was never processed"
+        assert thread.is_alive(), "listener thread died on the first datagram's exception"
+    finally:
+        sock.close()
+        thread.join(timeout=1.0)
