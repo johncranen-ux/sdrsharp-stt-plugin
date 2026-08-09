@@ -15,6 +15,7 @@ lookups return None, and the rest of the pipeline carries on without vessel enri
 import asyncio
 import datetime
 import json
+import math
 import os
 import random
 import re
@@ -244,6 +245,34 @@ _LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
 # from further out is not being updated at all and any threshold will exclude it.
 AIS_MAX_AGE_MIN = int(os.environ.get("AIS_MAX_AGE_MIN", "0"))
 
+# Radius in km from Maas Center for ADMISSION to the cache; 0 disables the filter.
+#
+# The purpose is pool reduction, not excluding any particular port. Measured over the
+# 7,205 cached vessels that carry a position: 20 km admits 349, 30 km admits 654, 40 km
+# admits 1,116 (15.5%), 100 km admits 5,878. Cutting the pool by 85% cuts the wrong-match
+# surface, where the documented NORDIC SIRA / NORDIC SAGA failure came from.
+#
+# 40 is a starting point, not a finding. Too tight loses recall, too wide loses precision.
+# Tune it against `bench_identify.py --labels ... --resolve --repeats 3`, which reports
+# both with a spread. Note Scheveningen sits at 27.7 km, so NO radius separates it from
+# inbound traffic -- do not expect this to do that.
+AIS_LOCAL_MAX_KM = float(os.environ.get("AIS_LOCAL_MAX_KM", "40"))
+
+# Kept here rather than imported from bench_identify: the proxy must not depend on a
+# benchmarking script. Same coordinates as bench_identify._MAAS_CENTER.
+_MAAS_CENTER = (52.02, 3.88)
+
+
+def _km_from_maas(lat: float, lon: float) -> float:
+    lat0, lon0 = _MAAS_CENTER
+    dlat = math.radians(lat - lat0)
+    dlon = math.radians(lon - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(lat))
+         * math.sin(dlon / 2) ** 2)
+    return 6371 * 2 * math.asin(math.sqrt(a))
+
+
 _stale_filter_warned = False
 
 # Seconds of total silence on a connected feed before saying so. 0 disables the check.
@@ -383,6 +412,110 @@ def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
               f"after a feed outage: entries with no last_seen are treated as unknown age.",
               flush=True)
     return list(cache.keys()), cache
+
+
+# MMSI -> the SAME entry object held in _vessel_cache. Raw AIS position reports (types
+# 1/2/3) carry no vessel name, where aisstream enriched every one with MetaData.ShipName,
+# so without this index a local position report has no way to find its vessel. It also
+# retires match_by_mmsi's linear scan over ~8,600 entries.
+_mmsi_index: dict[str, dict] = {}
+
+# Observations for vessels not yet admitted, keyed by MMSI and accumulated across
+# messages. Raw AIS splits a vessel across message types -- position without a name, name
+# without a position -- so neither alone can decide admission.
+#
+# Deliberately NOT stored in _vessel_cache under a synthetic "MMSI:244..." key: the fuzzy
+# name matcher iterates those keys, and junk keys would become candidates for matching.
+_pending: dict[str, dict] = {}
+
+_STATIC_FIELDS   = ("name", "callsign", "type", "imo", "length", "beam",
+                    "draught", "destination")
+_POSITION_FIELDS = ("latitude", "longitude", "sog", "cog", "heading")
+
+
+def record(fields: dict, *, source: str, observed_at: float | None = None) -> None:
+    """Merge one observation into the vessel cache, whatever provider saw it.
+
+    One implementation on purpose. The merge is where the subtle bugs lived: static
+    messages wholesale-replacing position data left 25% of the vessels in the labelled
+    conversations with no position at all until the MERGE-never-replace fix. Two providers
+    writing the cache through two code paths would be two chances to get that wrong, with
+    only one of them covered by these tests.
+
+    `observed_at` is a UNIX timestamp for the observation; it defaults to now. Position
+    writes apply only if newer than the stored fix.
+    """
+    mmsi = str(fields.get("mmsi") or "").strip()
+    if not mmsi:
+        return
+    when = time.time() if observed_at is None else observed_at
+
+    with _cache_lock:
+        entry = _mmsi_index.get(mmsi)
+        if entry is None:
+            name = (fields.get("name") or "").strip()
+            if name:
+                entry = _vessel_cache.get(name.upper())
+
+        if entry is not None:
+            # Already admitted: the radius gates admission, not later updates. Rejecting
+            # an update for a vessel that has moved out would freeze a stale fix.
+            _apply(entry, fields, when, source)
+            _mmsi_index[mmsi] = entry
+            if entry.get("callsign"):
+                _callsign_cache[entry["callsign"].upper()] = entry
+            return
+
+        # Not yet admitted: accumulate until there is a name and, with the filter on, a
+        # position inside the radius.
+        held = _pending.setdefault(mmsi, {"mmsi": mmsi})
+        _apply(held, fields, when, source)
+
+        if not (held.get("name") or "").strip():
+            return
+        if AIS_LOCAL_MAX_KM > 0:
+            lat, lon = held.get("latitude"), held.get("longitude")
+            if lat is None or lon is None:
+                return
+            if _km_from_maas(lat, lon) > AIS_LOCAL_MAX_KM:
+                return
+
+        entry = _pending.pop(mmsi)
+        entry.setdefault("callsign", "")
+        for key in ("type", "imo", "length", "beam"):
+            entry.setdefault(key, None)
+        _vessel_cache[entry["name"].upper()] = entry
+        _mmsi_index[mmsi] = entry
+        if entry.get("callsign"):
+            _callsign_cache[entry["callsign"].upper()] = entry
+
+
+def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
+    """Merge one observation's fields into `entry`, in place.
+
+    Static fields fill or update. Position applies only if this observation is newer than
+    the stored fix -- newest-wins rather than a blanket 'local always overwrites', because
+    a vessel heard locally two hours ago and now out of VHF range must not keep a stale fix
+    over a fresh remote one. In practice local AIS is real-time and wins essentially
+    always, so this delivers the intent without its pathological case.
+    """
+    applied = False
+    for key in _STATIC_FIELDS:
+        if fields.get(key) is not None:
+            entry[key] = fields[key]
+            applied = True
+
+    if fields.get("latitude") is not None and fields.get("longitude") is not None:
+        if when >= entry.get("position_at", float("-inf")):
+            for key in _POSITION_FIELDS:
+                if key in fields:
+                    entry[key] = fields[key]
+            entry["position_at"] = when
+            applied = True
+
+    if applied:
+        entry["source"] = source
+        entry["last_seen"] = _now()
 
 
 def _process_ais(msg: dict) -> None:

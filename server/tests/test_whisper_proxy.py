@@ -134,8 +134,14 @@ def ais_caches(monkeypatch):
     vessels, callsigns = {}, {}
     monkeypatch.setattr(ais, "_vessel_cache", vessels)
     monkeypatch.setattr(ais, "_callsign_cache", callsigns)
-    # Feed-health state is module-global and its log is rate-limited, so without this a
-    # test's output would depend on which tests ran before it.
+    # New in the local-AIS work: the MMSI index and the pending area are module globals
+    # too, so without resetting them a test's result depends on what ran before it.
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    # The radius filter ships defaulting to 40 km. The existing aisstream tests use
+    # vessels with no position, or positions far from Maas Center, so leaving the default
+    # on would silently change what they assert. Tests that care set it themselves.
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 0.0)
     monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
     monkeypatch.setattr(ais, "_last_message_at", None)
     return vessels, callsigns
@@ -362,6 +368,147 @@ def test_a_malformed_message_does_not_raise(ais_caches):
     """The feed is external; a shape change must not kill the websocket thread."""
     ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
                         "Message": None})
+
+
+# ---------------------------------------------------------------------------
+# The provider-neutral recorder
+#
+# aisstream enriched every position report with MetaData.ShipName. Raw AIS does not:
+# types 1/2/3 carry MMSI and position only, and the name arrives separately in type 5
+# roughly every 6 minutes. The cache is keyed by name, so a nameless position report has
+# nowhere to go until the vessel is named -- hence the MMSI index and the pending area.
+# ---------------------------------------------------------------------------
+
+def test_a_named_static_observation_creates_a_vessel(ais_caches):
+    vessels, callsigns = ais_caches
+    ais.record({"mmsi": "244010000", "name": "VARNEBANK", "callsign": "PBUX"},
+               source="local")
+    assert vessels["VARNEBANK"]["mmsi"] == "244010000"
+    assert callsigns["PBUX"] is vessels["VARNEBANK"]
+    assert ais._mmsi_index["244010000"] is vessels["VARNEBANK"]
+
+
+def test_a_nameless_position_is_held_until_the_vessel_is_named(ais_caches):
+    """THE case local AIS creates. Dropping it, as the aisstream path does, would discard
+    most local position data -- the name only arrives every ~6 minutes."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "244010000", "latitude": 52.0, "longitude": 3.9}, source="local")
+    assert vessels == {}
+    assert "244010000" in ais._pending
+
+    ais.record({"mmsi": "244010000", "name": "VARNEBANK"}, source="local")
+    assert vessels["VARNEBANK"]["latitude"] == 52.0
+    assert ais._pending == {}
+
+
+def test_a_position_for_a_known_mmsi_lands_without_a_name(ais_caches):
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "244010000", "name": "VARNEBANK"}, source="local")
+    ais.record({"mmsi": "244010000", "latitude": 52.0, "longitude": 3.9}, source="local")
+    assert vessels["VARNEBANK"]["latitude"] == 52.0
+
+
+def test_static_never_erases_a_known_position(ais_caches):
+    """The 2026-08-06 bug, re-asserted through the new entry point: static messages carry
+    no position, and assigning wholesale deleted what PositionReport had recorded. It
+    repeated every ~6 minutes, leaving 25% of labelled vessels with no position at all."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "1", "name": "SHIP", "latitude": 52.0, "longitude": 3.9},
+               source="local")
+    ais.record({"mmsi": "1", "name": "SHIP", "callsign": "PBAA"}, source="local")
+    assert vessels["SHIP"]["latitude"] == 52.0
+    assert vessels["SHIP"]["callsign"] == "PBAA"
+
+
+def test_a_stale_position_does_not_overwrite_a_fresher_one(ais_caches):
+    """Why the rule is newest-wins rather than a blanket 'local wins': a vessel heard
+    locally two hours ago and now out of range must not keep its stale fix over a fresh
+    remote one."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "1", "name": "SHIP", "latitude": 52.0, "longitude": 3.9},
+               source="local")
+    fresh = vessels["SHIP"]["position_at"]
+    ais.record({"mmsi": "1", "name": "SHIP", "latitude": 10.0, "longitude": 10.0},
+               source="aisstream", observed_at=fresh - 3600)
+    assert vessels["SHIP"]["latitude"] == 52.0
+
+
+def test_the_newest_position_wins_whatever_the_source(ais_caches):
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "1", "name": "SHIP", "latitude": 52.0, "longitude": 3.9},
+               source="aisstream")
+    ais.record({"mmsi": "1", "name": "SHIP", "latitude": 51.5, "longitude": 4.0},
+               source="local")
+    assert vessels["SHIP"]["latitude"] == 51.5
+    assert vessels["SHIP"]["source"] == "local"
+
+
+def test_an_observation_with_no_mmsi_is_ignored(ais_caches):
+    vessels, _ = ais_caches
+    ais.record({"name": "SHIP"}, source="local")
+    assert vessels == {}
+
+
+# The radius filter. Its purpose is pool reduction, not excluding any particular port:
+# measured over the 7,205 cached vessels carrying a position, 40 km admits 1,116 of them --
+# an 85% cut. Pool size is where the documented NORDIC SIRA / NORDIC SAGA wrong match came
+# from.
+
+def test_a_vessel_outside_the_radius_never_enters_the_cache(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 40.0)
+    ais.record({"mmsi": "1", "name": "FARAWAY", "latitude": 60.0, "longitude": 5.0},
+               source="local")
+    assert vessels == {}
+
+
+def test_a_vessel_inside_the_radius_is_admitted(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 40.0)
+    ais.record({"mmsi": "1", "name": "NEARBY", "latitude": 52.02, "longitude": 3.88},
+               source="local")
+    assert "NEARBY" in vessels
+
+
+def test_a_static_only_vessel_waits_for_a_position_when_the_filter_is_on(
+        ais_caches, monkeypatch):
+    """Naming and admission are one rule. A type 5 message carries no position, so the
+    radius cannot judge it yet -- admitting on the name alone would let every vessel in
+    through type 5 before the filter ever saw where it was."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 40.0)
+    ais.record({"mmsi": "1", "name": "UNPLACED", "callsign": "PBAA"}, source="local")
+    assert vessels == {}
+    ais.record({"mmsi": "1", "latitude": 52.02, "longitude": 3.88}, source="local")
+    assert vessels["UNPLACED"]["callsign"] == "PBAA"
+
+
+def test_a_named_vessel_is_admitted_without_a_position_when_the_filter_is_off(ais_caches):
+    """With the filter off there is nothing to wait for, so aisstream's behaviour of
+    creating a vessel from static data alone is preserved."""
+    vessels, _ = ais_caches
+    ais.record({"mmsi": "1", "name": "UNPLACED"}, source="aisstream")
+    assert "UNPLACED" in vessels
+
+
+def test_an_admitted_vessel_keeps_updating_after_it_leaves_the_radius(
+        ais_caches, monkeypatch):
+    """The radius gates admission only. Rejecting updates for a vessel that has moved out
+    would freeze a stale fix, which is worse than tracking one that has wandered."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_LOCAL_MAX_KM", 40.0)
+    ais.record({"mmsi": "1", "name": "LEAVING", "latitude": 52.02, "longitude": 3.88},
+               source="local")
+    ais.record({"mmsi": "1", "latitude": 60.0, "longitude": 5.0}, source="local")
+    assert vessels["LEAVING"]["latitude"] == 60.0
+
+
+def test_scheveningen_sits_inside_forty_km_and_the_filter_does_not_pretend_otherwise():
+    """Recorded because an earlier draft of the spec claimed a 40 km radius would exclude
+    Scheveningen. It does not: measured against _MAAS_CENTER it is 27.7 km away, so no
+    radius separates it from inbound traffic. The filter buys pool reduction, not port
+    exclusion, and this test stops that claim being reintroduced."""
+    assert ais._km_from_maas(52.0992, 4.2659) == pytest.approx(27.8, abs=1.0)
 
 
 # ---------------------------------------------------------------------------
