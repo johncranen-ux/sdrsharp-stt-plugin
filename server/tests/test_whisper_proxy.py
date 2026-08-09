@@ -2944,9 +2944,10 @@ def test_get_routes_respond(server, path, expect):
 def test_ais_cache_reports_provider_health(server, monkeypatch):
     """/api/ais-cache is the seam the (future) webapp reads for provider health -- see
     design doc 'Observability'. Per-provider counters must sit alongside the vessel
-    list, not replace it, and each provider's own liveness value must pass through
-    unmodified (ais._last_message_at is monotonic time, not wall-clock; this route must
-    not convert it)."""
+    list, not replace it. ais_local's last_message_at is already wall-clock
+    (time.time()) and passes through unmodified; ais's is time.monotonic() and gets
+    converted at the route boundary -- see
+    test_ais_cache_converts_aisstreams_liveness_to_wall_clock below."""
     monkeypatch.setattr(ais, "_last_message_at", 12345.0)
     monkeypatch.setattr(ais_local, "_stats",
                          {"messages": 3, "last_message_at": 999.0,
@@ -2954,10 +2955,38 @@ def test_ais_cache_reports_provider_health(server, monkeypatch):
     import urllib.request
     with urllib.request.urlopen(server + "/api/ais-cache", timeout=10) as r:
         payload = json.loads(r.read())
-    assert payload["providers"]["aisstream"] == {"last_message_at": 12345.0}
+    assert set(payload["providers"]["aisstream"]) == {"last_message_at"}
     assert payload["providers"]["local"] == {
         "messages": 3, "last_message_at": 999.0, "rejected": 1, "errors": 0,
     }
+
+
+def test_ais_cache_converts_aisstreams_liveness_to_wall_clock(server, monkeypatch):
+    """ais._last_message_at is time.monotonic() (seconds since an arbitrary epoch,
+    typically boot); ais_local's last_message_at is time.time() (wall clock). Both were
+    exposed under the same JSON key unconverted, so a consumer computing
+    `now - last_message_at` got a plausible-looking wrong number for aisstream -- seconds
+    since boot, not seconds since the last message. Clocks pinned via monkeypatch so the
+    expected converted value is exact rather than a tolerance guess."""
+    monkeypatch.setattr(proxy.time, "time", lambda: 2_000_000.0)
+    monkeypatch.setattr(proxy.time, "monotonic", lambda: 500.0)
+    monkeypatch.setattr(ais, "_last_message_at", 100.0)  # monotonic: 400s before "now"
+    monkeypatch.setattr(ais_local, "_stats",
+                         {"messages": 0, "last_message_at": None,
+                          "rejected": 0, "errors": 0})
+    import urllib.request
+    with urllib.request.urlopen(server + "/api/ais-cache", timeout=10) as r:
+        payload = json.loads(r.read())
+    # wall = time.time() - time.monotonic() + monotonic_ts = 2_000_000 - 500 + 100
+    assert payload["providers"]["aisstream"]["last_message_at"] == pytest.approx(1_999_600.0)
+
+
+def test_ais_cache_leaves_a_never_seen_aisstream_liveness_as_none(server, monkeypatch):
+    monkeypatch.setattr(ais, "_last_message_at", None)
+    import urllib.request
+    with urllib.request.urlopen(server + "/api/ais-cache", timeout=10) as r:
+        payload = json.loads(r.read())
+    assert payload["providers"]["aisstream"]["last_message_at"] is None
 
 
 # Every one of these is live state that changes second to second, and none of them carried

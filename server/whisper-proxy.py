@@ -269,6 +269,23 @@ from stt_proxy.backends import (  # noqa: E402
 # HTTP proxy
 # ---------------------------------------------------------------------------
 
+def _monotonic_to_wall_clock(monotonic_ts: float | None) -> float | None:
+    """Convert a time.monotonic() reading to an estimate of the same instant on
+    time.time()'s clock, so every provider's `last_message_at` means the same thing.
+
+    ais._last_message_at is time.monotonic() (ais.py's silence watchdog needs a clock
+    immune to wall-clock adjustments); ais_local's is already time.time(). Exposed under
+    the same JSON key without converting, a consumer computing `now - last_message_at`
+    got seconds-since-boot for aisstream -- a plausible-looking wrong number. The
+    conversion is only an estimate (the two clocks are not guaranteed to advance at
+    exactly the same rate), which is fine for "is this feed alive" but not for anything
+    needing sub-second precision.
+    """
+    if monotonic_ts is None:
+        return None
+    return time.time() - time.monotonic() + monotonic_ts
+
+
 # The SDRSharp plugin sends to /v1/audio/transcriptions (OpenAI-compatible path).
 # Each backend knows its own upstream path, so this is now just the set of paths the
 # plugin is allowed to POST to.
@@ -341,7 +358,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 payload = {
                     "vessels": entries,
                     "providers": {
-                        "aisstream": {"last_message_at": ais._last_message_at},
+                        "aisstream": {"last_message_at":
+                                      _monotonic_to_wall_clock(ais._last_message_at)},
                         "local": ais_local.stats(),
                     },
                 }
