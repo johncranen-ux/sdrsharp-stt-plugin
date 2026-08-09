@@ -1323,6 +1323,39 @@ Aggregates cannot tell you *which* transmissions moved, and the arithmetic that 
 decline story sound mechanical -- declines down 11 while `wrong` rose only 3 -- was impossible
 to begin with, since a turn's bucket family is fixed by its label.
 
+## Measuring receiver settings by IQ replay (2026-08-08)
+
+The plugin taps demodulated audio, so every receiver setting is baked in before anything
+here sees it, and none had ever been measured. `server/iq_replay.py` replays one raw-IQ
+recording through different demodulator settings: identical RF into every arm, one variable
+changed, references hand-verified once.
+
+Arms are written as captures-style directories, so `bench.py` and `bench_prompt_ab.py` score
+them unchanged — including the bootstrap confidence interval, which matters because a bare
+WER delta of a point or two carries no information.
+
+Two things that are easy to get wrong and are pinned by tests:
+
+* **Segmentation is computed once and shared.** Per-arm VAD would move clip boundaries, and
+  `bench_prompt_ab.py` pairs on `clip_id`, so it would compare different transmissions under
+  the same id and still print a number.
+* **The plugin's DSP chain is transcribed, not improved.** `iq/plugin_dsp.py` is pinned
+  against real `_raw.wav` -> `_sent.wav` pairs at correlation 1.000000. A first attempt
+  scored 0.946 because `Decimator.LinearResample` steps by `(len-1)/(outLen-1)`, not by
+  `fromRate/toRate`.
+
+A third thing surfaced only while writing this task's own tests: `segments.cut()` (see
+above) now returns exactly one entry per requested segment, including a zero-length array
+when a segment lies entirely past a shorter arm's end. `iq_replay.write_clip` never writes
+that array as-is — a zero-frame wav is not guaranteed well-formed for whatever reads it next
+(`bench.py` posts the raw bytes to the STT server) — and it never drops the clip either,
+since that would remove that one arm's id from `bench.discover_clips` while other arms still
+have it, desyncing the very pairing `cut()`'s one-entry-per-segment guarantee exists to
+protect. It writes a short burst of silence instead, at the same index.
+
+Cannot be measured this way: RF gain (applied before the ADC, so baked into the recording)
+and the SDR# audio-NR plugins (downstream of the tap point).
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`
