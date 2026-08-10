@@ -73,7 +73,10 @@ from stt_proxy import fewshot, llm
 # resolver's error propagating rather than a fault here -- but it is still a wrong name on the
 # page. Expected to resolve when the `motor vision` -> Motorvessel correction merges from
 # feat/local-ais-receiver, since the phrase is a garbled TYPE WORD rather than a name.
-CONVERSATION_CORRECT = os.environ.get("CONVERSATION_CORRECT", "off").strip().lower() == "on"
+# ON by default as of 2026-08-10, on the evidence above. CONVERSATION_CORRECT=off restores the
+# previous behaviour exactly: the pass never runs, no `conv` key is stored, and the page renders
+# the verbatim text with the wording it had before this feature existed.
+CONVERSATION_CORRECT = os.environ.get("CONVERSATION_CORRECT", "on").strip().lower() != "off"
 CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", "anthropic").strip()
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
                                             "claude-haiku-4-5-20251001").strip()

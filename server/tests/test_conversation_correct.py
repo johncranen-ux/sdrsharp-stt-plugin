@@ -300,3 +300,22 @@ def test_temperature_zero_is_passed_to_the_model(monkeypatch):
     monkeypatch.setattr(cc.llm, "complete", capture)
     cc.correct_conversation(TURNS, None)
     assert call_kwargs["temperature"] == 0
+
+
+def test_the_pass_is_on_by_default_and_off_is_still_honoured(monkeypatch):
+    """Pins the default, which nothing did while it was off.
+
+    Turned on 2026-08-10 after three repeats per arm put the gain at 1.99 WER points against a
+    0.18-point within-arm spread. `off` must keep working: it is the documented way back to the
+    pre-feature behaviour if a correction ever misleads the operator.
+    """
+    import importlib
+
+    monkeypatch.delenv("CONVERSATION_CORRECT", raising=False)
+    assert importlib.reload(cc).CONVERSATION_CORRECT is True
+
+    monkeypatch.setenv("CONVERSATION_CORRECT", "off")
+    assert importlib.reload(cc).CONVERSATION_CORRECT is False
+
+    monkeypatch.delenv("CONVERSATION_CORRECT", raising=False)
+    importlib.reload(cc)
