@@ -333,12 +333,74 @@ def test_code_fences_are_stripped(raw, expected):
     """Models wrap JSON in fences regardless of instructions; the resolver already
     works around this and the new pass must not repeat the workaround."""
     assert llm.strip_code_fence(raw) == expected
+
+
+class _FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_openrouter_sends_system_and_user_and_returns_content(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["url"] = request.full_url
+        seen["body"] = json.loads(request.data.decode("utf-8"))
+        seen["timeout"] = timeout
+        return _FakeResponse(json.dumps(
+            {"choices": [{"message": {"content": '{"ok": 1}'}}]}).encode("utf-8"))
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+
+    out = llm.complete("sys", "usr", provider="openrouter", model="free/model",
+                       timeout_s=12.0)
+    assert out == '{"ok": 1}'
+    assert seen["body"]["messages"][0] == {"role": "system", "content": "sys"}
+    assert seen["body"]["messages"][1] == {"role": "user", "content": "usr"}
+    assert seen["body"]["temperature"] == 0.0
+    assert seen["timeout"] == 12.0
+
+
+def test_openrouter_sets_a_custom_user_agent(monkeypatch):
+    """Cloudflare 403s the default Python-urllib agent (error 1010), which reads as a
+    model-specific fault and is not. Cost real time once already."""
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen.update({k.lower(): v for k, v in request.headers.items()})
+        return _FakeResponse(json.dumps(
+            {"choices": [{"message": {"content": "x"}}]}).encode("utf-8"))
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    llm.complete("s", "u", provider="openrouter", model="m")
+    assert "python-urllib" not in seen["user-agent"].lower()
+
+
+def test_openrouter_without_a_key_is_an_llm_error(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(llm.LLMError, match="OPENROUTER_API_KEY"):
+        llm.complete("s", "u", provider="openrouter", model="m")
+```
+
+Add these imports at the top of the same file, beside the existing ones:
+
+```python
+import io
+import json
 ```
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
 Run: `cd server && python -m pytest tests/test_llm.py -v`
 Expected: FAIL — `ImportError: cannot import name 'llm'`
+
+Every test in this file must be watched failing before `llm.py` exists. Both providers are
+tested here, test-first, rather than one being covered after the fact.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -435,7 +497,7 @@ def complete(system: str, user: str, *, provider: str, model: str,
 - [ ] **Step 4: Run the tests and verify they pass**
 
 Run: `cd server && python -m pytest tests/test_llm.py -v`
-Expected: 8 passed
+Expected: 11 passed
 
 - [ ] **Step 5: Commit**
 
@@ -446,91 +508,14 @@ git commit -m "Put the model provider behind one call signature"
 
 ---
 
-### Task 3: OpenRouter provider test coverage
+### Task 3: MERGED INTO TASK 2 — do not dispatch
 
-Task 2 shipped the OpenRouter code path but only the Anthropic one is tested. This task tests
-it without network access.
+Both providers are now tested test-first inside Task 2, so every test in `test_llm.py` is
+watched failing before `llm.py` exists. Writing the OpenRouter tests after its implementation
+would have produced tests that pass on first run, which proves nothing about whether they can
+catch the bug they describe.
 
-**Files:**
-- Modify: `server/tests/test_llm.py`
-
-**Interfaces:**
-- Consumes: `llm.complete`, `llm.LLMError` from Task 2.
-- Produces: nothing new.
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# append to server/tests/test_llm.py
-import io
-import json as _json
-
-
-class _FakeResponse(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-
-def test_openrouter_sends_system_and_user_and_returns_content(monkeypatch):
-    seen = {}
-
-    def fake_urlopen(request, timeout=None):
-        seen["url"] = request.full_url
-        seen["headers"] = {k.lower(): v for k, v in request.headers.items()}
-        seen["body"] = _json.loads(request.data.decode("utf-8"))
-        seen["timeout"] = timeout
-        return _FakeResponse(_json.dumps(
-            {"choices": [{"message": {"content": '{"ok": 1}'}}]}).encode("utf-8"))
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-
-    out = llm.complete("sys", "usr", provider="openrouter", model="free/model",
-                       timeout_s=12.0)
-    assert out == '{"ok": 1}'
-    assert seen["body"]["messages"][0] == {"role": "system", "content": "sys"}
-    assert seen["body"]["messages"][1] == {"role": "user", "content": "usr"}
-    assert seen["body"]["temperature"] == 0.0
-    assert seen["timeout"] == 12.0
-
-
-def test_openrouter_sets_a_custom_user_agent(monkeypatch):
-    """Cloudflare 403s the default Python-urllib agent (error 1010), which looks like a
-    model fault and is not. Cost real time once already."""
-    seen = {}
-
-    def fake_urlopen(request, timeout=None):
-        seen.update({k.lower(): v for k, v in request.headers.items()})
-        return _FakeResponse(_json.dumps(
-            {"choices": [{"message": {"content": "x"}}]}).encode("utf-8"))
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    llm.complete("s", "u", provider="openrouter", model="m")
-    assert "python-urllib" not in seen["user-agent"].lower()
-
-
-def test_openrouter_without_a_key_is_an_llm_error(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(llm.LLMError, match="OPENROUTER_API_KEY"):
-        llm.complete("s", "u", provider="openrouter", model="m")
-```
-
-- [ ] **Step 2: Run the tests and verify they fail or pass for the right reason**
-
-Run: `cd server && python -m pytest tests/test_llm.py -v -k openrouter`
-Expected: PASS if Task 2's implementation is correct. If any fail, fix `llm.py`, not the test.
-A failure here means the provider was written wrong, which is exactly what this task is for.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add server/tests/test_llm.py
-git commit -m "Cover the OpenRouter provider without touching the network"
-```
+Task numbering below is unchanged, so the plan's cross-references stay valid.
 
 ---
 
