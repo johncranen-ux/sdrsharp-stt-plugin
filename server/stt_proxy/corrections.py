@@ -129,6 +129,18 @@ _MARITIME_CORRECTIONS = [
     (r'\bmass\b(?=\s)', 'Maas', re.IGNORECASE),
     (r'\bmars\b(?=\s)', 'Maas', re.IGNORECASE),
     (r'\bmotor\s+tanker\b', 'Motortanker', re.IGNORECASE),
+    # The sibling rule that was missing. Ground truth always writes "Motorvessel"; the decoder
+    # produced "motor vessel" 17 times across the benchmarked corpora, so each one scored as a
+    # WER error on its own. The alternation covers the corruptions actually observed --
+    # vision 2, vets 3, vesel 2, vehicle 1, and "motor time" 3 -- all anchored behind "motor",
+    # which is what keeps them safe: none of these words is being rewritten in open text.
+    #
+    # "vision" is the one that cost an identification rather than a word. VISION is a real
+    # cached vessel, so the mangled stopword became a name probe and scored 90.0 -- that is
+    # how BERGE TOWNSEND came back as VISION on 2026-08-07. Correcting the phrase removes the
+    # probe at source, which is the right layer for it: the matcher is not wrong to find a
+    # ship called VISION when something says VISION.
+    (r'\bmotor\s+(?:vessel|vision|vets|vesel|vehicle|time)\b', 'Motorvessel', re.IGNORECASE),
     (r'\bdraft\b', 'draught', re.IGNORECASE),
     (r'\bboys\b', 'buoys', re.IGNORECASE),
     (r'\bboy\b', 'buoy', re.IGNORECASE),
