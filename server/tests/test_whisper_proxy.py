@@ -2816,16 +2816,19 @@ def test_the_page_keeps_the_original_recoverable():
 def test_the_page_counts_the_corrections():
     html = conversations.render_conversations_page(_row_with_correction())
     assert "1 corrected" in html
+    assert 'class="badge fixedcount"' in html
 
 
 def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
-    """Assert on the badge and the marker class, NOT on the word 'corrected': the page's
-    static explanatory paragraph contains that word on every render."""
+    """Assert on the badge markup and the marker class, NOT on the bare word 'fixedcount' or
+    'corrected': the page's <style> block names the fixedcount class unconditionally (it is
+    page-level, not per-row), and the static explanatory paragraph contains the word 'corrected'
+    on every render. Only the actual badge/span markup tells corrected apart from uncorrected."""
     rows = _row_with_correction()
     for turn in rows[0]["turns"]:
         turn.pop("conv", None)
         turn.pop("changes", None)
     html = conversations.render_conversations_page(rows)
-    assert "fixedcount" not in html
+    assert 'class="badge fixedcount"' not in html
     assert 'class="fixed"' not in html
     assert "Maas Approach, motor vision Example Trader." in html

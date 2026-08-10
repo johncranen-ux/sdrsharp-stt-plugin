@@ -790,6 +790,7 @@ def render_conversations_page(rows: list[dict]) -> str:
  .t {{ color: #888; font-family: monospace; margin-right: 8px; }}
  .was {{ color: #c0392b; font-size: .8em; margin-left: 6px; }}
  .fixed {{ border-bottom: 1px dotted #2c7; cursor: help; }}
+ .badge.fixedcount {{ background: #d4edda; }}
  .empty {{ color: #666; }}
 </style></head><body>
 <h1>Resolved Conversations</h1>
