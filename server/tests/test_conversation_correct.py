@@ -187,7 +187,7 @@ def test_the_prompt_keeps_digit_sequences_as_transcribed():
 def test_malformed_examples_degrade_to_running_without_them(monkeypatch):
     """Failing to render examples must degrade, not return None or raise."""
     monkeypatch.setattr(cc.fewshot, "load_examples", lambda: [
-        {"id": 1, "text": "example"}  # Missing required fields for render_examples
+        {"vessel": "EXAMPLE TRADER", "turns": [{"text": "x"}]}  # Turn missing 'id' key
     ])
     monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: (
         '{"turns": [{"id": 1, "text": "Maas Approach, motor vision Example Trader.",'
