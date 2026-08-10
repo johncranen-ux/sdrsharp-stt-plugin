@@ -213,12 +213,38 @@ and positions all decoded).
 
 Levers, cheapest first:
 
-1. **AIS gain, never tuned.** SDR#'s 36.4 dB was set for *voice* and does **not** apply here —
-   AIS-catcher has its own gain and `start-all.bat` never set it, so it runs on auto. Sweep with
-   `-gr TUNER 0.0-50.0 RTLAGC off`, measure with `-M D` (per-message signal power and ppm), and
-   consider `-a` (tuner bandwidth) against broadcast-FM overload.
-2. **Antenna height.** Reaching 30 km against a 10 m masthead needs **~17 m** of receive height
-   (horizon ≈ 4.12·(√h_rx + √h_tx) km). An external antenna plus splitter is the planned fix.
+1. ~~**AIS gain, never tuned.**~~ **Swept 2026-08-10 and ruled out.** Nine runs of five minutes,
+   `-gr TUNER <g> RTLAGC off`, `auto` first and last as a drift control:
+
+   | tuner gain | msg/min | distinct vessels | ≥5 km | max km | median signal power |
+   |---|---|---|---|---|---|
+   | auto | 45.6 | 25 | 0 | 2.70 | −14.2 |
+   | 16.6 | 20.0 | 8 | 0 | 2.54 | −52.1 |
+   | 22.9 | 39.2 | 20 | 1 | 11.38 | −46.0 |
+   | 28.0 | 43.0 | 22 | 0 | 2.70 | −43.7 |
+   | 33.8 | 46.6 | 23 | 0 | 2.70 | −39.8 |
+   | 38.6 | 51.8 | 28 | 0 | 2.70 | −34.7 |
+   | 42.1 | **53.2** | **32** | 0 | 2.80 | −32.3 |
+   | 49.6 | 50.6 | 29 | 0 | 3.11 | −24.6 |
+   | auto (repeat) | 47.8 | 26 | 0 | 3.74 | −13.9 |
+
+   The control runs agree closely (45.6 / 25 against 47.8 / 26), so the sweep is not confounded
+   by traffic varying over the 47 minutes.
+
+   Gain buys **yield, not reach**. Message rate and vessel count climb steadily to a peak around
+   **42.1 dB** and fall back at 49.6, which is the front end starting to compress. But maximum
+   range is flat at ~2.7 km across every setting, and **`0 vessels within 25 km of Maas Center`
+   in all nine runs** — the column that matters never moves off zero. The lone 11.38 km contact
+   at 22.9 dB is a single unnamed MMSI (314001158) appearing once in nine runs, not a trend.
+
+   So the ~4 km shell is not a sensitivity problem that gain can solve. Worth setting
+   `-gr TUNER 42.1 RTLAGC off` anyway for the extra nearby yield, but it changes nothing about
+   whether the Maas approach is heard.
+
+2. **Antenna height — now the only lever left.** Reaching 30 km against a 10 m masthead needs
+   **~17 m** of receive height (horizon ≈ 4.12·(√h_rx + √h_tx) km). An external antenna plus
+   splitter is the planned fix. With gain eliminated, this is the whole of the remaining
+   problem.
 3. **Re-centring or widening the radius filter** — which on its own changes nothing, because the
    traffic is not being received in the first place.
 
