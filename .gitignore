@@ -82,3 +82,6 @@ start-all.bat
 
 # Reference project (not part of this codebase)
 WhisperPlugin/
+
+# Few-shot examples are built from real exchanges, which are received radio traffic.
+server/conversation-fewshot*.json
