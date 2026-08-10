@@ -87,3 +87,6 @@ WhisperPlugin/
 server/conversation-fewshot*.json
 server/*fewshot*.json
 server/*examples*.json
+
+# bench_conversation_correct.py output. Same restriction as bench-correct-results*.json above.
+server/bench-conv-correct-*.json
