@@ -83,6 +83,23 @@ from stt_proxy import fewshot, llm
 # against 1-3), and cannot pin temperature at all. Haiku stays. This repeats the 2026-08-03
 # finding that the prompt outweighs the model on this task.
 #
+# BUT THEY ARE NOT INSEPARABLE WHERE IT MATTERS. WER and invented content cannot see this;
+# a per-turn side-by-side can. Over the four exchanges in the corpus whose stored
+# identification is WRONG, edits summed across three repeats:
+#
+#   exchange   stored (wrong)  truth            haiku  sonnet
+#   10:17:50   VISION          BERGE TOWNSEND       6       0
+#   10:48:19   NOORDSTROOM     NORDSTRAUM           3       3
+#   11:14:15   MAAS            ERRIA SWAN           3       1
+#   12:14:57   ELIZABETH       ELISABETH            3       1
+#                                       total      15       5
+#
+# Sonnet edits a third as much when the identification is wrong, and the gap is widest exactly
+# where the wrong name is grossly wrong rather than a near-miss spelling. Identification runs
+# at roughly 85% precision, so about one exchange in seven carries a wrong name: this is not a
+# corner case. Haiku is kept for speed and cost, and because both models honour the rule-2
+# bound on the shore station's own words -- but the residual noted below is Haiku-specific.
+#
 # Getting that answer needed two fixes in llm.py first, and both failed in the same misleading
 # way: sonnet-5 rejects `temperature` outright, and it returns a ThinkingBlock as content[0].
 # Each broke every call while the pass behaved exactly as designed -- reply rejected,
