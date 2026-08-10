@@ -691,6 +691,11 @@ AIS_NAME_FILTER    = os.environ.get("AIS_NAME_FILTER", "on").strip().lower() != 
 AIS_NAME_MIN_SCORE = int(os.environ.get("AIS_NAME_MIN_SCORE", "76"))
 AIS_NAME_MIN_TOKEN = int(os.environ.get("AIS_NAME_MIN_TOKEN", "4"))
 
+# Off until bench_identify --resolve has scored it end to end. See _unique_word_match for the
+# class it fixes and test_the_word_path_is_off_until_it_has_been_measured_end_to_end for the
+# four false answers that keep it off. AIS_NAME_WORD_MATCH=on to measure.
+AIS_NAME_WORD_MATCH = os.environ.get("AIS_NAME_WORD_MATCH", "off").strip().lower() == "on"
+
 _NAME_SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
               "BULKER", "VESSEL", "CONTAINER", "MOTORTANKER", "MOTORVESSEL"}
 
@@ -717,6 +722,25 @@ def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
     return best[0] if best else None
 
 
+def _unique_word_match(token: str, keys: list[str]) -> str | None:
+    """The one multi-word cache name having `token` as a whole word, or None.
+
+    Traffic calls a ship by a distinguishing word of its name -- "the Townsend" for BERGE
+    TOWNSEND -- and whisper drops words on its own. fuzz.ratio cannot serve that: it scores
+    whole strings, so the correct longer name is penalised for length the query does not
+    have while a similar-looking SHORT name wins outright. Measured on the live cache over
+    1,653 single-word references, the fuzzy path alone was 19.0% right and 43.2% wrong.
+
+    Exact, never fuzzy, and None the moment two ships share the word -- WILSON fits both
+    WILSON CORK and WILSON GAETA, and a confident wrong ship is worse here than no ship.
+    Same contract as match_by_callsign_suffix, for the same reason.
+    """
+    if len(token) < AIS_NAME_MIN_TOKEN or token in _NAME_SKIP:
+        return None
+    owners = [name for name in keys if " " in name and token in name.split()]
+    return owners[0] if len(owners) == 1 else None
+
+
 def match_by_name(extracted_name: str) -> dict | None:
     if not extracted_name:
         return None
@@ -725,6 +749,19 @@ def match_by_name(extracted_name: str) -> dict | None:
     if not keys:
         return None
     cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
+
+    if AIS_NAME_FILTER and AIS_NAME_WORD_MATCH:
+        # Ahead of the fuzzy pass, because fuzzy answers first and answers wrongly: TASMAN
+        # scores 85.7 against TALISMAN and only 70.6 against the ABEL TASMAN that was meant.
+        # Behind an exact whole-name hit, because someone who says BRAVO means the ship
+        # called BRAVO, not ALFA BRAVO.
+        if query in cache:
+            return cache[query]
+        if " " not in query:
+            word_hit = _unique_word_match(query, keys)
+            if word_hit:
+                return cache[word_hit]
+
     hit = _best_name_match(query, keys, cutoff)
     if hit:
         return cache[hit]

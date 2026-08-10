@@ -1150,6 +1150,93 @@ def test_name_filter_can_be_disabled(monkeypatch, name_cache):
 
 
 # ---------------------------------------------------------------------------
+# Vessels called by one word of their name
+#
+# Radio traffic says "the Townsend" for BERGE TOWNSEND, and whisper drops words besides.
+# Measured over the 08-07 decoder output, bare single-word references (9) outnumbered
+# surviving full multi-word names (6). fuzz.ratio compares whole strings, so it cannot serve
+# this class at all: ratio("TASMAN", "ABEL TASMAN") is 70.6 and falls under the 76 cutoff
+# while ratio("TASMAN", "TALISMAN") is 85.7 and wins, so the right ship is passed over for a
+# wrong one. Measured over 1,653 such cases on the live 8,654-name cache: 19.0% right and
+# 43.2% wrong before this path existed.
+#
+# The fix is exact, not fuzzy, and declines when the word fits more than one ship -- the same
+# shape as match_by_callsign_suffix, and for the same reason.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def partial_name_cache(monkeypatch):
+    """Names that make each guard observable, all drawn from the real cache."""
+    monkeypatch.setattr(ais, "AIS_NAME_WORD_MATCH", True)
+    cache = {
+        "BERGE TOWNSEND": {"name": "BERGE TOWNSEND", "mmsi": "235093069", "callsign": "2FPB8"},
+        "ABEL TASMAN":    {"name": "ABEL TASMAN",    "mmsi": "244010000", "callsign": ""},
+        "TALISMAN":       {"name": "TALISMAN",       "mmsi": "244020000", "callsign": ""},
+        "WILSON CORK":    {"name": "WILSON CORK",    "mmsi": "244030000", "callsign": ""},
+        "WILSON GAETA":   {"name": "WILSON GAETA",   "mmsi": "244040000", "callsign": ""},
+        "BRAVO":          {"name": "BRAVO",          "mmsi": "244050000", "callsign": ""},
+        "ALFA BRAVO":     {"name": "ALFA BRAVO",     "mmsi": "244060000", "callsign": ""},
+        "RIKE J":         {"name": "RIKE J",         "mmsi": "244070000", "callsign": ""},
+        "TANKER PEARL":   {"name": "TANKER PEARL",   "mmsi": "244080000", "callsign": ""},
+    }
+    monkeypatch.setattr(ais, "_vessel_cache", cache)
+    return cache
+
+
+def test_a_vessel_called_by_one_word_of_its_name_is_found(partial_name_cache):
+    """The shore station's 'we have the Townsend' must reach BERGE TOWNSEND."""
+    assert proxy.match_by_name("TOWNSEND")["name"] == "BERGE TOWNSEND"
+
+
+def test_a_word_of_a_name_beats_a_fuzzy_match_to_a_different_ship(partial_name_cache):
+    """TASMAN is exactly a word of ABEL TASMAN; TALISMAN merely looks like it."""
+    assert proxy.match_by_name("TASMAN")["name"] == "ABEL TASMAN"
+
+
+def test_a_word_shared_by_two_vessels_names_nobody(partial_name_cache):
+    """WILSON fits both CORK and GAETA. A confident wrong ship is worse than none."""
+    assert proxy.match_by_name("WILSON") is None
+
+
+def test_a_whole_name_beats_a_word_of_a_longer_name(partial_name_cache):
+    """Someone who says BRAVO means the ship called BRAVO, not ALFA BRAVO."""
+    assert proxy.match_by_name("BRAVO")["name"] == "BRAVO"
+
+
+def test_a_word_below_the_token_floor_is_not_a_handle(partial_name_cache):
+    """'J' of RIKE J is not something anyone identifies a ship by."""
+    assert proxy.match_by_name("J") is None
+
+
+def test_a_vessel_type_word_is_not_a_handle(partial_name_cache):
+    """TANKER is a type word, so it cannot deliver TANKER PEARL on its own."""
+    assert proxy.match_by_name("TANKER") is None
+
+
+def test_the_word_path_does_not_fire_on_ordinary_speech(partial_name_cache):
+    assert proxy.match_by_name("YES GOOD DAY SIR") is None
+
+
+def test_the_word_path_is_off_until_it_has_been_measured_end_to_end(monkeypatch):
+    """Default OFF, deliberately.
+
+    Fed every word spoken in the real 08-07 corpus the path answers 5 times: TOWNSEND ->
+    BERGE TOWNSEND, correctly, and four false ones -- AFTER -> AFTER YOU ("please repeat
+    after me"), PROBLEM -> NO PROBLEM V ("no problem, you can go ahead"), LIFT -> HEBO LIFT 6,
+    and FOUNTAIN -> HARBOUR FOUNTAIN, that last one out of "Berkey Fountain", which is BERGE
+    TOWNSEND misheard -- so it would put a rival ship into the very conversation this fixes.
+
+    Production feeds it the extracted vessel field rather than loose words, and it only fires
+    on single-word probes, so the real rate is lower than that. But 'lower than 1-in-5 wrong'
+    is not a measurement, and bench_identify --resolve is the one that settles it.
+    """
+    cache = {"BERGE TOWNSEND": {"name": "BERGE TOWNSEND", "mmsi": "235093069", "callsign": ""}}
+    monkeypatch.setattr(ais, "_vessel_cache", cache)
+    assert ais.AIS_NAME_WORD_MATCH is False
+    assert proxy.match_by_name("TOWNSEND") is None
+
+
+# ---------------------------------------------------------------------------
 # Prompt echo
 # ---------------------------------------------------------------------------
 
