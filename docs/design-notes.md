@@ -1524,6 +1524,43 @@ arm exists to quantify how much of a transmission's opening the gate eats, so a 
 coarser than a few ms would quantise away the thing being measured. The segmenter wants
 ~20 ms and just averages down.
 
+## Why TULIPA SEAWAYS was not identified (2026-08-10)
+
+A live exchange at 23:30:38 resolved to nobody, and the ship was in the cache the whole time.
+Worth recording because the resolver was *not* at fault and the obvious fix does not apply.
+
+Whisper garbled "Tulipa Seaways" two different ways across the two turns, and neither garbling
+can reach the real ship through `fuzz.ratio`:
+
+| probe | ratio vs TULIPA SEAWAYS | `match_by_name` returned |
+|---|---|---|
+| `DULLIP CEEWEES` | 57.1 | None |
+| `SEAWAYS` | 66.7 | **SEAWAY** (a different real ship) |
+| `TO A LIFT AT SEAWAYS` | 70.6 | **LYSVIK SEAWAYS** |
+| `TULIPA` | 60.0 | **TUULIA** |
+| `TULIPA SEAWAYS` | 100.0 | correct |
+
+The cutoff is 76. The full name matches perfectly and never survived the channel; every
+surviving fragment either falls short or lands on somebody else. The AIS hints handed to the
+resolver were MAAS -- a vessel genuinely named that, pulled in by the words "Maas Approach" --
+and SEAWAY. So the candidate list held two plausible wrong ships and not the right one, and the
+resolver, told to choose from the list or return null, correctly returned null.
+
+This is the SANTA ISABEL MAERSK failure recurring; see the comment above `_live_match_candidates`
+in `conversations.py`.
+
+**The word-match path would NOT fix this.** `SEAWAYS` is shared by 13 cached vessels (the DFDS
+fleet) and `TULIPA` by 2, so its ambiguity guard returns None both times. That is the guard
+working, not failing.
+
+**The untested idea:** this failure is phonetic rather than orthographic -- "Dullip Ceewees" and
+"Tulipa Seaways" sound alike and spell differently. A crude phonetic normalisation scores that
+pair at 76.9 against the raw 57.1. That normaliser was written to fit this one case, clears the
+cutoff by 0.9 points, and has never been measured for false positives across 8,672 names where
+near-homophone ship names are common. It is a hypothesis, not a finding. If this class of miss
+recurs, measure a phonetic scorer against the existing corruption corpus and `bench_identify`
+before shipping anything.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`
