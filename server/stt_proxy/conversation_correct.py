@@ -56,8 +56,22 @@ from stt_proxy import fewshot, llm
 # harness itself is deterministic and the comparison means anything.
 #
 # Examples are worth 0.79 points, larger than either arm's spread and larger than both summed.
-# That was not the expected result: the examples in question are the two SYNTHETIC ones in
-# fewshot.py, so curated examples drawn from real corrected exchanges are probably worth more.
+#
+# CURATED EXAMPLES WERE TRIED AND ARE WORSE. Three real 2026-07-28 exchanges, hand-written
+# changes and reasons, held out from the 08-07 scoring corpus, 3 repeats:
+#
+#   synthetic (fewshot.py)   17.07%  spread 0.18   invented 150.3   36-40 turns rewritten
+#   curated (3 real)         18.37%  spread 0.09   invented 159.3   59-65 turns rewritten
+#
+# 1.30 points worse, outside both spreads, and the rewrite count nearly doubled. Examples teach
+# EDIT PROPENSITY, not just edit style: the curated set was chosen by sorting candidate
+# exchanges by number of corrections, so almost every turn in it changed, and the model
+# copied that rate. The synthetic pair happens to include a turn that needed nothing and comes
+# back byte-identical -- a restraint signal the curated set lacked.
+#
+# So curation is not dead, but "pick the most interesting exchanges" is the wrong selection
+# rule. A second attempt should match the corpus's real edit density and deliberately include
+# unchanged turns. The file used here is kept, gitignored, at server/conversation-fewshot.json.
 #
 # Calibration note: the ~1-point run-to-run noise recorded for the 2026-08-03 correction
 # bake-off does NOT apply here. That figure came from whole-pipeline STT correction with one
