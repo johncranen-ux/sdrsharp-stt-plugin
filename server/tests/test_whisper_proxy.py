@@ -2783,3 +2783,49 @@ def test_declared_no_changes_stores_no_conv_field(monkeypatch):
     turns = conversations._resolved[0]["turns"]
     assert "conv" not in turns[0]
     assert "changes" not in turns[0]
+
+
+def _row_with_correction():
+    return [{
+        "vessel": "EXAMPLE TRADER", "mmsi": "1", "confidence": "high", "evidence": "e",
+        "channel": "160,650", "start": "2026-08-07 10:14:15", "end": "2026-08-07 10:14:19",
+        "turns": [
+            {"time": "10:14:15", "text": "Maas Approach, motor vision Example Trader.",
+             "raw": "r", "live_vessel": None,
+             "conv": "Maas Approach, Motorvessel Example Trader.",
+             "changes": [{"from": "motor vision", "to": "Motorvessel",
+                          "reason": "shore station rendition"}]},
+            {"time": "10:14:19", "text": "Motorvessel Example Trader, Maas Approach.",
+             "raw": "r", "live_vessel": None},
+        ],
+    }]
+
+
+def test_the_page_shows_the_corrected_text():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "Maas Approach, Motorvessel Example Trader." in html
+
+
+def test_the_page_keeps_the_original_recoverable():
+    """The rewrite was allowed on the condition that nothing is silently overwritten."""
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "motor vision" in html
+    assert "shore station rendition" in html
+
+
+def test_the_page_counts_the_corrections():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "1 corrected" in html
+
+
+def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
+    """Assert on the badge and the marker class, NOT on the word 'corrected': the page's
+    static explanatory paragraph contains that word on every render."""
+    rows = _row_with_correction()
+    for turn in rows[0]["turns"]:
+        turn.pop("conv", None)
+        turn.pop("changes", None)
+    html = conversations.render_conversations_page(rows)
+    assert "fixedcount" not in html
+    assert 'class="fixed"' not in html
+    assert "Maas Approach, motor vision Example Trader." in html

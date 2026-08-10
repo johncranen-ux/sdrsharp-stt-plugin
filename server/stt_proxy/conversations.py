@@ -720,14 +720,33 @@ def render_conversations_page(rows: list[dict]) -> str:
             meta.append(_html_escape(row["type"]))
 
         turns = []
+        corrected_count = 0
         for t in row.get("turns", []):
             live = t.get("live_vessel")
             # Shown when the live guess disagreed, so the correction is visible rather than
             # silently overwritten.
             note = (f'<span class="was">live: {_html_escape(live)}</span>'
                     if live and live != vessel else "")
+
+            shown = t.get("conv") or t.get("text", "")
+            changes = t.get("changes") or []
+            if t.get("conv"):
+                corrected_count += 1
+                # title= rather than a second line: the original stays one hover away without
+                # doubling the length of every conversation on the page.
+                detail = "; ".join(
+                    f'{c.get("from","")} -> {c.get("to","")} ({c.get("reason","")})'
+                    for c in changes)
+                body = (f'<span class="fixed" title="was: {_html_escape(t.get("text",""))}'
+                        f' &#10;{_html_escape(detail)}">{_html_escape(shown)}</span>')
+            else:
+                body = _html_escape(shown)
+
             turns.append(f'<li><span class="t">{_html_escape(t.get("time",""))}</span> '
-                         f'{_html_escape(t.get("text",""))} {note}</li>')
+                         f'{body} {note}</li>')
+
+        fixed_badge = (f'<span class="badge fixedcount">{corrected_count} corrected</span>'
+                       if corrected_count else "")
 
         # Omitted entirely rather than rendered empty: conversations that resolved to nobody,
         # and the rows stored before these fields existed, have nothing to say here.
@@ -738,7 +757,7 @@ def render_conversations_page(rows: list[dict]) -> str:
     <div class="conv {'named' if vessel else 'unnamed'}">
       <div class="hd">
         <span class="vessel">{ident}</span>
-        <span class="badge {_html_escape(conf)}">{badge}</span>
+        <span class="badge {_html_escape(conf)}">{badge}</span>{fixed_badge}
         <span class="meta">{' &middot; '.join(meta)}</span>
         <span class="when">{_html_escape(row.get('start',''))} &ndash; {_html_escape(row.get('end',''))[-8:]}
               &middot; ch {_html_escape(row.get('channel',''))} &middot; {len(row.get('turns', []))} turns</span>
@@ -770,13 +789,14 @@ def render_conversations_page(rows: list[dict]) -> str:
  li {{ padding: 3px 0; border-top: 1px solid #f0f0f0; font-size: .95em; }}
  .t {{ color: #888; font-family: monospace; margin-right: 8px; }}
  .was {{ color: #c0392b; font-size: .8em; margin-left: 6px; }}
+ .fixed {{ border-bottom: 1px dotted #2c7; cursor: help; }}
  .empty {{ color: #666; }}
 </style></head><body>
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>
 <p style="color:#666;font-size:.9em">Identity is decided after each exchange ends, from the whole
-exchange rather than one transmission. Transmission text is copied verbatim from the live
-transcript &mdash; this pass never rewrites it.</p>
+exchange rather than one transmission. Text marked with a dotted underline was corrected using
+the rest of the conversation &mdash; hover it to see what was heard and why it changed.</p>
 {body}
 </body></html>"""
 
