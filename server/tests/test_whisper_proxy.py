@@ -2699,3 +2699,87 @@ def test_a_failed_correction_still_stores_the_conversation(monkeypatch):
     conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
     assert len(conversations._resolved) == 1
     assert conversations._resolved[0]["turns"][0]["text"]
+
+
+def test_flag_on_success_reaches_storage_through_resolve_window(monkeypatch):
+    """The wiring that matters: flag on, correction succeeds, the fix reaches storage.
+
+    Calling _store_resolved directly (as the tests above do) bypasses the merge logic in
+    _resolve_window entirely, so this drives the real entry point end to end.
+    """
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(
+        cc, "correct_conversation",
+        lambda turns, vessel: {1: {"text": "Maas Approach, Motorvessel Example Trader.",
+                                    "changes": [{"from": "motor vision", "to": "Motorvessel",
+                                                 "reason": "shore station"}]}})
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+                                    "evidence": "e", "confidence": "high"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    turns = conversations._resolved[0]["turns"]
+    assert turns[0]["conv"] == "Maas Approach, Motorvessel Example Trader."
+    assert turns[0]["changes"][0]["to"] == "Motorvessel"
+    assert "conv" not in turns[1]
+
+
+def _window4(when):
+    return [
+        {"id": 1, "time": when, "channel": "160,650", "text": "raw one",
+         "corrected": "one", "live_vessel": None},
+        {"id": 2, "time": when, "channel": "160,650", "text": "raw two",
+         "corrected": "two", "live_vessel": None},
+        {"id": 3, "time": when, "channel": "160,650", "text": "raw three",
+         "corrected": "three", "live_vessel": None},
+        {"id": 4, "time": when, "channel": "160,650", "text": "raw four",
+         "corrected": "four", "live_vessel": None},
+    ]
+
+
+def test_corrections_do_not_leak_across_exchanges(monkeypatch):
+    """The per-exchange split exists so one conversation's context cannot edit another's
+    turns. This is the assertion that would fail if someone "simplified" the loop in
+    _resolve_window to one correction call per window instead of per exchange.
+    """
+    calls = []
+
+    def record_call(turns, vessel):
+        calls.append(sorted(t["id"] for t in turns))
+        return None
+
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(cc, "correct_conversation", record_call)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [
+                            {"chunk_ids": [1, 2], "vessel": "A", "mmsi": "1",
+                             "evidence": "e", "confidence": "high"},
+                            {"chunk_ids": [3, 4], "vessel": "B", "mmsi": "2",
+                             "evidence": "e", "confidence": "high"},
+                        ])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window4(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert len(calls) == 2, "one correction call per exchange, never one per window"
+    assert [1, 2] in calls, "exchange 1's call must see only its own turn ids"
+    assert [3, 4] in calls, "exchange 2's call must see only its own turn ids"
+
+
+def test_declared_no_changes_stores_no_conv_field(monkeypatch):
+    """A correction that ran and declared no changes must not leak a conv/changes key --
+    that key's presence is how the page tells "not corrected" apart from "corrected to the
+    same thing", so an empty changes list must suppress it exactly like no correction at all.
+    """
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    corrections = {1: {"text": "Maas Approach, motor vision Example Trader.", "changes": []}}
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+          "evidence": "e", "confidence": "high"}],
+        corrections)
+    turns = conversations._resolved[0]["turns"]
+    assert "conv" not in turns[0]
+    assert "changes" not in turns[0]
