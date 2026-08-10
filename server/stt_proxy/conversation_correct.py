@@ -14,6 +14,33 @@ import os
 
 from stt_proxy import fewshot, llm
 
+# STAYS OFF. Measured 2026-08-10 over the 34 exchanges of the verified 08-07 corpus, Haiku,
+# scored by bench_conversation_correct.py:
+#
+#                        WER      errors   invented   rejected replies
+#   baseline           19.06%       211       167       -
+#   correction, no examples 18.34%  203       166       1 of 34
+#   correction, examples    17.71%  196       158       3 of 34
+#
+# WER improves and invented content falls, so on the numbers this looks like a win. Reading
+# what it actually changed says otherwise, and the numbers are why the default did not move.
+#
+# On the BERGE TOWNSEND exchange (2026-08-07 10:17:50) the pass rewrote the shore station's
+# "We have the Townsend" into "We have the Vision", and rewrote "Bergy Township" -- BERGE
+# TOWNSEND misheard, and the best surviving evidence of the real ship -- into "Berkey
+# Fountain". The stored resolution for that exchange was VISION at medium confidence, i.e.
+# wrong. So the pass took a resolver error and spread it over every turn, deleting the one
+# piece of evidence that contradicted it. WER went DOWN while this happened, and the invented
+# count went down too: neither metric can see it. Only reading the changes did.
+#
+# The cause is a contradiction in the prompt, not a bug in the code. Rule 1 says the shore
+# station's rendition wins; rule 2 says propagate the resolved vessel name; and nothing says
+# which governs when they disagree. That disagreement is precisely the signal that the
+# resolution is wrong, and rule 2 currently erases it.
+#
+# Before this is measured again, rule 2 needs a bound: never overwrite a name the shore
+# station actually spoke with the resolved name, and treat a disagreement as evidence about
+# the identification rather than as something to smooth away.
 CONVERSATION_CORRECT = os.environ.get("CONVERSATION_CORRECT", "off").strip().lower() == "on"
 CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", "anthropic").strip()
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
