@@ -691,9 +691,25 @@ AIS_NAME_FILTER    = os.environ.get("AIS_NAME_FILTER", "on").strip().lower() != 
 AIS_NAME_MIN_SCORE = int(os.environ.get("AIS_NAME_MIN_SCORE", "76"))
 AIS_NAME_MIN_TOKEN = int(os.environ.get("AIS_NAME_MIN_TOKEN", "4"))
 
-# Off until bench_identify --resolve has scored it end to end. See _unique_word_match for the
-# class it fixes and test_the_word_path_is_off_until_it_has_been_measured_end_to_end for the
-# four false answers that keep it off. AIS_NAME_WORD_MATCH=on to measure.
+# Off, and now measured end to end rather than merely suspected. bench_identify --resolve
+# --repeats 3 over the verified 08-07 labels, both arms, 2026-08-10:
+#
+#            precision                     recall    correct
+#   off      85.7% (84.8-87.6, spread 2.9) 76.5%     78
+#   on       84.8% (84.8-84.8, spread 0.0) 76.5%     78
+#
+# Three of 429 per-transmission verdicts differ, all three the NOORDSTROOM turns that moved
+# WITHIN the off arm between its own runs, so they are resolver nondeterminism and not this
+# flag. Nothing else moved. The 0.9-point precision gap is a third of the off arm's own
+# spread, which is the definition of not evidence.
+#
+# The reason is the gate rather than the matching: production hands match_by_name the whole
+# extracted vessel field, and this path only fires on a single-word probe, so it almost never
+# opens. That cuts both ways -- the four false answers below do not reach production either.
+#
+# Kept because the class it fixes is real (see _unique_word_match) and the conversation-level
+# correction pass is expected to produce exactly the bare-word probes that would open the
+# gate. Re-measure then; there is nothing to learn by re-running it against today's pipeline.
 AIS_NAME_WORD_MATCH = os.environ.get("AIS_NAME_WORD_MATCH", "off").strip().lower() == "on"
 
 _NAME_SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
