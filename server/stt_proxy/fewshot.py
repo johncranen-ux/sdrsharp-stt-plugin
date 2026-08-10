@@ -7,6 +7,11 @@ gate and still put traffic into git permanently (NL Telecommunicatiewet 18.13 / 
 
 The synthetic set below is invented, deliberately names nobody real, and exists so a fresh
 checkout works without the operator's private files.
+
+IMPORTANT: The file named by CONVERSATION_FEWSHOT_FILE must sit at a path matching the patterns
+ignored in .gitignore (server/*fewshot*.json, server/*examples*.json). The CI transcript gate is
+a hard-coded filename list, not a content scanner; an unmatched path bypasses the gate and can
+commit received radio traffic to a public repo.
 """
 
 import json

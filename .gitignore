@@ -85,3 +85,5 @@ WhisperPlugin/
 
 # Few-shot examples are built from real exchanges, which are received radio traffic.
 server/conversation-fewshot*.json
+server/*fewshot*.json
+server/*examples*.json

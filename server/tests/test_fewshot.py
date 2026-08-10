@@ -45,6 +45,20 @@ def test_a_malformed_file_falls_back_rather_than_crashing(tmp_path):
     assert fewshot.load_examples(str(path)) == fewshot.SYNTHETIC_EXAMPLES
 
 
+def test_an_empty_list_falls_back_to_the_synthetic_set(tmp_path):
+    """A well-formed but empty examples file must not disable the pass."""
+    path = tmp_path / "empty.json"
+    path.write_text(json.dumps([]), encoding="utf-8")
+    assert fewshot.load_examples(str(path)) == fewshot.SYNTHETIC_EXAMPLES
+
+
+def test_a_json_object_not_a_list_falls_back_to_the_synthetic_set(tmp_path):
+    """A well-formed JSON object (not an array) must not be interpreted as examples."""
+    path = tmp_path / "object.json"
+    path.write_text(json.dumps({"turns": []}), encoding="utf-8")
+    assert fewshot.load_examples(str(path)) == fewshot.SYNTHETIC_EXAMPLES
+
+
 def test_the_synthetic_examples_name_no_real_vessel():
     """Examples must teach patterns, not a roster. A real cached name in an example invites
     the model to reach for it elsewhere -- the failure mode the live prompt's rule 5 already
