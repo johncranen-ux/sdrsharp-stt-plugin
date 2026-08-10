@@ -146,3 +146,37 @@ def test_temperature_none_is_omitted_from_the_openrouter_body(monkeypatch):
     monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     llm.complete("s", "u", provider="openrouter", model="m", temperature=None)
     assert "temperature" not in seen
+
+
+class _Block:
+    """A content block that may or may not carry text, like the SDK's real ones."""
+    def __init__(self, text=None):
+        if text is not None:
+            self.text = text
+
+
+def test_a_thinking_block_before_the_answer_is_skipped(monkeypatch):
+    """Reasoning models put a ThinkingBlock first and the answer second.
+
+    claude-sonnet-5 does this, and content[0].text raised
+    `'ThinkingBlock' object has no attribute 'text'` on 31 of 34 exchanges in a real run --
+    which the pass reported as "no corrections" rather than as a broken request.
+    """
+    class _M:
+        def create(self, **kwargs):
+            return type("R", (), {"content": [_Block(), _Block('{"ok": 1}')]})()
+
+    monkeypatch.setattr(llm, "_anthropic_client",
+                        lambda timeout_s: type("C", (), {"messages": _M()})())
+    assert llm.complete("s", "u", provider="anthropic", model="m") == '{"ok": 1}'
+
+
+def test_a_reply_with_no_text_block_is_an_llm_error(monkeypatch):
+    class _M:
+        def create(self, **kwargs):
+            return type("R", (), {"content": [_Block(), _Block()]})()
+
+    monkeypatch.setattr(llm, "_anthropic_client",
+                        lambda timeout_s: type("C", (), {"messages": _M()})())
+    with pytest.raises(llm.LLMError, match="no text"):
+        llm.complete("s", "u", provider="anthropic", model="m")

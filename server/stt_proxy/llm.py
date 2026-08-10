@@ -46,7 +46,14 @@ def _complete_anthropic(system, user, *, model, temperature, timeout_s, max_toke
     if temperature is not None:
         kwargs["temperature"] = temperature
     message = client.messages.create(**kwargs)
-    return message.content[0].text.strip()
+    # The FIRST block is not necessarily the answer. Reasoning models emit a ThinkingBlock
+    # ahead of it, and claude-sonnet-5 does: content[0].text raised 'ThinkingBlock' object has
+    # no attribute 'text' on 31 of 34 exchanges in a real run, which surfaced as "the model
+    # made no corrections" rather than as a broken request.
+    text = next((b.text for b in message.content if getattr(b, "text", None) is not None), None)
+    if text is None:
+        raise LLMError(f"reply from {model} carried no text block")
+    return text.strip()
 
 
 def _complete_openrouter(system, user, *, model, temperature, timeout_s, max_tokens):
