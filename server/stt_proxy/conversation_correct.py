@@ -14,33 +14,42 @@ import os
 
 from stt_proxy import fewshot, llm
 
-# STAYS OFF. Measured 2026-08-10 over the 34 exchanges of the verified 08-07 corpus, Haiku,
-# scored by bench_conversation_correct.py:
+# Measured twice on 2026-08-10 over the 34 exchanges of the verified 08-07 corpus, Haiku,
+# scored by bench_conversation_correct.py. Round 2 is the current prompt; round 1 is kept
+# because the gap between them is the whole lesson.
 #
-#                        WER      errors   invented   rejected replies
-#   baseline           19.06%       211       167       -
-#   correction, no examples 18.34%  203       166       1 of 34
-#   correction, examples    17.71%  196       158       3 of 34
+#                              WER     errors  invented  turns rewritten
+#   baseline                 19.06%      211      167      -
+#   r1 no examples           18.34%      203      166      -
+#   r1 examples              17.71%      196      158     42
+#   r2 no examples           17.98%      199      157      -
+#   r2 examples              17.25%      191      151     36
 #
-# WER improves and invented content falls, so on the numbers this looks like a win. Reading
-# what it actually changed says otherwise, and the numbers are why the default did not move.
+# ROUND 1 LOOKED LIKE A WIN AND WAS NOT. On the BERGE TOWNSEND exchange (10:17:50), whose
+# stored resolution was VISION at medium confidence and therefore wrong, the pass rewrote the
+# shore station's "We have the Townsend" into "We have the Vision" and turned "Bergy Township"
+# -- BERGE TOWNSEND misheard, the best surviving evidence of the real ship -- into "Berkey
+# Fountain". It spread a resolver error across every turn and deleted the evidence against it.
+# WER fell and invented content fell while that happened. Neither metric can see this class of
+# failure; only reading the changes could. Worth remembering the next time a harness reports an
+# improvement.
 #
-# On the BERGE TOWNSEND exchange (2026-08-07 10:17:50) the pass rewrote the shore station's
-# "We have the Townsend" into "We have the Vision", and rewrote "Bergy Township" -- BERGE
-# TOWNSEND misheard, and the best surviving evidence of the real ship -- into "Berkey
-# Fountain". The stored resolution for that exchange was VISION at medium confidence, i.e.
-# wrong. So the pass took a resolver error and spread it over every turn, deleting the one
-# piece of evidence that contradicted it. WER went DOWN while this happened, and the invented
-# count went down too: neither metric can see it. Only reading the changes did.
+# The cause was a contradiction in the prompt rather than a defect in the code: rule 1 makes
+# the shore station's rendition authoritative, rule 2 propagated the resolved name, and nothing
+# said which governs when they disagree -- though that disagreement is exactly the signal that
+# the identification is wrong. Rule 2 is now bounded (repair a garbled rendering of the SAME
+# name only; never replace a different one; rule 1 outranks it) and the prompt states that the
+# identification comes from a fallible pass.
 #
-# The cause is a contradiction in the prompt, not a bug in the code. Rule 1 says the shore
-# station's rendition wins; rule 2 says propagate the resolved vessel name; and nothing says
-# which governs when they disagree. That disagreement is precisely the signal that the
-# resolution is wrong, and rule 2 currently erases it.
+# ROUND 2 KEEPS "We have the Townsend" INTACT, rewrites 36 turns instead of 42, and improves
+# every number anyway. Being more conservative cost nothing.
 #
-# Before this is measured again, rule 2 needs a bound: never overwrite a name the shore
-# station actually spoke with the resolved name, and treat a disagreement as evidence about
-# the identification rather than as something to smooth away.
+# Still off by default, for two reasons rather than doubt about the direction: one run per arm
+# cannot separate a 1.8-point gain from this project's ~1-point run-to-run noise, and the pass
+# still writes "Motorvessel Vision" into two turns of that same exchange -- a wrong
+# identification propagating, though no longer destroying evidence. That last one should
+# largely resolve once the `motor vision` -> Motorvessel correction merges from
+# feat/local-ais-receiver, since the phrase is a garbled type word rather than a name.
 CONVERSATION_CORRECT = os.environ.get("CONVERSATION_CORRECT", "off").strip().lower() == "on"
 CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", "anthropic").strip()
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
