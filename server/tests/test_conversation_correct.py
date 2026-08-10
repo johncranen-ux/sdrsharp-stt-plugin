@@ -109,6 +109,52 @@ def test_non_list_changes_is_rejected():
         ]), TURNS)
 
 
+def test_a_non_dict_changes_entry_is_rejected():
+    """A bare string in `changes` would be stored verbatim and crash the page's c.get('from')."""
+    with pytest.raises(cc.CorrectionRejected, match=r"id 1"):
+        cc.validate_reply(_reply([
+            {"id": 1, "text": "something changed", "changes": ["oops"]},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_a_changes_entry_with_a_non_string_from_is_rejected():
+    with pytest.raises(cc.CorrectionRejected, match=r"id 1"):
+        cc.validate_reply(_reply([
+            {"id": 1, "text": "something changed",
+             "changes": [{"from": None, "to": "Motorvessel", "reason": "r"}]},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_a_non_integer_id_is_rejected_not_a_typeerror():
+    """{"id": [1]} would raise TypeError from `turn_id not in original` if used unchecked as a
+    dict key -- that must become a CorrectionRejected instead."""
+    with pytest.raises(cc.CorrectionRejected, match="not an integer"):
+        cc.validate_reply(_reply([
+            {"id": [1], "text": "x", "changes": []},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_a_bool_id_is_rejected_even_though_python_treats_it_as_an_int():
+    """True == 1 and hashes the same, so a naive isinstance(x, int) check alone would let a
+    bool through as a silent alias for id 1 -- it must be rejected on its own message, not
+    coincidentally rejected later as an undeclared rewrite."""
+    with pytest.raises(cc.CorrectionRejected, match="not an integer"):
+        cc.validate_reply(_reply([
+            {"id": True, "text": "x", "changes": []},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_correct_conversation_returns_none_for_a_non_integer_id_reply(monkeypatch):
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: (
+        '{"turns": [{"id": [1], "text": "x", "changes": []},'
+        ' {"id": 2, "text": "Motorvessel Example Trader, Maas Approach.", "changes": []}]}'))
+    assert cc.correct_conversation(TURNS, None) is None
+
+
 def test_non_dict_turn_entry_is_rejected():
     """A turn entry that is not an object means the model output structure is corrupted."""
     with pytest.raises(cc.CorrectionRejected, match="not an object"):
@@ -195,6 +241,41 @@ def test_malformed_examples_degrade_to_running_without_them(monkeypatch):
         ' "changes": []}]}'))
     # Should return corrections, not None or raise.
     assert cc.correct_conversation(TURNS, None) is not None
+
+
+def test_a_later_failure_still_logs_after_the_initial_burst_is_suppressed(monkeypatch, capsys):
+    """The counter is process-lifetime and shared between the examples-render path and the
+    LLM path, so after three failures ever, every later systematic failure used to go
+    completely silent -- the opposite of what the docstring promises ('never silent').
+    Suppression must be periodic, not permanent."""
+    monkeypatch.setattr(cc, "_failure_count", 0)
+    monkeypatch.setattr(cc, "_FAILURE_LOG_PERIOD", 5)
+
+    for _ in range(cc._FAILURE_LOG_LIMIT):
+        cc._log_failure("boom")
+    capsys.readouterr()  # discard the initial burst's output
+
+    for _ in range(cc._FAILURE_LOG_PERIOD - 1):
+        cc._log_failure("boom")
+    out = capsys.readouterr().out
+    assert "boom" not in out, "still inside the suppression window"
+
+    cc._log_failure("boom")
+    out = capsys.readouterr().out
+    assert "boom" in out, "a later systematic failure must still be visible, not silent forever"
+
+
+def test_malformed_timeout_env_falls_back_to_the_documented_default(monkeypatch):
+    """A malformed CONVERSATION_CORRECT_TIMEOUT_S must not crash proxy startup -- that would
+    break the default-off promise, since import happens regardless of the flag."""
+    import importlib
+    monkeypatch.setenv("CONVERSATION_CORRECT_TIMEOUT_S", "not-a-number")
+    try:
+        reloaded = importlib.reload(cc)
+        assert reloaded.CONVERSATION_CORRECT_TIMEOUT_S == 60.0
+    finally:
+        monkeypatch.delenv("CONVERSATION_CORRECT_TIMEOUT_S", raising=False)
+        importlib.reload(cc)
 
 
 def test_temperature_zero_is_passed_to_the_model(monkeypatch):

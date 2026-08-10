@@ -19,10 +19,18 @@ CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", 
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
                                             "claude-haiku-4-5-20251001").strip()
 CONVERSATION_CORRECT_FEWSHOT = os.environ.get("CONVERSATION_CORRECT_FEWSHOT", "on").strip().lower() != "off"
-CONVERSATION_CORRECT_TIMEOUT_S = float(os.environ.get("CONVERSATION_CORRECT_TIMEOUT_S", "60"))
+_TIMEOUT_DEFAULT_S = 60.0
+try:
+    # Parsed defensively: this runs at import time regardless of the flag, so a malformed
+    # value here must not crash proxy startup and break the default-off promise.
+    CONVERSATION_CORRECT_TIMEOUT_S = float(
+        os.environ.get("CONVERSATION_CORRECT_TIMEOUT_S", str(_TIMEOUT_DEFAULT_S)))
+except ValueError:
+    CONVERSATION_CORRECT_TIMEOUT_S = _TIMEOUT_DEFAULT_S
 
-_failures_logged = 0
+_failure_count = 0
 _FAILURE_LOG_LIMIT = 3
+_FAILURE_LOG_PERIOD = 200
 
 
 SYSTEM_PROMPT = """\
@@ -90,6 +98,13 @@ def validate_reply(payload: dict, turns: list[dict]) -> dict[int, dict]:
         if not isinstance(row, dict):
             raise CorrectionRejected(f"turn entry is not an object: {row!r}")
         turn_id = row.get("id")
+        # bool is a subclass of int (True == 1, same hash), so it must be excluded explicitly
+        # or it silently aliases a real id instead of being rejected on its own. Checked before
+        # any dict lookup: an unhashable id (e.g. a list) raises TypeError as a dict key, which
+        # correct_conversation does not catch, and that TypeError previously escaped through
+        # _resolve_window and lost the rest of the reaper's batch.
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool):
+            raise CorrectionRejected(f"id is not an integer: {turn_id!r}")
         if turn_id not in original:
             raise CorrectionRejected(f"unknown id {turn_id!r}")
         if turn_id in seen:
@@ -102,6 +117,10 @@ def validate_reply(payload: dict, turns: list[dict]) -> dict[int, dict]:
         changes = row.get("changes")
         if not isinstance(changes, list):
             raise CorrectionRejected(f"id {turn_id!r} has no changes list")
+        for change in changes:
+            if not isinstance(change, dict) or not isinstance(change.get("from"), str) \
+                    or not isinstance(change.get("to"), str):
+                raise CorrectionRejected(f"id {turn_id!r} has a malformed changes entry: {change!r}")
 
         unchanged = text.strip() == original[turn_id].strip()
         if unchanged and changes:
@@ -127,11 +146,22 @@ def render_input(turns: list[dict], vessel: str | None) -> str:
 
 def _log_failure(reason: str) -> None:
     """Rate-limited, but never silent: a prompt that has started failing on every call must
-    be visible. Same shape as _report_unrecognised_frame."""
-    global _failures_logged
-    if _failures_logged < _FAILURE_LOG_LIMIT:
-        _failures_logged += 1
-        suffix = " (further failures suppressed)" if _failures_logged == _FAILURE_LOG_LIMIT else ""
+    be visible. Same shape as _report_unrecognised_frame.
+
+    The counter is process-lifetime and shared between the examples-render path and the LLM
+    path, so a permanent cutoff after the first few failures would go silent forever the moment
+    a systematic fault starts -- the same failure-by-going-quiet class as a dead feed.
+    Suppression is periodic instead: log the first few, then one in every
+    _FAILURE_LOG_PERIOD after that, so a standing fault stays visible without spamming the
+    console on every call. Plain global increment, no lock: an occasional missed or double
+    count on this counter only shifts which call logs, it never suppresses the fault entirely.
+    """
+    global _failure_count
+    _failure_count += 1
+    n = _failure_count
+    due = n <= _FAILURE_LOG_LIMIT or (n - _FAILURE_LOG_LIMIT) % _FAILURE_LOG_PERIOD == 0
+    if due:
+        suffix = " (further failures suppressed)" if n == _FAILURE_LOG_LIMIT else ""
         print(f"  [conv-correct] not applied: {reason}{suffix}", flush=True)
 
 
