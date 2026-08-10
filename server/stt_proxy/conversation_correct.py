@@ -87,6 +87,7 @@ from stt_proxy import fewshot, llm
 # resolver's error propagating rather than a fault here -- but it is still a wrong name on the
 # page. Expected to resolve when the `motor vision` -> Motorvessel correction merges from
 # feat/local-ais-receiver, since the phrase is a garbled TYPE WORD rather than a name.
+#
 # ON by default as of 2026-08-10, on the evidence above. CONVERSATION_CORRECT=off restores the
 # previous behaviour exactly: the pass never runs, no `conv` key is stored, and the page renders
 # the verbatim text with the wording it had before this feature existed.
@@ -95,6 +96,18 @@ CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", 
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
                                             "claude-haiku-4-5-20251001").strip()
 CONVERSATION_CORRECT_FEWSHOT = os.environ.get("CONVERSATION_CORRECT_FEWSHOT", "on").strip().lower() != "off"
+
+# 0 by default, because sampling noise made an earlier A/B in this project unreadable. But some
+# models reject the parameter outright -- claude-sonnet-5 answers `400 ... temperature is
+# deprecated for this model` -- so "none" omits it rather than sending a value that 400s.
+_temp_raw = os.environ.get("CONVERSATION_CORRECT_TEMPERATURE", "0").strip().lower()
+if _temp_raw in ("none", "default", ""):
+    CONVERSATION_CORRECT_TEMPERATURE = None
+else:
+    try:
+        CONVERSATION_CORRECT_TEMPERATURE = float(_temp_raw)
+    except ValueError:
+        CONVERSATION_CORRECT_TEMPERATURE = 0.0
 _TIMEOUT_DEFAULT_S = 60.0
 try:
     # Parsed defensively: this runs at import time regardless of the flag, so a malformed
@@ -265,7 +278,7 @@ def correct_conversation(turns: list[dict], vessel: str | None) -> dict[int, dic
             system, render_input(turns, vessel),
             provider=CONVERSATION_CORRECT_PROVIDER,
             model=CONVERSATION_CORRECT_MODEL,
-            temperature=0,
+            temperature=CONVERSATION_CORRECT_TEMPERATURE,
             timeout_s=CONVERSATION_CORRECT_TIMEOUT_S,
         )
         payload = json.loads(llm.strip_code_fence(reply))

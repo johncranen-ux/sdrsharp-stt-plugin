@@ -319,3 +319,29 @@ def test_the_pass_is_on_by_default_and_off_is_still_honoured(monkeypatch):
 
     monkeypatch.delenv("CONVERSATION_CORRECT", raising=False)
     importlib.reload(cc)
+
+
+def test_temperature_can_be_omitted_for_models_that_reject_it(monkeypatch):
+    """claude-sonnet-5 answers 400 'temperature is deprecated for this model'.
+
+    Pinning 0 is right for models that accept it -- sampling noise made an earlier A/B in this
+    project unreadable -- but a model that rejects the parameter fails every call, so the
+    setting has to be able to say 'do not send it' rather than only 'send this value'.
+    """
+    import importlib
+
+    monkeypatch.setenv("CONVERSATION_CORRECT_TEMPERATURE", "none")
+    mod = importlib.reload(cc)
+    assert mod.CONVERSATION_CORRECT_TEMPERATURE is None
+
+    monkeypatch.delenv("CONVERSATION_CORRECT_TEMPERATURE", raising=False)
+    mod = importlib.reload(cc)
+    assert mod.CONVERSATION_CORRECT_TEMPERATURE == 0.0
+
+    captured = {}
+    monkeypatch.setattr(mod.llm, "complete",
+                        lambda *a, **k: captured.update(k) or
+                        '{"turns": [{"id": 1, "text": "Maas Approach, motor vision Example Trader.", "changes": []},'
+                        ' {"id": 2, "text": "Motorvessel Example Trader, Maas Approach.", "changes": []}]}')
+    mod.correct_conversation(TURNS, None)
+    assert captured["temperature"] == 0.0

@@ -118,3 +118,31 @@ def test_openrouter_without_a_key_is_an_llm_error(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(llm.LLMError, match="OPENROUTER_API_KEY"):
         llm.complete("s", "u", provider="openrouter", model="m")
+
+
+def test_temperature_none_is_omitted_from_the_anthropic_call(monkeypatch):
+    """Newer models reject the parameter outright.
+
+    claude-sonnet-5 answers `400 ... temperature is deprecated for this model`, so a call that
+    always sends it fails every time. Discovered by a one-exchange smoke test before a 102-call
+    bake-off run, which would otherwise have read as "the model made no corrections".
+    """
+    calls = {}
+    monkeypatch.setattr(llm, "_anthropic_client",
+                        lambda timeout_s: _FakeClient("x", calls))
+    llm.complete("sys", "usr", provider="anthropic", model="m", temperature=None)
+    assert "temperature" not in calls
+
+
+def test_temperature_none_is_omitted_from_the_openrouter_body(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen.update(json.loads(request.data.decode("utf-8")))
+        return _FakeResponse(json.dumps(
+            {"choices": [{"message": {"content": "x"}}]}).encode("utf-8"))
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    llm.complete("s", "u", provider="openrouter", model="m", temperature=None)
+    assert "temperature" not in seen

@@ -38,10 +38,14 @@ def _anthropic_client(timeout_s: float):
 
 def _complete_anthropic(system, user, *, model, temperature, timeout_s, max_tokens):
     client = _anthropic_client(timeout_s)
-    message = client.messages.create(
-        model=model, max_tokens=max_tokens, temperature=temperature,
-        system=system, messages=[{"role": "user", "content": user}],
-    )
+    kwargs = dict(model=model, max_tokens=max_tokens, system=system,
+                  messages=[{"role": "user", "content": user}])
+    # Omitted entirely rather than defaulted, because some models reject the parameter itself:
+    # claude-sonnet-5 answers `400 ... temperature is deprecated for this model`, so sending it
+    # fails every call rather than merely being ignored.
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    message = client.messages.create(**kwargs)
     return message.content[0].text.strip()
 
 
@@ -49,13 +53,15 @@ def _complete_openrouter(system, user, *, model, temperature, timeout_s, max_tok
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         raise LLMError("OPENROUTER_API_KEY is not set")
-    payload = json.dumps({
+    body = {
         "model": model,
-        "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
-    }).encode("utf-8")
+    }
+    if temperature is not None:
+        body["temperature"] = temperature
+    payload = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(OPENROUTER_URL, data=payload, method="POST")
     request.add_header("Authorization", f"Bearer {api_key}")
     request.add_header("Content-Type", "application/json")
@@ -63,8 +69,8 @@ def _complete_openrouter(system, user, *, model, temperature, timeout_s, max_tok
     # which reads as a model-specific failure and is not.
     request.add_header("User-Agent", "sdrsharp-stt-proxy/1.0")
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return body["choices"][0]["message"]["content"].strip()
+        parsed = json.loads(response.read().decode("utf-8"))
+    return parsed["choices"][0]["message"]["content"].strip()
 
 
 _PROVIDERS = {"anthropic": _complete_anthropic, "openrouter": _complete_openrouter}
