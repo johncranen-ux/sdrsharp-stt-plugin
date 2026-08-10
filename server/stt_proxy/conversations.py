@@ -705,6 +705,7 @@ def _resolve_window(window: list[dict]) -> None:
 def render_conversations_page(rows: list[dict]) -> str:
     """Render resolved exchanges, newest first. Built from stored data on every request."""
     blocks = []
+    any_corrections = False
     for row in reversed(rows):
         vessel = row.get("vessel")
         conf   = row.get("confidence", "low")
@@ -745,6 +746,8 @@ def render_conversations_page(rows: list[dict]) -> str:
             turns.append(f'<li><span class="t">{_html_escape(t.get("time",""))}</span> '
                          f'{body} {note}</li>')
 
+        if corrected_count:
+            any_corrections = True
         fixed_badge = (f'<span class="badge fixedcount">{corrected_count} corrected</span>'
                        if corrected_count else "")
 
@@ -767,6 +770,16 @@ def render_conversations_page(rows: list[dict]) -> str:
     </div>""")
 
     body = "".join(blocks) if blocks else '<p class="empty">No conversations resolved yet.</p>'
+    # Chosen from what the page is actually showing, not from the flag: CONVERSATION_CORRECT
+    # can be off, or on but yet to correct anything on this page, and either way a rendered
+    # row with no "conv" field means the promise that this pass rewrites text would be false.
+    correction_note = (
+        "Text marked with a dotted underline was corrected using\n"
+        "the rest of the conversation &mdash; hover it to see what was heard and why it changed."
+        if any_corrections else
+        "Transmission text is copied verbatim from the live\n"
+        "transcript &mdash; this pass never rewrites it."
+    )
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Resolved Conversations</title>
 <meta http-equiv="refresh" content="30">
@@ -796,17 +809,32 @@ def render_conversations_page(rows: list[dict]) -> str:
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>
 <p style="color:#666;font-size:.9em">Identity is decided after each exchange ends, from the whole
-exchange rather than one transmission. Text marked with a dotted underline was corrected using
-the rest of the conversation &mdash; hover it to see what was heard and why it changed.</p>
+exchange rather than one transmission. {correction_note}</p>
 {body}
 </body></html>"""
+
+
+def _reap_pass() -> None:
+    """Take whatever windows have closed and resolve each independently.
+
+    Isolated per window on purpose: _take_closed_windows has already removed a closed
+    window's chunks from the journal by the time _resolve_window runs, so a single bad
+    reply (or any other surprise) inside one window must not cost the rest of the batch --
+    they would otherwise be lost permanently, never stored, never rendered.
+    """
+    try:
+        windows = _take_closed_windows()
+    except Exception as exc:
+        print(f"  [conv reaper error] {exc}", flush=True)
+        return
+    for window in windows:
+        try:
+            _resolve_window(window)
+        except Exception as exc:
+            print(f"  [conv reaper error] {exc}", flush=True)
 
 
 def _conversation_reaper() -> None:
     while True:
         threading.Event().wait(CONVERSATION_POLL_S)
-        try:
-            for window in _take_closed_windows():
-                _resolve_window(window)
-        except Exception as exc:
-            print(f"  [conv reaper error] {exc}", flush=True)
+        _reap_pass()

@@ -2819,6 +2819,47 @@ def test_the_page_counts_the_corrections():
     assert 'class="badge fixedcount"' in html
 
 
+def test_the_page_promises_corrections_only_when_a_row_actually_carries_one():
+    """With CONVERSATION_CORRECT off (or simply no correction on this page yet) no rendered
+    row carries a 'conv' field, so the explanatory paragraph must not claim the page rewrites
+    text -- that was true before this feature and must stay true when nothing here used it."""
+    rows = _row_with_correction()
+    for turn in rows[0]["turns"]:
+        turn.pop("conv", None)
+        turn.pop("changes", None)
+    html = conversations.render_conversations_page(rows)
+    assert "never rewrites it" in html
+    assert "was corrected using" not in html
+
+
+def test_the_page_promises_corrections_when_a_row_carries_one():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "was corrected using" in html
+    assert "never rewrites it" not in html
+
+
+def test_one_windows_failure_does_not_lose_the_rest_of_the_batch(monkeypatch):
+    """_take_closed_windows has already removed a closed window's chunks from the journal by
+    the time the reaper resolves it, so one window blowing up (e.g. on the unhashable-id
+    TypeError that validate_reply now turns into CorrectionRejected, or any other surprise)
+    must not take the rest of the batch down with it -- every remaining window still gets
+    stored."""
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    good_window = _window(when)
+    bad_window = [{"id": 99, "time": when, "channel": "x"}]
+    monkeypatch.setattr(conversations, "_take_closed_windows", lambda: [bad_window, good_window])
+    calls = []
+
+    def fake_resolve(window):
+        calls.append(window)
+        if window is bad_window:
+            raise TypeError("boom")
+
+    monkeypatch.setattr(conversations, "_resolve_window", fake_resolve)
+    conversations._reap_pass()
+    assert calls == [bad_window, good_window], "the good window must still be reached"
+
+
 def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
     """Assert on the badge markup and the marker class, NOT on the bare word 'fixedcount' or
     'corrected': the page's <style> block names the fixedcount class unconditionally (it is
