@@ -117,3 +117,68 @@ def test_non_dict_turn_entry_is_rejected():
             "this is a string, not a turn object",
             {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
         ]), TURNS)
+
+
+from stt_proxy import llm  # noqa: E402
+
+
+def test_the_input_lists_turns_with_ids_and_the_resolved_vessel():
+    text = cc.render_input(TURNS, "EXAMPLE TRADER")
+    assert "1. Maas Approach, motor vision Example Trader." in text
+    assert "EXAMPLE TRADER" in text
+
+
+def test_the_input_says_so_when_nobody_was_identified():
+    text = cc.render_input(TURNS, None)
+    assert "unidentified" in text
+
+
+def test_correct_conversation_returns_validated_corrections(monkeypatch):
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: (
+        '{"turns": [{"id": 1, "text": "Maas Approach, Motorvessel Example Trader.",'
+        ' "changes": [{"from": "motor vision", "to": "Motorvessel", "reason": "shore"}]},'
+        ' {"id": 2, "text": "Motorvessel Example Trader, Maas Approach.", "changes": []}]}'))
+    got = cc.correct_conversation(TURNS, "EXAMPLE TRADER")
+    assert got[1]["text"] == "Maas Approach, Motorvessel Example Trader."
+
+
+def test_a_fenced_reply_is_still_accepted(monkeypatch):
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: (
+        '```json\n{"turns": [{"id": 1, "text": "Maas Approach, motor vision Example Trader.",'
+        ' "changes": []}, {"id": 2, "text": "Motorvessel Example Trader, Maas Approach.",'
+        ' "changes": []}]}\n```'))
+    assert cc.correct_conversation(TURNS, None) is not None
+
+
+def test_a_provider_failure_returns_none(monkeypatch):
+    def boom(*a, **k):
+        raise llm.LLMError("timeout")
+    monkeypatch.setattr(cc.llm, "complete", boom)
+    assert cc.correct_conversation(TURNS, "EXAMPLE TRADER") is None
+
+
+def test_malformed_json_returns_none(monkeypatch):
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: "not json at all")
+    assert cc.correct_conversation(TURNS, None) is None
+
+
+def test_a_contract_violation_returns_none(monkeypatch):
+    """Rejected means the conversation is stored uncorrected, not partly corrected."""
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k:
+                        '{"turns": [{"id": 1, "text": "x", "changes": []}]}')
+    assert cc.correct_conversation(TURNS, None) is None
+
+
+def test_no_turns_needs_no_call(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not call the model for an empty exchange")
+    monkeypatch.setattr(cc.llm, "complete", boom)
+    assert cc.correct_conversation([], None) is None
+
+
+def test_the_prompt_forbids_naming_a_turn_that_named_nobody():
+    assert "named nobody" in cc.SYSTEM_PROMPT.lower()
+
+
+def test_the_prompt_keeps_digit_sequences_as_transcribed():
+    assert "one three zero zero" in cc.SYSTEM_PROMPT.lower()
