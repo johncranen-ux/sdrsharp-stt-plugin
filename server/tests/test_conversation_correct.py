@@ -182,3 +182,28 @@ def test_the_prompt_forbids_naming_a_turn_that_named_nobody():
 
 def test_the_prompt_keeps_digit_sequences_as_transcribed():
     assert "one three zero zero" in cc.SYSTEM_PROMPT.lower()
+
+
+def test_malformed_examples_degrade_to_running_without_them(monkeypatch):
+    """Failing to render examples must degrade, not return None or raise."""
+    monkeypatch.setattr(cc.fewshot, "load_examples", lambda: [
+        {"id": 1, "text": "example"}  # Missing required fields for render_examples
+    ])
+    monkeypatch.setattr(cc.llm, "complete", lambda *a, **k: (
+        '{"turns": [{"id": 1, "text": "Maas Approach, motor vision Example Trader.",'
+        ' "changes": []}, {"id": 2, "text": "Motorvessel Example Trader, Maas Approach.",'
+        ' "changes": []}]}'))
+    # Should return corrections, not None or raise.
+    assert cc.correct_conversation(TURNS, None) is not None
+
+
+def test_temperature_zero_is_passed_to_the_model(monkeypatch):
+    """The A/B measurement was rendered uninterpretable by sampling noise.
+    This hard requirement must be actively verified, not relied on llm.complete's default."""
+    call_kwargs = {}
+    def capture(*a, **k):
+        call_kwargs.update(k)
+        return '{"turns": [{"id": 1, "text": "x", "changes": []}, {"id": 2, "text": "y", "changes": []}]}'
+    monkeypatch.setattr(cc.llm, "complete", capture)
+    cc.correct_conversation(TURNS, None)
+    assert call_kwargs["temperature"] == 0

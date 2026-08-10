@@ -142,9 +142,13 @@ def correct_conversation(turns: list[dict], vessel: str | None) -> dict[int, dic
 
     system = SYSTEM_PROMPT
     if CONVERSATION_CORRECT_FEWSHOT:
-        rendered = fewshot.render_examples(fewshot.load_examples())
-        if rendered:
-            system = f"{system}\n\n{rendered}\n"
+        try:
+            rendered = fewshot.render_examples(fewshot.load_examples())
+            if rendered:
+                system = f"{system}\n\n{rendered}\n"
+        except Exception as exc:
+            # Failing to render examples must degrade to running without examples, not to returning None.
+            _log_failure(f"examples file: {exc}")
 
     try:
         reply = llm.complete(
