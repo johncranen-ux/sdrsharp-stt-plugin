@@ -84,9 +84,13 @@ start-all.bat
 WhisperPlugin/
 
 # Few-shot examples are built from real exchanges, which are received radio traffic.
-server/conversation-fewshot*.json
-server/*fewshot*.json
-server/*examples*.json
+# Unanchored (no server/ prefix): a pattern containing a slash is anchored to the directory
+# holding this .gitignore, so "server/*fewshot*.json" only ever matched files directly in
+# server/ and silently let server/stt_proxy/conversation-fewshot.json through. "*" also never
+# crosses a "/", so these must stay prefix-free to match at any depth.
+*fewshot*.json
+*examples*.json
 
-# bench_conversation_correct.py output. Same restriction as bench-correct-results*.json above.
-server/bench-conv-correct-*.json
+# bench_conversation_correct.py output. Same restriction as bench-correct-results*.json above,
+# and the same anchoring flaw as above -- unanchored so it matches at any depth.
+bench-conv-correct-*.json
