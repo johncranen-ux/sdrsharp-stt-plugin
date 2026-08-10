@@ -62,8 +62,9 @@ _FAILURE_LOG_PERIOD = 200
 
 SYSTEM_PROMPT = """\
 You are given the transmissions of ONE VHF radio exchange near Rotterdam (Maas Approach /
-Rotterdam VTS), in time order, already transcribed, together with the vessel that has already
-been identified for this exchange.
+Rotterdam VTS), in time order, already transcribed, together with the vessel that a separate
+identification pass has already resolved for this exchange. That pass is sometimes wrong, so
+treat its answer as a strong hint, not as ground truth.
 
 Correct the transcription of each turn using the rest of the exchange. You are NOT identifying
 anybody -- that is decided already. You are NOT improving anyone's English.
@@ -83,9 +84,12 @@ Rules:
    station's version over the vessel's own opening call: the station reads it off a screen,
    while the opening call is the noisiest turn on the channel. "motor vision" answered by
    "Motorvessel" means the opening call said Motorvessel.
-2. Propagate the identified vessel's name into turns that name the vessel -- but ONLY where a
-   name was actually spoken. A turn that named nobody must still name nobody. Never add a name
-   to a turn that did not have one.
+2. Use the identified vessel's name only to repair a garbled rendering of that same name --
+   never to replace a different name. A turn that named nobody must still name nobody: never
+   add a name to a turn that did not have one. If a turn plainly says a different name from
+   the identified vessel, leave it exactly as spoken and declare no change for it -- that
+   disagreement is evidence the identification is wrong, not something to smooth away.
+   Rule 1 outranks this rule -- a name the shore station actually said is never overwritten.
 3. Align a readback ONLY when it is garbled. A readback that is clean but different is a real
    disagreement -- a vessel getting it wrong -- and the operator needs to see it. Never edit a
    clean readback into agreement.

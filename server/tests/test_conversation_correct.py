@@ -230,6 +230,18 @@ def test_the_prompt_keeps_digit_sequences_as_transcribed():
     assert "one three zero zero" in cc.SYSTEM_PROMPT.lower()
 
 
+def test_the_prompt_says_the_identification_can_be_wrong():
+    assert "is sometimes wrong" in cc.SYSTEM_PROMPT.lower()
+
+
+def test_the_prompt_forbids_replacing_a_differently_named_turn():
+    assert "never to replace a different name" in cc.SYSTEM_PROMPT.lower()
+
+
+def test_the_prompt_says_rule_1_outranks_rule_2():
+    assert "rule 1 outranks this rule" in cc.SYSTEM_PROMPT.lower()
+
+
 def test_malformed_examples_degrade_to_running_without_them(monkeypatch):
     """Failing to render examples must degrade, not return None or raise."""
     monkeypatch.setattr(cc.fewshot, "load_examples", lambda: [
