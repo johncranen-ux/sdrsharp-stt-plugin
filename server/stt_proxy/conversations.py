@@ -25,6 +25,7 @@ from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
                            match_by_callsign, match_by_callsign_pattern,
                            match_by_callsign_suffix, match_by_mmsi)
 from stt_proxy.claude import _get_claude
+from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
                                    _spelled_out_runs)
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
@@ -634,24 +635,39 @@ def _save_conversations() -> None:
         print(f"[conv] could not save {CONVERSATIONS_FILE}: {exc}", flush=True)
 
 
-def _store_resolved(window: list[dict], exchanges: list[dict]) -> None:
-    """Record resolved exchanges together with the transmissions they cover, verbatim."""
+def _store_resolved(window: list[dict], exchanges: list[dict],
+                    corrections: dict[int, dict] | None = None) -> None:
+    """Record resolved exchanges together with the transmissions they cover, verbatim.
+
+    `corrections` maps chunk id to the conversation pass's output. It is stored ALONGSIDE the
+    verbatim text, never over it: a reader must always be able to recover what was heard.
+    """
+    corrections = corrections or {}
     by_id = {c["id"]: c for c in window}
     rows = []
     for ex in exchanges:
         turns = [by_id[i] for i in ex["chunk_ids"] if i in by_id]
         if not turns:
             continue
+        stored_turns = []
+        for t in turns:
+            row = {"time": t["time"].strftime("%H:%M:%S"),
+                   "text": t.get("corrected") or t.get("text", ""),
+                   "raw": t.get("text", ""),
+                   "live_vessel": t.get("live_vessel")}
+            fix = corrections.get(t["id"])
+            # Absent rather than equal-to-text when nothing was corrected, so the page can
+            # tell "not corrected" from "corrected to the same thing".
+            if fix and fix.get("changes"):
+                row["conv"] = fix["text"]
+                row["changes"] = fix["changes"]
+            stored_turns.append(row)
         rows.append({
             **{k: v for k, v in ex.items() if k != "chunk_ids"},
             "channel": turns[0]["channel"],
             "start": turns[0]["time"].strftime("%Y-%m-%d %H:%M:%S"),
             "end":   turns[-1]["time"].strftime("%Y-%m-%d %H:%M:%S"),
-            # Text is copied straight from the journal, never from the resolver.
-            "turns": [{"time": t["time"].strftime("%H:%M:%S"),
-                       "text": t.get("corrected") or t.get("text", ""),
-                       "raw": t.get("text", ""),
-                       "live_vessel": t.get("live_vessel")} for t in turns],
+            "turns": stored_turns,
         })
     if not rows:
         return
@@ -663,7 +679,20 @@ def _store_resolved(window: list[dict], exchanges: list[dict]) -> None:
 
 def _resolve_window(window: list[dict]) -> None:
     exchanges = resolve_conversation(window)
-    _store_resolved(window, exchanges)
+
+    # Correction runs per EXCHANGE, not per window: a window can hold several unrelated
+    # exchanges, and letting one conversation's context edit another's turns is the failure
+    # this split exists to prevent.
+    corrections: dict[int, dict] = {}
+    if conversation_correct.CONVERSATION_CORRECT:
+        by_id = {c["id"]: c for c in window}
+        for ex in exchanges:
+            turns = [by_id[i] for i in ex["chunk_ids"] if i in by_id]
+            fixed = conversation_correct.correct_conversation(turns, ex.get("vessel"))
+            if fixed:
+                corrections.update(fixed)
+
+    _store_resolved(window, exchanges, corrections)
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     for ex in exchanges:
         who = ex.get("vessel") or "unidentified"
@@ -676,6 +705,7 @@ def _resolve_window(window: list[dict]) -> None:
 def render_conversations_page(rows: list[dict]) -> str:
     """Render resolved exchanges, newest first. Built from stored data on every request."""
     blocks = []
+    any_corrections = False
     for row in reversed(rows):
         vessel = row.get("vessel")
         conf   = row.get("confidence", "low")
@@ -691,14 +721,35 @@ def render_conversations_page(rows: list[dict]) -> str:
             meta.append(_html_escape(row["type"]))
 
         turns = []
+        corrected_count = 0
         for t in row.get("turns", []):
             live = t.get("live_vessel")
             # Shown when the live guess disagreed, so the correction is visible rather than
             # silently overwritten.
             note = (f'<span class="was">live: {_html_escape(live)}</span>'
                     if live and live != vessel else "")
+
+            shown = t.get("conv") or t.get("text", "")
+            changes = t.get("changes") or []
+            if t.get("conv"):
+                corrected_count += 1
+                # title= rather than a second line: the original stays one hover away without
+                # doubling the length of every conversation on the page.
+                detail = "; ".join(
+                    f'{c.get("from","")} -> {c.get("to","")} ({c.get("reason","")})'
+                    for c in changes)
+                body = (f'<span class="fixed" title="was: {_html_escape(t.get("text",""))}'
+                        f' &#10;{_html_escape(detail)}">{_html_escape(shown)}</span>')
+            else:
+                body = _html_escape(shown)
+
             turns.append(f'<li><span class="t">{_html_escape(t.get("time",""))}</span> '
-                         f'{_html_escape(t.get("text",""))} {note}</li>')
+                         f'{body} {note}</li>')
+
+        if corrected_count:
+            any_corrections = True
+        fixed_badge = (f'<span class="badge fixedcount">{corrected_count} corrected</span>'
+                       if corrected_count else "")
 
         # Omitted entirely rather than rendered empty: conversations that resolved to nobody,
         # and the rows stored before these fields existed, have nothing to say here.
@@ -709,7 +760,7 @@ def render_conversations_page(rows: list[dict]) -> str:
     <div class="conv {'named' if vessel else 'unnamed'}">
       <div class="hd">
         <span class="vessel">{ident}</span>
-        <span class="badge {_html_escape(conf)}">{badge}</span>
+        <span class="badge {_html_escape(conf)}">{badge}</span>{fixed_badge}
         <span class="meta">{' &middot; '.join(meta)}</span>
         <span class="when">{_html_escape(row.get('start',''))} &ndash; {_html_escape(row.get('end',''))[-8:]}
               &middot; ch {_html_escape(row.get('channel',''))} &middot; {len(row.get('turns', []))} turns</span>
@@ -719,6 +770,16 @@ def render_conversations_page(rows: list[dict]) -> str:
     </div>""")
 
     body = "".join(blocks) if blocks else '<p class="empty">No conversations resolved yet.</p>'
+    # Chosen from what the page is actually showing, not from the flag: CONVERSATION_CORRECT
+    # can be off, or on but yet to correct anything on this page, and either way a rendered
+    # row with no "conv" field means the promise that this pass rewrites text would be false.
+    correction_note = (
+        "Text marked with a dotted underline was corrected using\n"
+        "the rest of the conversation &mdash; hover it to see what was heard and why it changed."
+        if any_corrections else
+        "Transmission text is copied verbatim from the live\n"
+        "transcript &mdash; this pass never rewrites it."
+    )
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Resolved Conversations</title>
 <meta http-equiv="refresh" content="30">
@@ -741,22 +802,39 @@ def render_conversations_page(rows: list[dict]) -> str:
  li {{ padding: 3px 0; border-top: 1px solid #f0f0f0; font-size: .95em; }}
  .t {{ color: #888; font-family: monospace; margin-right: 8px; }}
  .was {{ color: #c0392b; font-size: .8em; margin-left: 6px; }}
+ .fixed {{ border-bottom: 1px dotted #2c7; cursor: help; }}
+ .badge.fixedcount {{ background: #d4edda; }}
  .empty {{ color: #666; }}
 </style></head><body>
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>
 <p style="color:#666;font-size:.9em">Identity is decided after each exchange ends, from the whole
-exchange rather than one transmission. Transmission text is copied verbatim from the live
-transcript &mdash; this pass never rewrites it.</p>
+exchange rather than one transmission. {correction_note}</p>
 {body}
 </body></html>"""
+
+
+def _reap_pass() -> None:
+    """Take whatever windows have closed and resolve each independently.
+
+    Isolated per window on purpose: _take_closed_windows has already removed a closed
+    window's chunks from the journal by the time _resolve_window runs, so a single bad
+    reply (or any other surprise) inside one window must not cost the rest of the batch --
+    they would otherwise be lost permanently, never stored, never rendered.
+    """
+    try:
+        windows = _take_closed_windows()
+    except Exception as exc:
+        print(f"  [conv reaper error] {exc}", flush=True)
+        return
+    for window in windows:
+        try:
+            _resolve_window(window)
+        except Exception as exc:
+            print(f"  [conv reaper error] {exc}", flush=True)
 
 
 def _conversation_reaper() -> None:
     while True:
         threading.Event().wait(CONVERSATION_POLL_S)
-        try:
-            for window in _take_closed_windows():
-                _resolve_window(window)
-        except Exception as exc:
-            print(f"  [conv reaper error] {exc}", flush=True)
+        _reap_pass()

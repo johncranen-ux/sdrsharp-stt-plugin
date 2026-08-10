@@ -92,6 +92,13 @@ jobs:
         # Grown 2026-08-09 for the IQ replay harness: draft-*/score-* are bench.py runs over
         # replayed arms (score-* additionally embeds the hand-verified reference for every
         # clip), and the bench-identify-* families carry real vessel names and MMSIs.
+        #
+        # Grown 2026-08-10 for conversation correction: *fewshot*.json / *examples*.json are
+        # the operator's few-shot prompt file (built from real exchanges), and
+        # bench-conv-correct-*.json is the bake-off tooling's output -- same restriction as
+        # bench-correct-results*.json above. All three are unanchored (no server/ prefix) to
+        # match .gitignore, which had to become unanchored too after an anchored pattern let
+        # server/stt_proxy/conversation-fewshot.json slip past it.
         run: |
           bad=$(git ls-files \
                   'server/references*.txt' \
@@ -103,7 +110,10 @@ jobs:
                   'server/draft-*.json' \
                   'server/draft-*.html' \
                   'server/score-*.json' \
-                  'server/score-*.html' || true)
+                  'server/score-*.html' \
+                  '*fewshot*.json' \
+                  '*examples*.json' \
+                  'bench-conv-correct-*.json' || true)
           if [ -n "$bad" ]; then
             echo "::error::Files containing received radio traffic are committed: $bad"
             echo "No transcript file belongs in the repository. See docs/user-manual.md."

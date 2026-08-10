@@ -321,6 +321,24 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 | `ANTHROPIC_API_KEY` | — | Unset disables identification entirely |
 | `AISSTREAM_API_KEY` | — | Unset disables AIS matching |
 
+### Conversation correction
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CONVERSATION_CORRECT` | `off` | Re-corrects each turn's text from the rest of its exchange after identity is resolved |
+| `CONVERSATION_CORRECT_PROVIDER` | `anthropic` | LLM provider for the correction pass |
+| `CONVERSATION_CORRECT_MODEL` | `claude-haiku-4-5-20251001` | Model id for the correction pass |
+| `CONVERSATION_CORRECT_FEWSHOT` | `on` | Includes worked examples in the prompt |
+| `CONVERSATION_CORRECT_TIMEOUT_S` | `60` | HTTP timeout for the correction call; falls back to this default if set to something that doesn't parse as a number |
+| `CONVERSATION_FEWSHOT_FILE` | — (uses a small synthetic set) | Path to your own worked examples, built from real exchanges |
+
+`CONVERSATION_FEWSHOT_FILE` must point at a path matching one of the gitignored patterns
+(`*fewshot*.json` or `*examples*.json`, anywhere in the repo) — that is what stops a real
+exchange, which is received radio traffic, from ever being committed. The CI transcript gate
+is a list of known filenames rather than a content scan, so a path that doesn't match those
+patterns bypasses both `.gitignore` and the gate. Keep the file outside the repository
+entirely (e.g. alongside `start-all.bat`) if you'd rather not rely on the name matching.
+
 ### Groq free-tier limits
 
 | Limit | Free tier | Typical busy channel |

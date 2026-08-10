@@ -2622,3 +2622,254 @@ def test_unknown_post_path_is_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(req, timeout=10)
     assert e.value.code == 404
+
+
+from stt_proxy import conversation_correct as cc  # noqa: E402
+
+
+def _window(when):
+    return [
+        {"id": 1, "time": when, "channel": "160,650",
+         "text": "raw one", "corrected": "Maas Approach, motor vision Example Trader.",
+         "live_vessel": None},
+        {"id": 2, "time": when, "channel": "160,650",
+         "text": "raw two", "corrected": "Motorvessel Example Trader, Maas Approach.",
+         "live_vessel": None},
+    ]
+
+
+def test_storage_keeps_the_verbatim_text_beside_the_correction(monkeypatch, tmp_path):
+    """The audit trail is the whole basis for allowing a rewrite at all."""
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    corrections = {1: {"text": "Maas Approach, Motorvessel Example Trader.",
+                       "changes": [{"from": "motor vision", "to": "Motorvessel",
+                                    "reason": "shore station"}]}}
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+          "evidence": "e", "confidence": "high"}],
+        corrections)
+    turns = conversations._resolved[0]["turns"]
+    assert turns[0]["text"] == "Maas Approach, motor vision Example Trader."
+    assert turns[0]["conv"] == "Maas Approach, Motorvessel Example Trader."
+    assert turns[0]["changes"][0]["to"] == "Motorvessel"
+    assert "conv" not in turns[1], "an uncorrected turn stores no conv field"
+
+
+def test_storage_without_corrections_is_unchanged(monkeypatch):
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+          "evidence": "e", "confidence": "low"}],
+        None)
+    turns = conversations._resolved[0]["turns"]
+    assert "conv" not in turns[0]
+    assert turns[0]["text"] == "Maas Approach, motor vision Example Trader."
+
+
+def test_the_pass_does_not_run_while_the_flag_is_off(monkeypatch):
+    """Default off: production behaviour must be byte-identical until the bake-off scores it."""
+    def boom(*a, **k):
+        raise AssertionError("correct_conversation must not be called with the flag off")
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", False)
+    monkeypatch.setattr(cc, "correct_conversation", boom)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+                                    "evidence": "e", "confidence": "low"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert "conv" not in conversations._resolved[0]["turns"][0]
+
+
+def test_a_failed_correction_still_stores_the_conversation(monkeypatch):
+    """Never lose a conversation because a model misbehaved."""
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(cc, "correct_conversation", lambda turns, vessel: None)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+                                    "evidence": "e", "confidence": "low"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert len(conversations._resolved) == 1
+    assert conversations._resolved[0]["turns"][0]["text"]
+
+
+def test_flag_on_success_reaches_storage_through_resolve_window(monkeypatch):
+    """The wiring that matters: flag on, correction succeeds, the fix reaches storage.
+
+    Calling _store_resolved directly (as the tests above do) bypasses the merge logic in
+    _resolve_window entirely, so this drives the real entry point end to end.
+    """
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(
+        cc, "correct_conversation",
+        lambda turns, vessel: {1: {"text": "Maas Approach, Motorvessel Example Trader.",
+                                    "changes": [{"from": "motor vision", "to": "Motorvessel",
+                                                 "reason": "shore station"}]}})
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+                                    "evidence": "e", "confidence": "high"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    turns = conversations._resolved[0]["turns"]
+    assert turns[0]["conv"] == "Maas Approach, Motorvessel Example Trader."
+    assert turns[0]["changes"][0]["to"] == "Motorvessel"
+    assert "conv" not in turns[1]
+
+
+def _window4(when):
+    return [
+        {"id": 1, "time": when, "channel": "160,650", "text": "raw one",
+         "corrected": "one", "live_vessel": None},
+        {"id": 2, "time": when, "channel": "160,650", "text": "raw two",
+         "corrected": "two", "live_vessel": None},
+        {"id": 3, "time": when, "channel": "160,650", "text": "raw three",
+         "corrected": "three", "live_vessel": None},
+        {"id": 4, "time": when, "channel": "160,650", "text": "raw four",
+         "corrected": "four", "live_vessel": None},
+    ]
+
+
+def test_corrections_do_not_leak_across_exchanges(monkeypatch):
+    """The per-exchange split exists so one conversation's context cannot edit another's
+    turns. This is the assertion that would fail if someone "simplified" the loop in
+    _resolve_window to one correction call per window instead of per exchange.
+    """
+    calls = []
+
+    def record_call(turns, vessel):
+        calls.append(sorted(t["id"] for t in turns))
+        return None
+
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(cc, "correct_conversation", record_call)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [
+                            {"chunk_ids": [1, 2], "vessel": "A", "mmsi": "1",
+                             "evidence": "e", "confidence": "high"},
+                            {"chunk_ids": [3, 4], "vessel": "B", "mmsi": "2",
+                             "evidence": "e", "confidence": "high"},
+                        ])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window4(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert len(calls) == 2, "one correction call per exchange, never one per window"
+    assert [1, 2] in calls, "exchange 1's call must see only its own turn ids"
+    assert [3, 4] in calls, "exchange 2's call must see only its own turn ids"
+
+
+def test_declared_no_changes_stores_no_conv_field(monkeypatch):
+    """A correction that ran and declared no changes must not leak a conv/changes key --
+    that key's presence is how the page tells "not corrected" apart from "corrected to the
+    same thing", so an empty changes list must suppress it exactly like no correction at all.
+    """
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    corrections = {1: {"text": "Maas Approach, motor vision Example Trader.", "changes": []}}
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+          "evidence": "e", "confidence": "high"}],
+        corrections)
+    turns = conversations._resolved[0]["turns"]
+    assert "conv" not in turns[0]
+    assert "changes" not in turns[0]
+
+
+def _row_with_correction():
+    return [{
+        "vessel": "EXAMPLE TRADER", "mmsi": "1", "confidence": "high", "evidence": "e",
+        "channel": "160,650", "start": "2026-08-07 10:14:15", "end": "2026-08-07 10:14:19",
+        "turns": [
+            {"time": "10:14:15", "text": "Maas Approach, motor vision Example Trader.",
+             "raw": "r", "live_vessel": None,
+             "conv": "Maas Approach, Motorvessel Example Trader.",
+             "changes": [{"from": "motor vision", "to": "Motorvessel",
+                          "reason": "shore station rendition"}]},
+            {"time": "10:14:19", "text": "Motorvessel Example Trader, Maas Approach.",
+             "raw": "r", "live_vessel": None},
+        ],
+    }]
+
+
+def test_the_page_shows_the_corrected_text():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "Maas Approach, Motorvessel Example Trader." in html
+
+
+def test_the_page_keeps_the_original_recoverable():
+    """The rewrite was allowed on the condition that nothing is silently overwritten."""
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "motor vision" in html
+    assert "shore station rendition" in html
+
+
+def test_the_page_counts_the_corrections():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "1 corrected" in html
+    assert 'class="badge fixedcount"' in html
+
+
+def test_the_page_promises_corrections_only_when_a_row_actually_carries_one():
+    """With CONVERSATION_CORRECT off (or simply no correction on this page yet) no rendered
+    row carries a 'conv' field, so the explanatory paragraph must not claim the page rewrites
+    text -- that was true before this feature and must stay true when nothing here used it."""
+    rows = _row_with_correction()
+    for turn in rows[0]["turns"]:
+        turn.pop("conv", None)
+        turn.pop("changes", None)
+    html = conversations.render_conversations_page(rows)
+    assert "never rewrites it" in html
+    assert "was corrected using" not in html
+
+
+def test_the_page_promises_corrections_when_a_row_carries_one():
+    html = conversations.render_conversations_page(_row_with_correction())
+    assert "was corrected using" in html
+    assert "never rewrites it" not in html
+
+
+def test_one_windows_failure_does_not_lose_the_rest_of_the_batch(monkeypatch):
+    """_take_closed_windows has already removed a closed window's chunks from the journal by
+    the time the reaper resolves it, so one window blowing up (e.g. on the unhashable-id
+    TypeError that validate_reply now turns into CorrectionRejected, or any other surprise)
+    must not take the rest of the batch down with it -- every remaining window still gets
+    stored."""
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    good_window = _window(when)
+    bad_window = [{"id": 99, "time": when, "channel": "x"}]
+    monkeypatch.setattr(conversations, "_take_closed_windows", lambda: [bad_window, good_window])
+    calls = []
+
+    def fake_resolve(window):
+        calls.append(window)
+        if window is bad_window:
+            raise TypeError("boom")
+
+    monkeypatch.setattr(conversations, "_resolve_window", fake_resolve)
+    conversations._reap_pass()
+    assert calls == [bad_window, good_window], "the good window must still be reached"
+
+
+def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
+    """Assert on the badge markup and the marker class, NOT on the bare word 'fixedcount' or
+    'corrected': the page's <style> block names the fixedcount class unconditionally (it is
+    page-level, not per-row), and the static explanatory paragraph contains the word 'corrected'
+    on every render. Only the actual badge/span markup tells corrected apart from uncorrected."""
+    rows = _row_with_correction()
+    for turn in rows[0]["turns"]:
+        turn.pop("conv", None)
+        turn.pop("changes", None)
+    html = conversations.render_conversations_page(rows)
+    assert 'class="badge fixedcount"' not in html
+    assert 'class="fixed"' not in html
+    assert "Maas Approach, motor vision Example Trader." in html
