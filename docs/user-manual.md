@@ -246,9 +246,32 @@ With an Anthropic key set, open **http://localhost:9000/conversations**.
 
 Each entry is one radio exchange with a single identified vessel, decided *after* the
 exchange ended so late evidence counts. It shows the identity, how confident the resolver
-was, the evidence it used, and every transmission verbatim. Where the live transcript had
-guessed a different vessel, that guess is shown alongside — so corrections are visible
-rather than silently applied.
+was, the evidence it used, and every transmission. Where the live transcript had guessed a
+different vessel, that guess is shown alongside in red — so corrections are visible rather
+than silently applied.
+
+### Spotting a corrected transmission
+
+Transmission text is not always verbatim. After identity is resolved, a second pass re-reads
+each turn against the rest of its exchange and repairs what the channel garbled — a mangled
+opening call from the shore station's clearer answer, a garbled readback from the instruction
+it was answering. Two things on the page tell you when that has happened:
+
+- **A green `N corrected` pill** in the conversation header, next to the confidence badge.
+  Its absence means nothing in that exchange was changed, and what you are reading is exactly
+  what was transcribed live.
+- **A dotted green underline** under the text of each turn that was changed. Turns without it
+  are untouched.
+
+**Hover the underlined text** to see what was actually heard, as `was: <original>`, followed by
+every substitution and the reason for it — for example
+`Sarbertside -> Starboard side (garbled readback of the instruction in turn 7)`.
+
+Nothing is ever overwritten: the original wording and the reason for each change are stored
+alongside the correction, and `/api/conversations` returns all of it (`text` is the live
+transcript, `conv` the corrected version, `changes` the list of substitutions). If you would
+rather see the raw transcript everywhere, set `CONVERSATION_CORRECT=off` and the page renders
+exactly what it did before this pass existed.
 
 On both HTML pages an identified vessel's name is a link to its
 [VesselFinder](https://www.vesselfinder.com/) page, looked up by MMSI. A vessel matched by
@@ -325,10 +348,11 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CONVERSATION_CORRECT` | `off` | Re-corrects each turn's text from the rest of its exchange after identity is resolved |
+| `CONVERSATION_CORRECT` | `on` | Re-corrects each turn's text from the rest of its exchange after identity is resolved. `off` restores the pre-correction behaviour exactly |
 | `CONVERSATION_CORRECT_PROVIDER` | `anthropic` | LLM provider for the correction pass |
 | `CONVERSATION_CORRECT_MODEL` | `claude-haiku-4-5-20251001` | Model id for the correction pass |
 | `CONVERSATION_CORRECT_FEWSHOT` | `on` | Includes worked examples in the prompt |
+| `CONVERSATION_CORRECT_TEMPERATURE` | `0` | Sampling temperature. Set to `none` for models that reject the parameter (claude-sonnet-5 does) |
 | `CONVERSATION_CORRECT_TIMEOUT_S` | `60` | HTTP timeout for the correction call; falls back to this default if set to something that doesn't parse as a number |
 | `CONVERSATION_FEWSHOT_FILE` | — (uses a small synthetic set) | Path to your own worked examples, built from real exchanges |
 
