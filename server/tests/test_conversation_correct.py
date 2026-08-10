@@ -89,3 +89,31 @@ def test_empty_text_is_rejected():
             {"id": 1, "text": "", "changes": [{"from": "a", "to": "", "reason": "r"}]},
             {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
         ]), TURNS)
+
+
+def test_whitespace_only_text_is_rejected():
+    """A turn stripped to nothing is content removal. The .strip() guard must be present."""
+    with pytest.raises(cc.CorrectionRejected, match="empty"):
+        cc.validate_reply(_reply([
+            {"id": 1, "text": "   ", "changes": [{"from": "a", "to": "   ", "reason": "r"}]},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_non_list_changes_is_rejected():
+    """If changes field is not a list, the audit trail format is broken."""
+    with pytest.raises(cc.CorrectionRejected, match="no changes list"):
+        cc.validate_reply(_reply([
+            {"id": 1, "text": TURNS[0]["corrected"], "changes": "nope"},
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
+
+
+def test_non_dict_turn_entry_is_rejected():
+    """A turn entry that is not an object means the model output structure is corrupted."""
+    with pytest.raises(cc.CorrectionRejected, match="not an object"):
+        cc.validate_reply(_reply([
+            {"id": 1, "text": TURNS[0]["corrected"], "changes": []},
+            "this is a string, not a turn object",
+            {"id": 2, "text": TURNS[1]["corrected"], "changes": []},
+        ]), TURNS)
