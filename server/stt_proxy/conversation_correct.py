@@ -44,12 +44,35 @@ from stt_proxy import fewshot, llm
 # ROUND 2 KEEPS "We have the Townsend" INTACT, rewrites 36 turns instead of 42, and improves
 # every number anyway. Being more conservative cost nothing.
 #
-# Still off by default, for two reasons rather than doubt about the direction: one run per arm
-# cannot separate a 1.8-point gain from this project's ~1-point run-to-run noise, and the pass
-# still writes "Motorvessel Vision" into two turns of that same exchange -- a wrong
-# identification propagating, though no longer destroying evidence. That last one should
-# largely resolve once the `motor vision` -> Motorvessel correction merges from
-# feat/local-ais-receiver, since the phrase is a garbled type word rather than a name.
+# REPEATED 3x PER ARM, 2026-08-10, because one run cannot separate a gain from sampling noise:
+#
+#   arm             WER mean   range          spread   invented mean
+#   baseline         19.06%    pinned (6/6)    0.00     167
+#   no examples      17.86%    17.71-18.07     0.36     156.3
+#   examples         17.07%    16.98-17.16     0.18     150.3
+#
+# The gain is 1.99 points against a within-arm spread of 0.18 -- roughly eleven times the
+# noise, so it is real. The baseline is identical in all six runs, which is what says the
+# harness itself is deterministic and the comparison means anything.
+#
+# Examples are worth 0.79 points, larger than either arm's spread and larger than both summed.
+# That was not the expected result: the examples in question are the two SYNTHETIC ones in
+# fewshot.py, so curated examples drawn from real corrected exchanges are probably worth more.
+#
+# Calibration note: the ~1-point run-to-run noise recorded for the 2026-08-03 correction
+# bake-off does NOT apply here. That figure came from whole-pipeline STT correction with one
+# arm accidentally running at temperature 1.0. This pass runs at temperature 0 and only edits
+# existing text, and its measured spread is 0.18-0.36. Judging it against the old bar would
+# have thrown away a real effect.
+#
+# The bound on rule 2 holds in all three repeats: "We have the Townsend" is kept every time.
+#
+# Residual, and the reason this is a judgement rather than an automatic yes: the pass still
+# writes "Motorvessel Vision" into two turns of that exchange. The identification was wrong and
+# the pass is faithfully repairing a garbled rendering of the name it was given, so this is the
+# resolver's error propagating rather than a fault here -- but it is still a wrong name on the
+# page. Expected to resolve when the `motor vision` -> Motorvessel correction merges from
+# feat/local-ais-receiver, since the phrase is a garbled TYPE WORD rather than a name.
 CONVERSATION_CORRECT = os.environ.get("CONVERSATION_CORRECT", "off").strip().lower() == "on"
 CONVERSATION_CORRECT_PROVIDER = os.environ.get("CONVERSATION_CORRECT_PROVIDER", "anthropic").strip()
 CONVERSATION_CORRECT_MODEL = os.environ.get("CONVERSATION_CORRECT_MODEL",
