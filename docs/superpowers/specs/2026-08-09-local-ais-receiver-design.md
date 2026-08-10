@@ -144,7 +144,7 @@ reference point. Measured against the real `_MAAS_CENTER`:
 |---|---|
 | SCH123 ZEELAND (in Scheveningen harbour) | **27.8 km** |
 | VARNEBANK (in Scheveningen harbour) | **27.6 km** |
-| ZIRFAEA | 69.5 km |
+| ZIRFAEA | 69.5 km (cached position — live it is 27.4 km, see below) |
 
 **Scheveningen is 27.7 km from Maas Center, so no radius separates it cleanly** — vessels
 calling Maas Approach occupy the same distance band. Any boundary tight enough to exclude
@@ -168,9 +168,59 @@ out. **It is a starting point, not a finding.** Too tight loses recall; too wide
 precision. `bench_identify.py --labels ... --resolve --repeats 3` reports both with a spread,
 so tune against it rather than trusting the default. 20–30 km is the obvious next thing to try.
 
-**Reception range is not the constraint.** Decoding ZIRFAEA at 69.5 km shows the antenna reaches
-well past the Maas approach at ~28 km, so local AIS will cover the vessels of interest. The
-15-second sample caught only nearby vessels because it was 15 seconds.
+### Reception range: measured at ~4 km, and it blocks the feature
+
+An earlier draft of this spec said "reception range is not the constraint", citing a decode of
+ZIRFAEA at 69.5 km. **That figure was wrong**: 69.5 km was ZIRFAEA's position in the *frozen
+2026-08-05 cache*, not where it was when we heard it. Measured live on 2026-08-09 it sits at
+27.4 km, with everything else.
+
+The question was then measured properly on 2026-08-10, with the radius filter off
+(`AIS_LOCAL_MAX_KM = 0.0`) plus a distance histogram — the filter can only report what it
+admitted, so it cannot answer "did we hear the right water". A 10-minute capture: 391 messages,
+44 ignored, 0 malformed, 17 named vessels and 11 unnamed.
+
+Distances from `_MAAS_CENTER`:
+
+| band | vessels |
+|---|---|
+| inside 15 km (the approach area proper) | **0** |
+| 15–25 km | **0** |
+| 25–30 km | 15 |
+| 30–40 km | 1 (GPO AMETHYST, 31.6 km) |
+| beyond 40 km | 0 |
+
+Closest contact 27.4 km (ZIRFAEA).
+
+The receiver sits at **52.111188 N, 4.292962 E** (Den Haag) — the coordinate every range
+calculation needs. From there: Maas Center 30.0 km, Euro/Maas approach 26.5 km, Hoek van
+Holland 18.9 km, **Scheveningen harbour 2.2 km**. Overlay that on the histogram and the answer
+falls out: everything heard lay 27.4–31.6 km from Maas Center while the antenna is 30.0 km from
+Maas Center, so **every contact was within ~2–4 km of the antenna**, and the tight band is
+Scheveningen harbour. Nothing was heard beyond ~4 km even though open sea with heavy traffic
+starts 19 km west — a hard range limit, not "that is where the transmitters happen to be".
+
+**The same dipole hears voice at 30 km and AIS at 4 km** — ~8×, ~18 dB. That is consistent with
+FM voice staying intelligible well below the SNR at which 9600-baud GMSK packet decoding
+collapses: no partial credit, 26.7 ms bursts, CRC-checked. Nothing is faulty.
+
+**Consequence: as installed, local AIS cannot help identification at all.** The vessels calling
+Maas Approach are simply not in the received set, and no filter tuning changes that — the
+geometry is that the filter admits a ring around Maas Center while the antenna hears a disc
+around the operator, and today those barely overlap. This bounds the feature's usefulness, not
+its correctness: the pipeline is proven end to end (391 messages, 0 malformed, names, callsigns
+and positions all decoded).
+
+Levers, cheapest first:
+
+1. **AIS gain, never tuned.** SDR#'s 36.4 dB was set for *voice* and does **not** apply here —
+   AIS-catcher has its own gain and `start-all.bat` never set it, so it runs on auto. Sweep with
+   `-gr TUNER 0.0-50.0 RTLAGC off`, measure with `-M D` (per-message signal power and ppm), and
+   consider `-a` (tuner bandwidth) against broadcast-FM overload.
+2. **Antenna height.** Reaching 30 km against a 10 m masthead needs **~17 m** of receive height
+   (horizon ≈ 4.12·(√h_rx + √h_tx) km). An external antenna plus splitter is the planned fix.
+3. **Re-centring or widening the radius filter** — which on its own changes nothing, because the
+   traffic is not being received in the first place.
 
 **Behaviour change to note:** applying this in the recorder governs aisstream too, which today
 accepts anything in the 205 × 210 km box. That is an improvement, and aisstream is dead, but it
