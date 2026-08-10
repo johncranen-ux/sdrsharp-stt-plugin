@@ -59,6 +59,17 @@ def test_a_turn_with_no_clip_is_reported_not_silently_dropped():
     assert got["scored"] == 0
 
 
+def test_a_clip_with_no_reference_entry_is_reported_not_silently_dropped():
+    """A capture day routinely has more clips than the hand-verified reference file covers."""
+    references = {"0001": REFERENCES["0001"]}
+    rows = [{"start": "2026-08-07 10:14:15", "turns": [
+        {"time": "10:14:15", "text": "Maas Approach, motor vision Example Trader."},
+    ]}]
+    got = score_turns(rows, references, INDEX, use_conv=False)
+    assert got["unmatched"] == 1
+    assert got["scored"] == 0
+
+
 def test_invented_words_are_counted_separately():
     """WER barely notices a fluent wrong answer, which is this feature's central risk."""
     got = score_turns(_rows(conv="Maas Approach, Motorvessel Example Trader proceeding inbound."),
