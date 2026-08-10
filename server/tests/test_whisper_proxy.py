@@ -2622,3 +2622,80 @@ def test_unknown_post_path_is_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(req, timeout=10)
     assert e.value.code == 404
+
+
+from stt_proxy import conversation_correct as cc  # noqa: E402
+
+
+def _window(when):
+    return [
+        {"id": 1, "time": when, "channel": "160,650",
+         "text": "raw one", "corrected": "Maas Approach, motor vision Example Trader.",
+         "live_vessel": None},
+        {"id": 2, "time": when, "channel": "160,650",
+         "text": "raw two", "corrected": "Motorvessel Example Trader, Maas Approach.",
+         "live_vessel": None},
+    ]
+
+
+def test_storage_keeps_the_verbatim_text_beside_the_correction(monkeypatch, tmp_path):
+    """The audit trail is the whole basis for allowing a rewrite at all."""
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    corrections = {1: {"text": "Maas Approach, Motorvessel Example Trader.",
+                       "changes": [{"from": "motor vision", "to": "Motorvessel",
+                                    "reason": "shore station"}]}}
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": "EXAMPLE TRADER", "mmsi": "1",
+          "evidence": "e", "confidence": "high"}],
+        corrections)
+    turns = conversations._resolved[0]["turns"]
+    assert turns[0]["text"] == "Maas Approach, motor vision Example Trader."
+    assert turns[0]["conv"] == "Maas Approach, Motorvessel Example Trader."
+    assert turns[0]["changes"][0]["to"] == "Motorvessel"
+    assert "conv" not in turns[1], "an uncorrected turn stores no conv field"
+
+
+def test_storage_without_corrections_is_unchanged(monkeypatch):
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._store_resolved(
+        _window(when),
+        [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+          "evidence": "e", "confidence": "low"}],
+        None)
+    turns = conversations._resolved[0]["turns"]
+    assert "conv" not in turns[0]
+    assert turns[0]["text"] == "Maas Approach, motor vision Example Trader."
+
+
+def test_the_pass_does_not_run_while_the_flag_is_off(monkeypatch):
+    """Default off: production behaviour must be byte-identical until the bake-off scores it."""
+    def boom(*a, **k):
+        raise AssertionError("correct_conversation must not be called with the flag off")
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", False)
+    monkeypatch.setattr(cc, "correct_conversation", boom)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+                                    "evidence": "e", "confidence": "low"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert "conv" not in conversations._resolved[0]["turns"][0]
+
+
+def test_a_failed_correction_still_stores_the_conversation(monkeypatch):
+    """Never lose a conversation because a model misbehaved."""
+    monkeypatch.setattr(cc, "CONVERSATION_CORRECT", True)
+    monkeypatch.setattr(cc, "correct_conversation", lambda turns, vessel: None)
+    monkeypatch.setattr(conversations, "resolve_conversation",
+                        lambda w: [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+                                    "evidence": "e", "confidence": "low"}])
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    conversations._resolve_window(_window(datetime.datetime(2026, 8, 7, 10, 14, 15)))
+    assert len(conversations._resolved) == 1
+    assert conversations._resolved[0]["turns"][0]["text"]

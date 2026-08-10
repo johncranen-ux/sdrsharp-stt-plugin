@@ -25,6 +25,7 @@ from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
                            match_by_callsign, match_by_callsign_pattern,
                            match_by_callsign_suffix, match_by_mmsi)
 from stt_proxy.claude import _get_claude
+from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
                                    _spelled_out_runs)
 # Re-exported: whisper-proxy.py and the tests reach _html_escape through this module.
@@ -634,24 +635,39 @@ def _save_conversations() -> None:
         print(f"[conv] could not save {CONVERSATIONS_FILE}: {exc}", flush=True)
 
 
-def _store_resolved(window: list[dict], exchanges: list[dict]) -> None:
-    """Record resolved exchanges together with the transmissions they cover, verbatim."""
+def _store_resolved(window: list[dict], exchanges: list[dict],
+                    corrections: dict[int, dict] | None = None) -> None:
+    """Record resolved exchanges together with the transmissions they cover, verbatim.
+
+    `corrections` maps chunk id to the conversation pass's output. It is stored ALONGSIDE the
+    verbatim text, never over it: a reader must always be able to recover what was heard.
+    """
+    corrections = corrections or {}
     by_id = {c["id"]: c for c in window}
     rows = []
     for ex in exchanges:
         turns = [by_id[i] for i in ex["chunk_ids"] if i in by_id]
         if not turns:
             continue
+        stored_turns = []
+        for t in turns:
+            row = {"time": t["time"].strftime("%H:%M:%S"),
+                   "text": t.get("corrected") or t.get("text", ""),
+                   "raw": t.get("text", ""),
+                   "live_vessel": t.get("live_vessel")}
+            fix = corrections.get(t["id"])
+            # Absent rather than equal-to-text when nothing was corrected, so the page can
+            # tell "not corrected" from "corrected to the same thing".
+            if fix and fix.get("changes"):
+                row["conv"] = fix["text"]
+                row["changes"] = fix["changes"]
+            stored_turns.append(row)
         rows.append({
             **{k: v for k, v in ex.items() if k != "chunk_ids"},
             "channel": turns[0]["channel"],
             "start": turns[0]["time"].strftime("%Y-%m-%d %H:%M:%S"),
             "end":   turns[-1]["time"].strftime("%Y-%m-%d %H:%M:%S"),
-            # Text is copied straight from the journal, never from the resolver.
-            "turns": [{"time": t["time"].strftime("%H:%M:%S"),
-                       "text": t.get("corrected") or t.get("text", ""),
-                       "raw": t.get("text", ""),
-                       "live_vessel": t.get("live_vessel")} for t in turns],
+            "turns": stored_turns,
         })
     if not rows:
         return
@@ -663,7 +679,20 @@ def _store_resolved(window: list[dict], exchanges: list[dict]) -> None:
 
 def _resolve_window(window: list[dict]) -> None:
     exchanges = resolve_conversation(window)
-    _store_resolved(window, exchanges)
+
+    # Correction runs per EXCHANGE, not per window: a window can hold several unrelated
+    # exchanges, and letting one conversation's context edit another's turns is the failure
+    # this split exists to prevent.
+    corrections: dict[int, dict] = {}
+    if conversation_correct.CONVERSATION_CORRECT:
+        by_id = {c["id"]: c for c in window}
+        for ex in exchanges:
+            turns = [by_id[i] for i in ex["chunk_ids"] if i in by_id]
+            fixed = conversation_correct.correct_conversation(turns, ex.get("vessel"))
+            if fixed:
+                corrections.update(fixed)
+
+    _store_resolved(window, exchanges, corrections)
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     for ex in exchanges:
         who = ex.get("vessel") or "unidentified"
