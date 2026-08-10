@@ -73,6 +73,23 @@ from stt_proxy import fewshot, llm
 # rule. A second attempt should match the corpus's real edit density and deliberately include
 # unchanged turns. The file used here is kept, gitignored, at server/conversation-fewshot.json.
 #
+# SONNET 5 WAS TRIED AND IS NOT BETTER. Same corpus, same prompt, synthetic examples, 3 repeats:
+#
+#   haiku-4.5     17.07%  spread 0.18   invented 150.3   36-40 rewritten   ~90s per repeat
+#   sonnet-5      17.31%  spread 0.36   invented 149.7   24-35 rewritten   ~10min per repeat
+#
+# The 0.24-point gap is smaller than Sonnet's own spread, so quality is inseparable, while the
+# run is six to seven times slower, costs more per call, fails more often (3-7 rejected replies
+# against 1-3), and cannot pin temperature at all. Haiku stays. This repeats the 2026-08-03
+# finding that the prompt outweighs the model on this task.
+#
+# Getting that answer needed two fixes in llm.py first, and both failed in the same misleading
+# way: sonnet-5 rejects `temperature` outright, and it returns a ThinkingBlock as content[0].
+# Each broke every call while the pass behaved exactly as designed -- reply rejected,
+# conversation stored uncorrected -- so the arm completed and reported 1 corrected turn out of
+# 143, which reads as a conservative model rather than a malformed request. The tell was
+# wall-clock, not any number in the table.
+#
 # Calibration note: the ~1-point run-to-run noise recorded for the 2026-08-03 correction
 # bake-off does NOT apply here. That figure came from whole-pipeline STT correction with one
 # arm accidentally running at temperature 1.0. This pass runs at temperature 0 and only edits
