@@ -566,7 +566,8 @@ open with no resolution. Nothing in this repo can fix it.
   can say was being discarded. Now logged, rate-limited to
   `_UNKNOWN_FRAME_LOG_LIMIT` so a persistent fault cannot flood the console.
 - Nothing watched the clock. `_watch_silence` now runs alongside the read loop and reports a
-  connected feed that has gone quiet for `AIS_SILENCE_WARN_SEC` (default 60, 0 disables).
+  connected feed that has gone quiet for `AIS_SILENCE_WARN_SEC` (0 disables; **the default
+  became 0 on 2026-08-11** — see "The silence watchdog is muted, not removed" below).
   It distinguishes *went quiet mid-stream* from *never sent anything*, because those point at
   different causes. It watches from a separate task rather than wrapping `recv()` in a
   timeout: cancelling a `recv()` mid-frame is a way to lose messages, and all that is needed
@@ -1560,6 +1561,88 @@ cutoff by 0.9 points, and has never been measured for false positives across 8,6
 near-homophone ship names are common. It is a hypothesis, not a finding. If this class of miss
 recurs, measure a phonetic scorer against the existing corruption corpus and `bench_identify`
 before shipping anything.
+
+## The AIS receiver moved house, and what it can actually hear (2026-08-11)
+
+The local AIS receiver was a dead end at the end of 2026-08-10: a ~4 km reception shell
+centred on the operator, nothing within 25 km of Maas Center, and a conclusion that ~17 m of
+antenna height was the only lever left. Two changes on 2026-08-11 reopened it.
+
+**The station is now a separate machine.** The second dongle moved to a Windows 10 PC at
+`192.168.2.1` that can run 24/7. It runs AIS-catcher alone; nothing else is installed on it.
+`server/start-all.bat` no longer launches AIS-catcher, and the proxy's `ais_local` listener
+is not fed by it — `bind()` is loopback-only by design, and widening it would let anything on
+the LAN inject vessel data.
+
+**The antenna moved to the seaward side of the house.** Same dipole, same position to within
+~20 m, so every distance figure anchored to 52.111188 N / 4.292962 E still holds.
+
+### The horizon was never the constraint at 4 km
+
+The `~17 m` figure is right *for reaching 30 km* — solve `30 = 4.12(√h + √10)`. But the same
+formula at realistic heights gives a radio horizon of **18.8 km at 2 m** and **22.2 km at
+5 m**. A 4 km shell was therefore never horizon-limited; something was eating 15+ dB, and the
+house standing between the dipole and the water is the obvious candidate. Height only starts
+to matter beyond ~19 km. Moving the antenna, at no extra height, roughly tripled the range.
+
+### Three of the first four sector records were not ships
+
+The range map is meant to answer *how far can this station hear a ship*, and most of what
+transmits on the band is not a ship. Unfiltered, the map read:
+
+| sector | claimed | what it actually was |
+|---|---|---|
+| NW | **5136.95 km** | MMSI `171003622` — `171` is not an allocated MID, name was binary garbage. A corrupt message that passed CRC. |
+| S / SW | 20.6 / 20.4 km | MMSI `111205510` — `111` is a **SAR aircraft**. Airborne, so its horizon is enormous and it says nothing about surface reception. |
+| W | 16.51 km | MMSI `992446045` — `99` is an **AtoN**, and `[V]` marks it *virtual*: a navigation mark that does not physically exist. |
+| W | 13.89 km | MMSI `2444066` = `002444066` — `00` is a **coast station**, a fixed shore site with a proper mast. |
+
+`mmsi_class()` in `server/ais_station_count.py` classifies by prefix per ITU-R M.585, and the
+map now counts ship stations only, reporting what it excluded rather than dropping it
+silently. A `MAX_PLAUSIBLE_KM` of 150 catches the corrupt-position case.
+
+**This is the same failure as the retracted 69.5 km claim**: a number that looked like
+reception range but came from somewhere else. The fix is the same in spirit — record *which*
+vessel and *when* alongside every maximum, so a surprising figure can be audited instead of
+believed. `last_signal` (AIS-catcher's seconds-since-heard) is the tell: on 2026-08-11 every
+long-range record was 17–30 minutes stale while nearby traffic was seconds old, which is the
+signature of marginal, occasional catches rather than sustained tracks.
+
+### What it hears, ships only
+
+- **Hoek van Holland at ~20 km** (bearing 224.6°) — real ship stations at the mouth of the
+  waterway, the traffic that transits to and from the approach area.
+- **Maas Center's own bearing (250°) reaches only ~3.8 km.** The offshore approach is still
+  out of range; the coastal corridor into it is not.
+- **MULTRASHIP PROTECTOR at 40.98 km** (MMSI 244830813, a genuine ship station, 53 messages).
+  No antenna height explains this: 41 km needs ~46 m by line of sight. It is tropospheric
+  ducting over seawater. **So range here is propagation-dependent, not a fixed ceiling** —
+  an earlier claim in this session that the NW sector was "horizon-limited at 97% of its
+  geometric limit" does not survive it. Maas Center at 30 km is demonstrably within reach
+  under the right conditions; the open question is how often.
+
+### AISHub
+
+The station comfortably meets AISHub's contributor bar (≥10 vessels and ≥90% uptime, both
+averaged over 7 days): over the first ten hours, **mean 45.8 vessels/hour, minimum 40**.
+AIS-catcher feeds AISHub directly with `-u <host> <port>` — **without** `JSON on`, which
+wraps the NMEA in an envelope their parser cannot read. AIS Dispatcher is not needed; every
+feature of it that matters here is already in AIS-catcher, and a second 24/7 process is a
+liability when uptime is being formally measured.
+
+Measurement tool: `server/ais_station_count.py`. See the user manual for how to run it.
+
+### The silence watchdog is muted, not removed (2026-08-11)
+
+`AIS_SILENCE_WARN_SEC` now defaults to `0`. The instrument is correct and its diagnosis is
+true, which is the problem: aisstream has delivered nothing since 2026-08-05, so it fired
+every 60 s, roughly 8,600 times, drowning output still worth reading. A warning that is
+permanently on carries no information and only costs attention.
+
+It is a mute rather than a deletion because it is the only thing that would catch aisstream
+failing *again* after it recovers — and this feed has already changed failure shape once
+mid-outage. Restore with `AIS_SILENCE_WARN_SEC=60`; there is a commented line in
+`start-all.bat` saying to do so the moment the feed returns.
 
 ## Testing
 

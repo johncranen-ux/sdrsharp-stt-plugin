@@ -32,6 +32,10 @@ debug_chunk.wav
 ais_cache.json
 identified_vessels.html
 conversations.json
+# ais_station_count.py output: per-hour MMSI observations from the local receiver, i.e. a
+# record of which vessels were where and when. Unanchored, like the patterns below, because
+# the anchored form is exactly what let three reference files reach the remote.
+ais-station-count*.jsonl
 
 # Reference transcripts built from your own recordings.
 #
