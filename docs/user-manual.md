@@ -343,6 +343,7 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 | `CONVERSATION_MAX_CHUNKS` | `40` | Hard cap on window size |
 | `ANTHROPIC_API_KEY` | — | Unset disables identification entirely |
 | `AISSTREAM_API_KEY` | — | Unset disables AIS matching |
+| `AIS_SILENCE_WARN_SEC` | `0` (off) | Warns when a *connected* AIS feed stops delivering — the failure that otherwise looks identical to a quiet channel. Muted by default since 2026-08-11 because aisstream has delivered nothing since 08-05 and it fired every 60 s. **Set it to `60` the moment the feed recovers**; it is the only thing that catches a relapse |
 
 ### Conversation correction
 
@@ -450,6 +451,67 @@ Restart the proxy. It now targets the local server and arms a watchdog that rest
 
 `references-local.txt` and anything else matching `references-*.txt` is gitignored, so your
 recordings stay yours.
+
+---
+
+## Measuring what your AIS receiver can hear
+
+`server/ais_station_count.py` answers two questions about a local AIS receiver: how many
+distinct vessels it hears per hour, and how far it reaches on each bearing. It was written to
+test a station against [AISHub](https://www.aishub.net/join-us)'s contributor bar — at least
+10 vessels and at least 90% uptime, both averaged over 7 days — but the range map is the more
+useful half if you are deciding where to put an antenna.
+
+It needs **nothing but the Python standard library**, so it will run on any machine with a
+Python 3.8+, including one that has nothing else installed.
+
+### Point AIS-catcher at it
+
+The receiver does not have to be the same machine. Run the counter where you want the data:
+
+```bash
+py server/ais_station_count.py --station 192.168.2.1:8100
+```
+
+and on the receiving station:
+
+```bat
+AIS-catcher.exe -gr TUNER 42.1 RTLAGC off -p 2 -v 10 ^
+  -Z <your-lat> <your-lon> -N 8100 ^
+  -P <counter-host> 10111
+```
+
+`-P` is a TCP destination, chosen over UDP deliberately: the output of this tool is a count
+judged against a threshold, and silent datagram loss would be indistinguishable from
+genuinely hearing fewer vessels. `--station` additionally polls AIS-catcher's `/ships.json`
+once a minute to build the range map; counting works without it, the map does not.
+
+If the counter runs on a different machine, open an inbound firewall rule for TCP 10111
+scoped to your local subnet, and give that machine a fixed address — if it moves, the station
+transmits into nowhere and the log shows a gap that reads exactly like the station going
+silent.
+
+### Reading the output
+
+Ctrl+C prints the hourly table, the verdict against the threshold, and the range map. Every
+line is also appended to `ais-station-count.jsonl` (gitignored), which survives restarts, so
+the true maxima for a whole run can be reconstructed even if the process is restarted partway.
+
+Three things in the design are worth knowing, because each exists to stop a specific wrong
+conclusion:
+
+- **A heartbeat is written every minute whether or not traffic arrives.** No heartbeat means
+  *this process* was not running; a heartbeat with zero messages means the station really was
+  quiet. Without that distinction your own machine sleeping looks identical to the receiver
+  failing — and if you are evidencing an uptime figure, that ambiguity argues against you.
+- **The range map counts ship stations only.** Most of what transmits on the band is not a
+  ship, and non-vessels flatter the map badly: a SAR aircraft (MMSI prefix `111`) is airborne
+  and has an enormous horizon, a virtual AtoN (`99…` marked `[V]`) does not physically exist,
+  and a coast station (`00…`) is a fixed shore mast. Excluded records are reported, not
+  silently dropped.
+- **Every sector maximum records which vessel set it and how long before the poll it was
+  heard.** A record-breaking range from a vessel last heard 30 minutes ago deserves less trust
+  than one heard 10 seconds ago, and without those fields you cannot tell the difference.
 
 ---
 

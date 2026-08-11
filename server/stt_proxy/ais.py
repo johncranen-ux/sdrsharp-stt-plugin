@@ -258,7 +258,17 @@ _stale_filter_warned = False
 # A feed that fails by going quiet is indistinguishable from a quiet feed unless something
 # is watching the clock, which is the whole point of this. 60s is far longer than the
 # seconds-apart cadence of a busy estuary, so it cannot fire on normal traffic.
-AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "60"))
+#
+# DEFAULT CHANGED TO 0 (off) 2026-08-11. The instrument is correct and the diagnosis it
+# reports is true -- which is exactly the problem. aisstream has delivered nothing since
+# 2026-08-05 13:31 UTC, so this fires every 60s forever, ~8,600 times and counting, and
+# drowns the console output that is still worth reading. A warning that is permanently on
+# carries no information; it only costs attention.
+#
+# This is a mute, not a removal: the mechanism is the only thing that would catch aisstream
+# failing again after it recovers. Restore with AIS_SILENCE_WARN_SEC=60 (there is a
+# commented line in start-all.bat), and do so the moment the feed comes back.
+AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "0"))
 
 # time.monotonic() of the last frame of any recognised type; None until the first arrives.
 _last_message_at = None
