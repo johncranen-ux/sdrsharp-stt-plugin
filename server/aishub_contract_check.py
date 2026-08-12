@@ -20,6 +20,26 @@ REQUIRED = ["MMSI", "TIME", "LATITUDE", "LONGITUDE", "NAME", "CALLSIGN",
             "IMO", "TYPE", "A", "B", "C", "D", "DRAUGHT", "DEST",
             "COG", "SOG", "HEADING"]
 
+# Fields AISHub documents as JSON numbers and that reach a numeric format string unconverted.
+# map_ship coerces LATITUDE/LONGITUDE/TYPE defensively but passes these through raw, and
+# conversations._format_particulars then applies `:.1f` (DRAUGHT, SOG) or `int()` (COG, and
+# A-D via _dimension) to them. A string here would not be a wrong number on one row -- it
+# raises inside the page renderer and takes the whole /conversations page down with a 500.
+# Presence alone never caught that, which is the gap this list closes: the only thing in this
+# project that touches the real service should check the TYPE of what it gets, not just that
+# it arrived.
+NUMERIC = ["LATITUDE", "LONGITUDE", "TYPE", "IMO", "A", "B", "C", "D",
+           "DRAUGHT", "COG", "SOG", "HEADING"]
+
+
+def _is_number(value) -> bool:
+    """True for a JSON number, or for None -- absent is handled everywhere, a string is not.
+
+    bool is excluded deliberately: `isinstance(True, int)` is True in Python, and a boolean
+    reaching `:.1f` is a contract break wearing a number's clothes.
+    """
+    return value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+
 
 def main() -> int:
     username = os.environ.get("AISHUB_USERNAME", "")
@@ -47,6 +67,20 @@ def main() -> int:
         print(f"FAIL: fields absent from the response: {missing}", file=sys.stderr)
         return 1
     print(f"all {len(REQUIRED)} expected fields present")
+
+    # Every ship, not a sample: one string in nine thousand rows is enough to 500 the page,
+    # and it costs nothing here -- the request is already paid for.
+    offenders: dict[str, tuple] = {}
+    for ship in ships:
+        for field in NUMERIC:
+            if field not in offenders and not _is_number(ship.get(field)):
+                offenders[field] = (ship.get("MMSI"), ship.get(field))
+    if offenders:
+        for field, (mmsi, value) in sorted(offenders.items()):
+            print(f"FAIL: {field} is {type(value).__name__} {value!r} on MMSI {mmsi}, "
+                  f"expected a JSON number", file=sys.stderr)
+        return 1
+    print(f"all {len(NUMERIC)} numeric fields are numbers on all {len(ships)} ships")
 
     stamped = sum(1 for s in ships[:200] if aishub.parse_time(s.get("TIME", "")) is not None)
     if stamped < 190:
