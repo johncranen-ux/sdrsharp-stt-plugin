@@ -1147,6 +1147,82 @@ def test_name_filter_can_be_disabled(monkeypatch, name_cache):
 
 
 # ---------------------------------------------------------------------------
+# Ambiguity detection in name matching
+#
+# _best_name_match kept only the top score with `score > best[1]`, so an exact draw between
+# two cache names was settled by list order and reported as a confident identification --
+# "Delta" scores 83.3 against both DELTA 3 and DELTA D. match_by_name_candidates surfaces
+# every name within AIS_NAME_AMBIGUOUS_GAP of the best, and every ship behind each of those
+# names, so a caller can tell a contested call from a clear one.
+# ---------------------------------------------------------------------------
+
+def test_a_dropped_token_yields_both_ships_rather_than_one(ais_caches):
+    # "Delta" scores 83.3 against both DELTA 3 and DELTA D. The old matcher returned
+    # whichever came first in the list -- a confident identification decided by list order.
+    ais.record({"mmsi": "d3", "name": "DELTA 3", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "dd", "name": "DELTA D", "latitude": 52.02,
+                "longitude": 3.89, "type": 70}, source="test")
+    ais.set_in_scope({"d3", "dd"})
+
+    names = {c["name"] for c in ais.match_by_name_candidates("DELTA")}
+    assert names == {"DELTA 3", "DELTA D"}
+
+
+def test_a_clear_winner_yields_one_candidate(ais_caches):
+    ais.record({"mmsi": "v", "name": "VOLGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "w", "name": "VAGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"v", "w"})
+
+    # 100.0 vs 87.0 -- a 13 point gap is not a close call.
+    assert [c["name"] for c in ais.match_by_name_candidates("VOLGA MAERSK")] \
+        == ["VOLGA MAERSK"]
+
+
+def test_a_near_miss_within_the_gap_yields_both(ais_caches, monkeypatch):
+    ais.record({"mmsi": "v", "name": "VOLGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "w", "name": "VAGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"v", "w"})
+
+    # "VOGA MAERSK": 95.7 vs 90.9, a 4.8 point gap. Contested.
+    monkeypatch.setattr(ais, "AIS_NAME_AMBIGUOUS_GAP", 5.0)
+    names = {c["name"] for c in ais.match_by_name_candidates("VOGA MAERSK")}
+    assert names == {"VOLGA MAERSK", "VAGA MAERSK"}
+
+
+def test_two_ships_sharing_one_name_are_both_candidates(ais_caches):
+    ais.record({"mmsi": "a", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "b", "name": "FORTUNA", "latitude": 52.05,
+                "longitude": 3.90, "type": 70}, source="test")
+    ais.set_in_scope({"a", "b"})
+
+    assert {c["mmsi"] for c in ais.match_by_name_candidates("FORTUNA")} == {"a", "b"}
+
+
+def test_match_by_name_still_returns_one_entry(ais_caches):
+    # The live path's contract is unchanged: one entry or None.
+    ais.record({"mmsi": "d3", "name": "DELTA 3", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "dd", "name": "DELTA D", "latitude": 52.5,
+                "longitude": 4.5, "type": 70}, source="test")
+    ais.set_in_scope({"d3", "dd"})
+
+    hit = ais.match_by_name("DELTA")
+    assert isinstance(hit, dict)
+    assert hit["mmsi"] == "d3"      # nearer Maas Center wins the tie
+
+
+def test_match_by_name_candidates_is_empty_for_no_match(ais_caches):
+    ais.record({"mmsi": "x", "name": "ORASUND"}, source="test")
+    assert ais.match_by_name_candidates("ZZZZZZZZ") == []
+
+
+# ---------------------------------------------------------------------------
 # Prompt echo
 # ---------------------------------------------------------------------------
 

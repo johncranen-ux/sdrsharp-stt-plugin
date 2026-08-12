@@ -847,8 +847,39 @@ AIS_NAME_FILTER    = os.environ.get("AIS_NAME_FILTER", "on").strip().lower() != 
 AIS_NAME_MIN_SCORE = int(os.environ.get("AIS_NAME_MIN_SCORE", "76"))
 AIS_NAME_MIN_TOKEN = int(os.environ.get("AIS_NAME_MIN_TOKEN", "4"))
 
+# Two cache names within this many points of each other are a tie, not a winner and a loser.
+# Measured: "Delta" scores 83.3 against both DELTA 3 and DELTA D, and one dropped letter puts
+# VOLGA MAERSK and VAGA MAERSK 4.7 apart. 3.0 catches the exact ties and the tightest
+# near-misses without flagging the ordinary 13-point gap of clean speech as contested.
+AIS_NAME_AMBIGUOUS_GAP = float(os.environ.get("AIS_NAME_AMBIGUOUS_GAP", "3.0"))
+
 _NAME_SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
               "BULKER", "VESSEL", "CONTAINER", "MOTORTANKER", "MOTORVESSEL"}
+
+
+def _scored_name_matches(query: str, keys: list[str], cutoff: int) -> list[tuple[str, float]]:
+    """(name, score) for every cache name at or above `cutoff`, best first.
+
+    _best_name_match keeps only the winner, which is what made a tie invisible: it used
+    `score > best[1]`, so an exact draw was settled by list order and reported as an
+    identification. This keeps the runners-up so the caller can see a close call.
+
+    AIS_NAME_FILTER=off is a documented full revert (see the block comment above
+    AIS_NAME_FILTER) to the pre-fix WRatio scorer with no short-name guard, and
+    test_name_filter_can_be_disabled pins that it reproduces the old bug exactly. This branch
+    exists so match_by_name_candidates -- which now owns all scoring -- still honours that
+    revert instead of silently always using the guarded ratio scorer.
+    """
+    if not AIS_NAME_FILTER:
+        hits = rf_process.extract(query, keys, scorer=rf_fuzz.WRatio,
+                                  limit=None, score_cutoff=cutoff)
+        return sorted([(name, score) for name, score, _ in hits], key=lambda pair: -pair[1])
+
+    hits = rf_process.extract(query, keys, scorer=rf_fuzz.ratio,
+                              limit=None, score_cutoff=cutoff)
+    kept = [(name, score) for name, score, _ in hits
+            if len(name.replace(" ", "")) >= AIS_NAME_MIN_TOKEN or name == query]
+    return sorted(kept, key=lambda pair: -pair[1])
 
 
 def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
@@ -874,26 +905,71 @@ def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
 
 
 def match_by_name(extracted_name: str) -> dict | None:
+    """The single best vessel for a heard name, or None.
+
+    Unchanged contract for the live path. It is now the head of the candidate ranking rather
+    than the highest fuzzy score, so a tie is settled by presence and proximity instead of by
+    list order.
+    """
+    candidates = match_by_name_candidates(extracted_name)
+    return candidates[0] if candidates else None
+
+
+def match_by_name_candidates(extracted_name: str) -> list[dict]:
+    """Every vessel a heard name plausibly refers to, best first.
+
+    Two sources of ambiguity, and both matter:
+      - several cache NAMES score within AIS_NAME_AMBIGUOUS_GAP of the best ("Delta" against
+        DELTA 3 and DELTA D at 83.3 apiece);
+      - one name carried by several SHIPS (FORTUNA twice, ALBATROS three times).
+
+    Returns [] when nothing matches, and a single-element list when the identification is
+    clear -- so a caller can treat len() > 1 as "contested" without a second rule.
+    """
     if not extracted_name:
-        return None
+        return []
     query = extracted_name.upper()
     keys, cache = _fresh_snapshot()
     if not keys:
-        return None
+        return []
+
     cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
-    hit = _best_name_match(query, keys, cutoff)
-    if hit:
-        return cache[hit]
-    words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
-    candidates = []
-    for length in range(len(words), 0, -1):
-        for start in range(len(words) - length + 1):
-            candidates.append(" ".join(words[start:start + length]))
-    for candidate in candidates:
-        hit = _best_name_match(candidate, keys, cutoff if AIS_NAME_FILTER else 88)
-        if hit:
-            return cache[hit]
-    return None
+    scored = _scored_name_matches(query, keys, cutoff)
+    if not scored:
+        words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
+        probes = []
+        for length in range(len(words), 0, -1):
+            for start in range(len(words) - length + 1):
+                probes.append(" ".join(words[start:start + length]))
+        for probe in probes:
+            scored = _scored_name_matches(probe, keys, cutoff)
+            if scored:
+                break
+    if not scored:
+        return []
+
+    best = scored[0][1]
+    names = [name for name, score in scored if best - score <= AIS_NAME_AMBIGUOUS_GAP]
+
+    in_scope = get_in_scope()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name in names:
+        # candidates_for_name reads _mmsi_index/_name_index, which only record() populates.
+        # Falling back to the plain _fresh_snapshot() entry keeps this correct for a vessel
+        # cache written directly (record() is the only production path, but several tests
+        # pre-dating Task 4 build _vessel_cache by hand) -- the same single entry match_by_name
+        # returned before candidate expansion existed.
+        entries = candidates_for_name(name)
+        if not entries and name in cache:
+            entries = [cache[name]]
+        for entry in entries:
+            mmsi = str(entry.get("mmsi") or "")
+            if mmsi and mmsi in seen:
+                continue
+            seen.add(mmsi)
+            out.append(entry)
+    return sorted(out, key=lambda e: _candidate_sort_key(e, in_scope))
 
 
 def match_by_callsign(extracted_callsign: str) -> dict | None:
