@@ -699,6 +699,124 @@ def test_a_save_load_round_trip_preserves_two_ships_sharing_a_name(ais_caches, t
         "and _vessel_cache must be re-ranked after loading, not last-in-file-wins")
 
 
+def _write_cache(path, entries):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f)
+
+
+def _reset_caches(monkeypatch):
+    """Every AIS index empty, the way a real restart starts."""
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+
+
+def test_a_save_does_not_delete_an_entry_orphaned_by_a_duplicate_mmsi(ais_caches, tmp_path,
+                                                                     monkeypatch):
+    """_save_cache persisted from _mmsi_index alone, so anything in the cache that the index
+    does not point at was deleted from disk on the first save -- within 300s of start, via
+    _periodic_save, or at atexit.
+
+    The real cache file makes this concrete: 8,672 entries, 8,362 distinct MMSIs. 290 MMSIs
+    carry TWO entries each -- a real vessel plus an AIS 6-bit decode artefact broadcast under
+    the same MMSI, e.g. 244660257 -> ['REGULIERSGRACHT', '?!C?2H /8PA7NEH2]5D,']. _load_cache
+    seeds _mmsi_index last-in-file-wins, so one entry of each pair is orphaned: still in
+    _vessel_cache, unreachable through the index. Measured, saving from the index alone turned
+    8,672 rows into 8,362 and permanently lost 310 of them.
+
+    The fixture below is synthetic (never real cache data), but is the same shape: two entries
+    sharing MMSI 244660257, the garbage one written last so it wins the index."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "", "type": None},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert len(ais._vessel_cache) == 2 and len(ais._mmsi_index) == 1, "the shape under test"
+
+    ais._save_cache()
+
+    with open(cache_file, "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert sorted(e["name"] for e in saved) == sorted(["SPOOKSCHIP", "?!C?2H /8PA7NEH2]5D,"]), (
+        "a save must never remove an entry a load put in memory")
+
+
+def test_a_legacy_cache_file_without_mmsi_survives_a_save(ais_caches, tmp_path, monkeypatch):
+    """Same root cause, different victim: a cache file written before entries carried an
+    "mmsi" field indexes NOTHING (_load_cache only indexes on a truthy mmsi), so saving from
+    _mmsi_index rewrote the whole file as []. Measured: 500 legacy entries loaded fine
+    (_vessel_cache 500, _mmsi_index 0) and saved as 0. Master was lossless here."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    legacy = [{"name": f"LEGACY {i}", "callsign": f"CS{i}", "type": 70,
+               "latitude": 52.0, "longitude": 3.9} for i in range(5)]
+    _write_cache(cache_file, legacy)
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert (len(ais._vessel_cache), len(ais._mmsi_index)) == (5, 0), "the shape under test"
+
+    ais._save_cache()
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    assert len(ais._vessel_cache) == 5, "a legacy file must not be wiped by the first save"
+    assert ais._vessel_cache["LEGACY 3"]["callsign"] == "CS3"
+
+
+def test_a_vessel_orphaned_by_a_duplicate_mmsi_is_still_matchable_by_name(ais_caches, tmp_path,
+                                                                         monkeypatch):
+    """The other half of the same defect, and the one that silently broke identification:
+    with the real cache loaded, 310 cached names returned [] from candidates_for_name and 309
+    of them returned None from match_by_name on an EXACT query -- REGULIERSGRACHT, KRVE 60,
+    HEKGOLF, SANDRA W. among them. Master resolved all of them.
+
+    Why the chain: the garbage entry wins _mmsi_index, so candidates_for_name -- which filters
+    holders by their CURRENT name -- finds no holder still called SPOOKSCHIP and returns [].
+    The fallback in match_by_name_candidates was gated on `name not in _name_index`, and the
+    name IS in _name_index (the orphan indexed itself at load), so it declined too."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "", "type": None},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    assert ais.candidates_for_name("SPOOKSCHIP") == [], "the orphaning that causes this"
+    hit = ais.match_by_name("SPOOKSCHIP")
+    assert hit is not None and hit["name"] == "SPOOKSCHIP", (
+        "an entry the MMSI index cannot reach must still be findable by its own name")
+
+
+def test_match_by_mmsi_finds_a_ship_that_shares_its_name(ais_caches):
+    """match_by_mmsi scanned _vessel_cache, which since Task 4 holds only the BEST entry per
+    NAME -- so every non-best ship in a duplicate-name group was invisible to an exact-MMSI
+    lookup (~1,400 of them on a live AISHub poll). conversations._live_candidates re-resolves
+    a transmission's live_mmsi through here, so a ship positively identified BY MMSI dropped
+    out of the resolver's candidate list and the conversation ended unidentified."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 40.0, "longitude": 2.0,
+                "type": 70}, source="test")
+    assert ais._vessel_cache["ORION"]["mmsi"] == "111", "222 is the non-best duplicate"
+
+    hit = ais.match_by_mmsi("222")
+    assert hit is not None and hit["mmsi"] == "222", (
+        "the losing half of a name tie is still a real ship with a real MMSI")
+    assert ais.match_by_mmsi("999") is None
+
+
 # ---------------------------------------------------------------------------
 # Feed silence detection
 #
@@ -1931,6 +2049,12 @@ def santa_caches(monkeypatch):
     monkeypatch.setattr(ais, "_vessel_cache", {"SANTA ISABEL MAERSK": _SANTA,
                                                "ISABEL": _ISABEL})
     monkeypatch.setattr(ais, "_callsign_cache", {"OXWU2": _SANTA, "PB7708": _ISABEL})
+    # _mmsi_index too, because match_by_mmsi now reads it rather than scanning _vessel_cache
+    # (_vessel_cache holds only the best entry per name, so ~1,400 live ships are not in it).
+    # record() always writes both, so a fixture holding only one was never a state the running
+    # server could be in -- and leaving it unpatched would also let a prior test's index leak
+    # into these, the same isolation problem the caches above are patched for.
+    monkeypatch.setattr(ais, "_mmsi_index", {"219077000": _SANTA, "244700279": _ISABEL})
 
 
 def test_the_live_match_becomes_a_candidate(santa_caches):
@@ -2031,6 +2155,9 @@ _PECHORA_CALL = ("Maaas Approach, Maaas Approach, this is Motortanker, Ikora Sta
 def pechora_caches(monkeypatch):
     monkeypatch.setattr(ais, "_vessel_cache", {"PECHORA STAR": _PECHORA, "VIKTORIA": _VIKTORIA})
     monkeypatch.setattr(ais, "_callsign_cache", {"9HA2788": _PECHORA, "DB6442": _VIKTORIA})
+    # See santa_caches: match_by_mmsi reads _mmsi_index, and record() always writes both.
+    monkeypatch.setattr(ais, "_mmsi_index", {_PECHORA["mmsi"]: _PECHORA,
+                                             _VIKTORIA["mmsi"]: _VIKTORIA})
 
 
 def test_a_spoken_callsign_outranks_a_fuzzy_name_match(pechora_caches):

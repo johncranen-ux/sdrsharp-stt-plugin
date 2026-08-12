@@ -1,19 +1,28 @@
 """Live AIS vessel data, and matching transcribed names against it.
 
-Holds the vessel cache fed by the aisstream.io websocket, and the lookups that turn a name
-or callsign heard on the radio into a real ship. Both halves live here because the matching
-thresholds only make sense against the shape of the cache they search.
+Holds the vessel cache, and the lookups that turn a name or callsign heard on the radio into
+a real ship. Both halves live here because the matching thresholds only make sense against
+the shape of the cache they search.
+
+The cache is provider-agnostic: every observation arrives through `record()`, whichever
+source saw it. `AIS_SOURCE` picks the one that runs -- `aishub` (the default, polled by
+stt_proxy/aishub.py) or `aisstream` (the websocket feed implemented in this module, still
+live and still selectable). The merge lives in one place so two providers cannot get it
+wrong two different ways.
 
 State is module-level and shared with the feed thread, guarded by `_cache_lock`. Read it
 through this module (`ais._vessel_cache`) rather than importing the name, or you will bind
 a snapshot and, in tests, patch something nothing reads.
 
-Everything here degrades to a no-op when AISSTREAM_API_KEY is unset: the cache stays empty,
-lookups return None, and the rest of the pipeline carries on without vessel enrichment.
+Everything here degrades to a no-op when no source is configured -- AISHUB_USERNAME unset
+for aishub, AISSTREAM_API_KEY unset for aisstream: no feed thread starts, the cache holds
+only whatever ais_cache.json carried, and the rest of the pipeline carries on without live
+vessel enrichment.
 """
 
 import asyncio
 import datetime
+import itertools
 import json
 import math
 import os
@@ -113,15 +122,28 @@ def _load_cache() -> None:
 def _save_cache() -> None:
     try:
         with _cache_lock:
-            # Persist from _mmsi_index, not _vessel_cache: _vessel_cache holds only the single
-            # best-ranked entry per NAME (Task 4), so saving from it would silently discard
-            # every non-best duplicate on every save -- exactly the ALBATROS x14 problem this
-            # index exists to solve, reintroduced across a restart. _mmsi_index holds every
-            # ship; id()-dedup guards against two MMSI keys ever aliasing the same dict, which
-            # should not happen but would otherwise double an entry in the saved file.
+            # Persist the UNION of both indexes, deduped by id(). Neither one alone is
+            # lossless, and each loses a different set of ships:
+            #
+            #   _vessel_cache alone holds only the single best-ranked entry per NAME (Task 4),
+            #   so saving from it discards every non-best duplicate on every save -- the
+            #   ALBATROS x14 problem this index exists to solve, reintroduced across a restart.
+            #
+            #   _mmsi_index alone drops every entry that is in the cache but not reachable
+            #   through it. Two ways that happens, both measured on the real 8,672-entry file:
+            #   290 MMSIs carry TWO entries (a real vessel plus an AIS 6-bit decode artefact
+            #   such as 'YESSLYNN @@<ZUQ0\#@,'), and _load_cache seeds last-in-file-wins, so
+            #   one of each pair is orphaned; and a legacy cache file written before entries
+            #   carried an "mmsi" field indexes NOTHING, so saving from _mmsi_index rewrote the
+            #   whole file as []. Saving from _mmsi_index alone turned 8,672 entries into
+            #   8,362, deleting 310 real rows from disk permanently.
+            #
+            # The invariant this restores: nothing that a load put in memory can be removed by
+            # a save. id()-dedup is what makes the union safe -- the same dict is normally
+            # reachable under both its MMSI and its name, and must be written once.
             seen_ids = set()
             entries = []
-            for entry in _mmsi_index.values():
+            for entry in itertools.chain(_mmsi_index.values(), _vessel_cache.values()):
                 if id(entry) not in seen_ids:
                     seen_ids.add(id(entry))
                     entries.append(entry)
@@ -985,18 +1007,33 @@ def match_by_name_candidates(extracted_name: str) -> list[dict]:
     for name in names:
         # candidates_for_name reads _mmsi_index/_name_index, which only record() (and, at
         # startup, _load_cache()/_refresh_name_view() reconstructing what record() already
-        # wrote) populate. Gating the fallback on `name not in _name_index` -- never indexed
-        # at all -- rather than on candidates_for_name returning empty distinguishes that
-        # from a rename: _name_index is append-only (Task 1), so a vacated name STAYS
-        # indexed, and candidates_for_name correctly returns [] for it once every holder has
-        # moved on (Task 4). Falling back to cache[name] there would resurrect the renamed
-        # ship as a ghost under its old name -- exactly what Task 4 fixed. This fallback only
-        # exists for a vessel cache built by hand (several fixtures pre-dating Task 4 write
-        # _vessel_cache directly and never touch _name_index at all), where "never indexed"
-        # and "not in cache" are the same thing.
+        # wrote) populate. It can come back empty for three different reasons, and only two
+        # of them deserve the cache entry as a fallback:
+        #
+        #   never indexed at all -- a vessel cache built by hand (several fixtures pre-dating
+        #   Task 4 write _vessel_cache directly and never touch _name_index), where "never
+        #   indexed" and "not in the cache" are the same thing. Falls back.
+        #
+        #   indexed, but the cache entry is NOT the one _mmsi_index holds for its MMSI --
+        #   i.e. this entry was orphaned when a second entry claimed the same MMSI. On the
+        #   real cache 290 MMSIs carry two entries each (a real vessel plus a 6-bit decode
+        #   artefact), _load_cache seeds last-in-file-wins, and candidates_for_name filters
+        #   holders by CURRENT name, so the orphan is unreachable through the index while
+        #   sitting right there in _vessel_cache. Measured: 309 real cached names -- among
+        #   them REGULIERSGRACHT, KRVE 60, HEKGOLF -- returned None from an EXACT query.
+        #   Falls back, on IDENTITY: the orphan is precisely the entry the index does not
+        #   point at.
+        #
+        #   indexed, and _mmsi_index DOES point at this entry, which has since been renamed
+        #   -- a Task-4 rename ghost. _name_index is append-only (Task 1), so a vacated name
+        #   stays indexed and candidates_for_name correctly refuses it. Does NOT fall back;
+        #   returning cache[name] here would resurrect the renamed ship under its old name.
         entries = candidates_for_name(name, in_scope)
-        if not entries and name not in _name_index:
-            entries = [cache[name]]
+        if not entries:
+            orphan = cache[name]
+            if (name not in _name_index
+                    or _mmsi_index.get(str(orphan.get("mmsi") or "")) is not orphan):
+                entries = [orphan]
         for entry in entries:
             mmsi = str(entry.get("mmsi") or "")
             if mmsi:
@@ -1017,18 +1054,22 @@ def match_by_callsign(extracted_callsign: str) -> dict | None:
 def match_by_mmsi(mmsi: str) -> dict | None:
     """The cached vessel with this MMSI, or None.
 
-    A scan rather than a dict lookup: the cache is keyed by name because that is what every
-    other path searches by, and 7,000-odd entries is nothing next to the fuzzy matching
-    happening either side of this call.
+    Reads _mmsi_index, the one index keyed by the identifier actually being asked for. It
+    used to scan _vessel_cache instead, which was defensible while that dict held every ship;
+    since Task 4 it holds only the single best-ranked entry per NAME, so under AISHub
+    (~9,300 ships across ~7,900 names) roughly 1,400 ships are simply absent from it and an
+    exact-MMSI lookup returned None for them.
+
+    That is not a cosmetic miss: conversations._live_candidates re-resolves a transmission's
+    live_mmsi through here, so a ship positively identified BY MMSI dropped out of the
+    resolver's candidate list, _validate_exchanges then discarded its name as off-list, and
+    the conversation ended unidentified -- the shared-name case (ORION x16) this index exists
+    for, failing on the one lookup that could not be ambiguous.
     """
     if not mmsi:
         return None
-    wanted = str(mmsi)
     with _cache_lock:
-        for entry in _vessel_cache.values():
-            if entry.get("mmsi") == wanted:
-                return entry
-    return None
+        return _mmsi_index.get(str(mmsi))
 
 
 def match_by_callsign_pattern(pattern: str) -> dict | None:
