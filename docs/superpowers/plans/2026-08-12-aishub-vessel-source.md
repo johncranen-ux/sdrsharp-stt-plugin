@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Run all tests from the `server/` directory:** `python -m pytest tests/ -q`. Baseline is **654 passing** before any change; it must never drop.
+- **Run all tests from the `server/` directory:** `python -m pytest tests/ -q`. Baseline is **654 passing, 0 failing** before any change. The count only ever goes up; **zero failures is the invariant**, not the exact number. Task 5 is the one place an existing test may legitimately need amending — it is called out there, and nowhere else may a test be edited to make a change pass.
 - **No new runtime dependencies.** `server/requirements.txt` stays exactly as it is. Use `urllib.request` from the stdlib, not `requests`. Do **not** add `pyais`.
 - **Never commit the AISHub credential.** No key in source, tests, fixtures, docs, or commit messages. This repo already required a `git filter-repo` history rewrite over committed data.
 - **Configuration reaches the proxy through `server/start-all.bat`, not through a `.env` file.** Nothing in the Python loads dotenv — every setting is a plain `os.environ.get`. `AISHUB_USERNAME` is already set there alongside the other keys (the file is gitignored and untracked; verified with `git check-ignore`). For the manually-run scripts in Tasks 3 and 7, export it in the shell for that session — do **not** add a second copy of the secret to a `.env`, and do **not** add a dotenv loader, which would be a new dependency outside this plan's scope.
@@ -205,6 +205,11 @@ _mmsi_index: dict[str, dict] = {}
 # matcher iterates those keys, and junk keys would become candidates for matching.
 _pending: dict[str, dict] = {}
 
+# NAME -> the MMSIs of every ship carrying it. _vessel_cache can only hold one entry per name,
+# so this is the only thing that keeps fourteen ALBATROS apart. Ranking them is Task 4's job;
+# this task only has to stop them overwriting each other.
+_name_index: dict[str, list[str]] = {}
+
 _STATIC_FIELDS   = ("name", "callsign", "type", "imo", "length", "beam",
                     "draught", "destination")
 _POSITION_FIELDS = ("latitude", "longitude", "sog", "cog", "heading")
@@ -293,12 +298,14 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
 
 
 def _index_name(entry: dict) -> None:
-    """Record this MMSI under its name. Caller holds _cache_lock.
-
-    Filled in properly in Task 4; a no-op here keeps record() and its call sites final so
-    Task 4 changes one function rather than five call sites.
-    """
-    return
+    """Record this MMSI under its name. Caller holds _cache_lock."""
+    name = (entry.get("name") or "").strip().upper()
+    mmsi = str(entry.get("mmsi") or "").strip()
+    if not name or not mmsi:
+        return
+    holders = _name_index.setdefault(name, [])
+    if mmsi not in holders:
+        holders.append(mmsi)
 
 
 def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
@@ -1130,29 +1137,8 @@ Expected: FAIL — `AttributeError: module 'stt_proxy.ais' has no attribute '_na
 
 - [ ] **Step 3: Add the index, the plausibility table and the ranking**
 
-In `server/stt_proxy/ais.py`, add `_name_index` next to `_mmsi_index`:
-
-```python
-# NAME -> the MMSIs of every ship carrying it. _vessel_cache can only hold one entry per name,
-# so this is the only thing that keeps fourteen ALBATROS apart.
-_name_index: dict[str, list[str]] = {}
-```
-
-Replace the placeholder `_index_name` from Task 1 with:
-
-```python
-def _index_name(entry: dict) -> None:
-    """Record this MMSI under its name. Caller holds _cache_lock."""
-    name = (entry.get("name") or "").strip().upper()
-    mmsi = str(entry.get("mmsi") or "").strip()
-    if not name or not mmsi:
-        return
-    holders = _name_index.setdefault(name, [])
-    if mmsi not in holders:
-        holders.append(mmsi)
-```
-
-Then add the ranking, after `candidates_for_name`'s dependencies:
+`_name_index` and `_index_name` already exist from Task 1 — do not redefine them. This task adds
+the ranking and the lookup on top. In `server/stt_proxy/ais.py`, add:
 
 ```python
 # How likely a vessel of this type is to be working Maas Approach. Used only to break ties
@@ -1194,6 +1180,12 @@ def candidates_for_name(name: str) -> list[dict]:
 
     Exact-name only. Fuzzy matching happens a layer up in match_by_name, which then asks this
     for the ships behind the name it landed on.
+
+    Reads _mmsi_index directly rather than _fresh_snapshot(), so AIS_MAX_AGE_MIN does not
+    filter here. Deliberate and currently inert: that setting defaults to 0, and the in-scope
+    set is what replaces it -- scope against the last good poll rather than against wall-clock
+    age, which is the distinction a feed outage turns on. The caller still derives its
+    searchable NAMES from _fresh_snapshot(), so the age filter still bounds what can be found.
     """
     key = (name or "").strip().upper()
     if not key:
@@ -1225,7 +1217,23 @@ def _refresh_name_view(name: str) -> None:
     _vessel_cache[key] = min(entries, key=lambda e: _candidate_sort_key(e, in_scope))
 ```
 
-In `record()`, after each `_index_name(entry)` call, add `_refresh_name_view(entry.get("name", ""))`. In the admission branch the line `_vessel_cache[entry["name"].upper()] = entry` stays (it seeds the key), followed by `_index_name(entry)` then `_refresh_name_view(entry["name"])`.
+`record()` has exactly **one** `_vessel_cache[...] = entry` assignment, in the admission branch.
+Leave it in place — it seeds the key — and add `_refresh_name_view` immediately after each of
+the two `_index_name(entry)` calls, so both the admission path and the already-admitted update
+path re-pick the best entry for that name:
+
+```python
+            _mmsi_index[mmsi] = entry
+            _index_name(entry)
+            _refresh_name_view(entry.get("name", ""))          # already-admitted branch
+```
+
+```python
+        _vessel_cache[entry["name"].upper()] = entry
+        _mmsi_index[mmsi] = entry
+        _index_name(entry)
+        _refresh_name_view(entry["name"])                       # admission branch
+```
 
 - [ ] **Step 5: Run the tests**
 
