@@ -461,22 +461,7 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
     if not mmsi:
         return
     when = time.time() if observed_at is None else observed_at
-
-    def _apply_current(target: dict) -> None:
-        """_apply() for THIS observation, then re-stamp last_seen through _now() when the
-        caller left observed_at unset.
-
-        _apply() always stamps last_seen via fromtimestamp(when), which is value-equivalent
-        to _now() for a live aisstream message (when == time.time() either way) but not the
-        same call -- and _now() is what the rest of this module, including tests, patches to
-        control "the current time". Only the current observation is re-stamped this way; a
-        flushed _pending observation keeps its own recorded time, explicit or not, because
-        it is not "now" regardless of how this call was invoked.
-        """
-        before = target.get("last_seen")
-        _apply(target, fields, when, source)
-        if observed_at is None and target.get("last_seen") != before:
-            target["last_seen"] = _now()
+    stamp_now = observed_at is None
 
     with _cache_lock:
         entry = _mmsi_index.get(mmsi)
@@ -490,6 +475,11 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
                 # ever correct it.
                 if candidate is not None and candidate.get("mmsi") in (mmsi, None, ""):
                     entry = candidate
+                    # The candidate's mmsi was missing or "" -- fill it in now. Without this,
+                    # entry["mmsi"] stays falsy and _index_name() below silently drops the
+                    # vessel from _name_index (it early-returns on a falsy mmsi), even though
+                    # _mmsi_index[mmsi] correctly points at it.
+                    entry["mmsi"] = mmsi
 
         if entry is not None:
             # An observation for this MMSI seen before it was admitted -- held in _pending
@@ -501,7 +491,16 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
                 _apply(entry, pending, pending.get("position_at", when),
                        pending.get("source", source))
 
-            _apply_current(entry)
+            _apply(entry, fields, when, source, stamp_now=stamp_now)
+
+            # A rename (ShipStaticData.Name differing from the MetaData.ShipName the vessel
+            # was first admitted under) must not leave the cache keyed on the stale name --
+            # _fresh_snapshot hands _vessel_cache.keys() straight to the fuzzy matcher, so a
+            # vessel invisible under its own current name is a vessel that cannot be found.
+            key = entry["name"].upper()
+            if _vessel_cache.get(key) is not entry:
+                _vessel_cache[key] = entry
+
             _mmsi_index[mmsi] = entry
             _index_name(entry)
             if entry.get("callsign"):
@@ -510,7 +509,7 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
 
         # Not yet admitted: accumulate until there is a name.
         held = _pending.setdefault(mmsi, {"mmsi": mmsi})
-        _apply_current(held)
+        _apply(held, fields, when, source, stamp_now=stamp_now)
         held["_touched"] = when
 
         if len(_pending) > _PENDING_MAX:
@@ -547,7 +546,7 @@ def _index_name(entry: dict) -> None:
         holders.append(mmsi)
 
 
-def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
+def _apply(entry: dict, fields: dict, when: float, source: str, *, stamp_now: bool = False) -> None:
     """Merge one observation's fields into `entry`, in place.
 
     Static fields fill or update. Position applies only if this observation is newer than the
@@ -558,10 +557,16 @@ def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
     uninformative as a missing key for every field record() recognises, and adapters routinely
     default absent strings to "".
 
-    `last_seen` is stamped from `when` -- the OBSERVATION time -- not from the clock. AISHub's
-    TIME field is when the position was reported, and making last_seen true is the whole
-    reason for adopting it. For aisstream nothing changes: its adapter passes time.time(), and
-    fromtimestamp(time.time()) is exactly what _now() produced.
+    `last_seen` is stamped from `when` -- the OBSERVATION time -- not from the clock -- UNLESS
+    `stamp_now` is set, in which case it goes through `_now()` instead. The two are
+    value-equivalent whenever `when` is `time.time()` (aisstream's case, `record()` passing no
+    `observed_at`): `fromtimestamp(time.time())` and `_now()`'s `datetime.now()` land on the
+    same wall-clock second either way. But they are not the same CALL, and `_now()` is what the
+    rest of this module -- including a pre-existing test -- patches to control "the current
+    time"; `stamp_now` is what lets that keep working instead of the mock silently doing
+    nothing. AISHub's explicit `observed_at` always leaves `stamp_now` False, since its TIME
+    field is when the position was reported and making last_seen true to that is the whole
+    reason for adopting it.
 
     LOCAL time, not UTC, and that is not an oversight. _now() used datetime.now() and
     _is_fresh compares the parsed stamp against a naive local cutoff, so every last_seen in
@@ -587,7 +592,8 @@ def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
 
     if applied:
         entry["source"] = source
-        entry["last_seen"] = datetime.datetime.fromtimestamp(when).strftime(_LAST_SEEN_FMT)
+        entry["last_seen"] = (_now() if stamp_now else
+                               datetime.datetime.fromtimestamp(when).strftime(_LAST_SEEN_FMT))
 
 
 def _process_ais(msg: dict) -> None:

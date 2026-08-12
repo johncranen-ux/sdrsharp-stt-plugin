@@ -377,14 +377,14 @@ def test_a_malformed_message_does_not_raise(ais_caches):
 # One merge point for whatever provider saw the observation, keyed by MMSI so two ships
 # sharing a name (17 duplicate-name groups in a live AISHub snapshot of the Maas approach)
 # stop overwriting each other.
+#
+# All on ais_caches rather than hand-rolled monkeypatch lines: record() also touches
+# _name_index, and the fixture is the one place that resets everything record() touches. A
+# test that reset only _vessel_cache/_callsign_cache/_mmsi_index/_pending by hand would leak
+# _name_index into whichever test runs next.
 # ---------------------------------------------------------------------------
 
-def test_record_admits_a_named_vessel_and_indexes_it_by_mmsi(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_admits_a_named_vessel_and_indexes_it_by_mmsi(ais_caches):
     ais.record({"mmsi": "244123456", "name": "ORASUND", "callsign": "PBZL",
                 "latitude": 52.0, "longitude": 3.9}, source="test")
 
@@ -393,12 +393,7 @@ def test_record_admits_a_named_vessel_and_indexes_it_by_mmsi(monkeypatch):
     assert ais._callsign_cache["PBZL"]["mmsi"] == "244123456"
 
 
-def test_record_holds_a_position_until_a_name_arrives(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_holds_a_position_until_a_name_arrives(ais_caches):
     ais.record({"mmsi": "244000111", "latitude": 51.9, "longitude": 4.0},
                source="test", observed_at=1000.0)
     assert ais._vessel_cache == {}
@@ -412,12 +407,7 @@ def test_record_holds_a_position_until_a_name_arrives(monkeypatch):
     assert "244000111" not in ais._pending
 
 
-def test_record_does_not_alias_two_ships_that_share_a_name(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_does_not_alias_two_ships_that_share_a_name(ais_caches):
     ais.record({"mmsi": "111111111", "name": "ALBATROS"}, source="test")
     ais.record({"mmsi": "222222222", "name": "ALBATROS"}, source="test")
 
@@ -426,12 +416,7 @@ def test_record_does_not_alias_two_ships_that_share_a_name(monkeypatch):
     assert ais._mmsi_index["111111111"] is not ais._mmsi_index["222222222"]
 
 
-def test_record_keeps_the_newer_position_when_an_older_one_arrives_late(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_keeps_the_newer_position_when_an_older_one_arrives_late(ais_caches):
     ais.record({"mmsi": "244777888", "name": "NEWEST WINS",
                 "latitude": 52.5, "longitude": 4.5}, source="a", observed_at=2000.0)
     ais.record({"mmsi": "244777888", "latitude": 51.0, "longitude": 3.0},
@@ -440,12 +425,7 @@ def test_record_keeps_the_newer_position_when_an_older_one_arrives_late(monkeypa
     assert ais._vessel_cache["NEWEST WINS"]["latitude"] == 52.5
 
 
-def test_record_stamps_last_seen_from_the_observation_not_the_clock(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_stamps_last_seen_from_the_observation_not_the_clock(ais_caches):
     import datetime as _dt
     observed = 1786528800.0        # 2026-08-12 10:00:00 UTC
     ais.record({"mmsi": "244999000", "name": "TIMESTAMPED",
@@ -459,17 +439,55 @@ def test_record_stamps_last_seen_from_the_observation_not_the_clock(monkeypatch)
     assert ais._vessel_cache["TIMESTAMPED"]["last_seen"] != ais._now()
 
 
-def test_record_never_blanks_a_name_with_an_empty_string(monkeypatch):
-    monkeypatch.setattr(ais, "_vessel_cache", {})
-    monkeypatch.setattr(ais, "_callsign_cache", {})
-    monkeypatch.setattr(ais, "_mmsi_index", {})
-    monkeypatch.setattr(ais, "_pending", {})
-
+def test_record_never_blanks_a_name_with_an_empty_string(ais_caches):
     ais.record({"mmsi": "244321000", "name": "KEEPS ITS NAME"}, source="test")
     ais.record({"mmsi": "244321000", "name": "", "latitude": 52.0,
                 "longitude": 4.0}, source="test")
 
     assert ais._mmsi_index["244321000"]["name"] == "KEEPS ITS NAME"
+
+
+def test_record_rekeys_the_cache_when_the_vessel_is_renamed(ais_caches):
+    """The already-admitted path never re-keyed _vessel_cache: record(mmsi=1, name="ANOUK")
+    then record(mmsi=1, name="ANOUK MARIA") left the cache keyed on the stale "ANOUK" while
+    entry["name"] read "ANOUK MARIA". _fresh_snapshot hands _vessel_cache.keys() straight to
+    the fuzzy matcher, so a vessel unreachable under its own current name is unmatchable by
+    that name, and a hit on the old key would display the wrong one."""
+    ais.record({"mmsi": "244888000", "name": "ANOUK"}, source="test")
+    ais.record({"mmsi": "244888000", "name": "ANOUK MARIA"}, source="test")
+
+    assert "ANOUK MARIA" in ais._vessel_cache
+    assert ais._vessel_cache["ANOUK MARIA"]["mmsi"] == "244888000"
+    assert ais._vessel_cache["ANOUK MARIA"]["name"] == "ANOUK MARIA"
+
+
+def test_record_flushes_a_pending_position_onto_a_newly_adopted_entry(ais_caches):
+    """The pending-flush branch (record(), "an observation for this MMSI seen before it was
+    admitted") is only reachable through name-adoption of a _vessel_cache entry carrying a
+    falsy mmsi -- never through the pending-accumulate path that
+    test_record_holds_a_position_until_a_name_arrives exercises. Seed exactly that: a
+    name-keyed entry with no mmsi yet, a position-only observation for the real MMSI that
+    can only land in _pending (it carries no name to adopt by), and then the name arriving
+    for that MMSI, which must adopt the seeded entry AND flush the held position onto it."""
+    vessels, _ = ais_caches
+    seeded = {"name": "PRE-SEEDED", "mmsi": "", "callsign": ""}
+    vessels["PRE-SEEDED"] = seeded
+
+    ais.record({"mmsi": "244555000", "latitude": 51.8, "longitude": 4.2},
+               source="test", observed_at=1000.0)
+    assert "244555000" in ais._pending
+    assert "latitude" not in seeded, "must not touch the seeded entry before adoption"
+
+    ais.record({"mmsi": "244555000", "name": "PRE-SEEDED"},
+               source="test", observed_at=1001.0)
+
+    entry = ais._vessel_cache["PRE-SEEDED"]
+    assert entry is seeded, "adopts the existing entry rather than creating a new one"
+    assert entry["mmsi"] == "244555000"
+    assert (entry["latitude"], entry["longitude"]) == (51.8, 4.2), (
+        "the held position must survive onto the adopted entry")
+    assert "244555000" not in ais._pending
+    assert ais._name_index["PRE-SEEDED"] == ["244555000"]
 
 
 # ---------------------------------------------------------------------------
