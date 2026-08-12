@@ -29,7 +29,10 @@ env/
 *.log
 *.tmp
 debug_chunk.wav
-ais_cache.json
+# Unanchored and globbed: the live cache AND any archived snapshot of it. An exact
+# "ais_cache.json" missed ais_cache-wide-2026-08-13.json, which holds 13,571 real vessel
+# records -- the same class of leak that put three reference files on the remote.
+ais_cache*.json
 identified_vessels.html
 conversations.json
 # ais_station_count.py output: per-hour MMSI observations from the local receiver, i.e. a

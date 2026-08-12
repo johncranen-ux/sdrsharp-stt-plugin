@@ -37,8 +37,18 @@ from rapidfuzz import fuzz as rf_fuzz, process as rf_process
 # Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
 ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
 
-AIS_CACHE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ais_cache.json")
-AIS_CACHE_FILE    = os.path.normpath(AIS_CACHE_FILE)
+# Overridable so a frozen cache and the live one can coexist. The bench replays conversations
+# from a given week and needs the cache as it was THEN -- vessels that have since berthed or
+# left are gone from a live cache, so scoring old labels against it silently understates
+# recall. Point the bench at an archived snapshot with AIS_CACHE_FILE and leave production on
+# the default.
+#
+# Arms measured against different caches are NOT comparable. Same trap as scoring against a
+# part-draft reference corpus: the number comes out, it just does not mean what it looks like.
+_DEFAULT_CACHE_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ais_cache.json"))
+AIS_CACHE_FILE    = os.path.normpath(
+    os.environ.get("AIS_CACHE_FILE", "").strip() or _DEFAULT_CACHE_FILE)
 AIS_SAVE_INTERVAL = 300
 
 
