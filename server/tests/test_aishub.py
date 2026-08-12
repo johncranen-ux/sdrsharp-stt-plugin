@@ -120,6 +120,7 @@ def test_poll_once_survives_a_non_numeric_position(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     bad = {**SHIP, "LATITUDE": "GARBAGE"}
@@ -215,6 +216,7 @@ def test_poll_once_records_every_named_vessel(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     payload = _envelope([SHIP, {**SHIP, "MMSI": 999, "NAME": "SECOND"}])
@@ -231,6 +233,7 @@ def test_poll_once_uses_the_report_time_as_last_seen(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     import datetime as _dt
@@ -248,6 +251,7 @@ def test_poll_once_publishes_the_in_scope_set(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     payload = _envelope([SHIP, {**SHIP, "MMSI": 999, "NAME": "SECOND"}])
@@ -288,6 +292,7 @@ def test_a_failed_poll_leaves_the_cache_and_the_scope_alone(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
@@ -326,6 +331,7 @@ def test_a_poll_that_fails_after_parsing_leaves_the_cache_and_the_scope_alone(mo
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
@@ -400,6 +406,7 @@ def test_poll_once_converts_a_urlopen_failure_and_changes_nothing(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
@@ -427,6 +434,7 @@ def test_poll_once_propagates_a_malformed_body_and_changes_nothing(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {})
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     monkeypatch.setattr(ais, "_in_scope", set())
 
     aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))

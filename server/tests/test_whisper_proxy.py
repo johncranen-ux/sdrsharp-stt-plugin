@@ -1222,6 +1222,83 @@ def test_match_by_name_candidates_is_empty_for_no_match(ais_caches):
     assert ais.match_by_name_candidates("ZZZZZZZZ") == []
 
 
+def test_a_renamed_vessel_is_not_returned_under_its_vacated_name(ais_caches):
+    """Code-review finding: match_by_name_candidates' fallback for a name that
+    candidates_for_name can't expand (added so a vessel cache built by hand, bypassing
+    record(), still works -- several fixtures pre-dating Task 4 do exactly that) must not
+    resurrect a Task-4 rename ghost. _name_index is append-only (Task 1), so FORTUNA's mmsi
+    111 stays listed under FORTUNA forever even after it renames to BELLA; Task 4 made
+    candidates_for_name filter to the entry's CURRENT name, so candidates_for_name('FORTUNA')
+    correctly returns [] once 111 is the only holder and it has moved on. Gating the fallback
+    on `name not in _name_index` (never indexed at all) rather than on candidates_for_name
+    returning empty (indexed, and correctly refused) is what tells "never looked up" apart
+    from "looked up and correctly empty" -- get the gate backwards and this returns BELLA's
+    entry under the query 'FORTUNA'."""
+    ais.record({"mmsi": "111", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "111", "name": "BELLA"}, source="test")
+
+    assert ais.match_by_name("FORTUNA") is None
+
+
+def test_filter_off_ignores_the_ambiguity_gap_and_is_not_reranked(ais_caches, monkeypatch):
+    """Code-review finding: AIS_NAME_FILTER=off promises (see the comment above the flag) to
+    restore the pre-ambiguity-detection matcher exactly -- a single top scorer, decided by
+    list order on a tie, the way rf_process.extractOne always worked. WRatio falls back to
+    partial-ratio matching for a short query against a long candidate, so 'ORASON' scores
+    90.0 against EVERY two-letter substring of itself -- 'OR', 'RA', 'AS', 'SO', 'ON' -- a
+    5-way exact tie (verified with rapidfuzz directly). If the ambiguity gap and
+    _candidate_sort_key re-ranking were still applied in off-mode (as they were before this
+    fix), all five would tie within AIS_NAME_AMBIGUOUS_GAP and re-ranking by proximity would
+    hand the win to whichever candidate is nearest Maas Center -- 'RA', recorded second and
+    placed there on purpose -- rather than 'OR', recorded FIRST and so the list-order winner
+    extractOne would actually pick. Recording 'RA' closer than 'OR' is what makes this test
+    able to tell "restored exactly" apart from "re-ranked but still off nominally"."""
+    ais.record({"mmsi": "or", "name": "OR", "latitude": 40.0,
+                "longitude": 2.0, "type": 70}, source="test")     # recorded first, far away
+    ais.record({"mmsi": "ra", "name": "RA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")    # recorded second, at Maas Center
+    ais.set_in_scope({"or", "ra"})
+    monkeypatch.setattr(ais, "AIS_NAME_FILTER", False)
+
+    hit = ais.match_by_name("ORASON")
+    assert hit["name"] == "OR"      # list-order winner, not the nearer "RA"
+
+
+def test_the_shipped_default_gap_is_not_zero(ais_caches):
+    """Code-review finding: every other ambiguity test either uses an exact tie (gap=0, which
+    passes for any AIS_NAME_AMBIGUOUS_GAP >= 0) or monkeypatches the gap explicitly, so
+    nothing pinned the shipped default (3.0) itself -- it could silently regress to 0.0 with
+    every other test here still green. 'PACIFIC HORIZONS' scores 94.12 against 'PACIFIC
+    HORIZONS 3' and 91.43 against 'PACIFIC HORIZONS 37' (verified with rapidfuzz directly), a
+    2.69 point gap: inside the shipped default, so both must be contested."""
+    ais.record({"mmsi": "p3", "name": "PACIFIC HORIZONS 3", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "p37", "name": "PACIFIC HORIZONS 37", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"p3", "p37"})
+
+    assert ais.AIS_NAME_AMBIGUOUS_GAP == 3.0
+    names = {c["name"] for c in ais.match_by_name_candidates("PACIFIC HORIZONS")}
+    assert names == {"PACIFIC HORIZONS 3", "PACIFIC HORIZONS 37"}
+
+
+def test_the_shipped_default_gap_stops_contesting_below_the_measured_gap(ais_caches, monkeypatch):
+    """Companion to the test above: narrowing the gap below the measured 2.69 points makes the
+    same pair NOT contested, proving the default test above is actually exercising
+    AIS_NAME_AMBIGUOUS_GAP -- not some unrelated path that would return both names regardless
+    of the setting."""
+    ais.record({"mmsi": "p3", "name": "PACIFIC HORIZONS 3", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "p37", "name": "PACIFIC HORIZONS 37", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"p3", "p37"})
+
+    monkeypatch.setattr(ais, "AIS_NAME_AMBIGUOUS_GAP", 1.0)
+    names = {c["name"] for c in ais.match_by_name_candidates("PACIFIC HORIZONS")}
+    assert names == {"PACIFIC HORIZONS 3"}
+
+
 # ---------------------------------------------------------------------------
 # Prompt echo
 # ---------------------------------------------------------------------------

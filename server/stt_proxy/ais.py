@@ -644,7 +644,7 @@ def _candidate_sort_key(entry: dict, in_scope: set[str]) -> tuple:
             -entry.get("position_at", 0.0))
 
 
-def candidates_for_name(name: str) -> list[dict]:
+def candidates_for_name(name: str, in_scope: set[str] | None = None) -> list[dict]:
     """Every cached vessel carrying exactly this name, best first.
 
     Exact-name only. Fuzzy matching happens a layer up in match_by_name, which then asks this
@@ -655,11 +655,17 @@ def candidates_for_name(name: str) -> list[dict]:
     set is what replaces it -- scope against the last good poll rather than against wall-clock
     age, which is the distinction a feed outage turns on. The caller still derives its
     searchable NAMES from _fresh_snapshot(), so the age filter still bounds what can be found.
+
+    `in_scope` defaults to None, meaning "fetch it yourself" (one `get_in_scope()` call, one
+    lock acquisition) -- the original signature. A caller ranking several names in one
+    lookup (match_by_name_candidates) can fetch scope once and pass it down instead of paying
+    a lock acquisition per name.
     """
     key = (name or "").strip().upper()
     if not key:
         return []
-    in_scope = get_in_scope()
+    if in_scope is None:
+        in_scope = get_in_scope()
     with _cache_lock:
         # _name_index is append-only (Task 1): a renamed vessel's old name keeps listing its
         # MMSI forever. Filtering by the entry's CURRENT name excludes ships that used to
@@ -864,17 +870,10 @@ def _scored_name_matches(query: str, keys: list[str], cutoff: int) -> list[tuple
     `score > best[1]`, so an exact draw was settled by list order and reported as an
     identification. This keeps the runners-up so the caller can see a close call.
 
-    AIS_NAME_FILTER=off is a documented full revert (see the block comment above
-    AIS_NAME_FILTER) to the pre-fix WRatio scorer with no short-name guard, and
-    test_name_filter_can_be_disabled pins that it reproduces the old bug exactly. This branch
-    exists so match_by_name_candidates -- which now owns all scoring -- still honours that
-    revert instead of silently always using the guarded ratio scorer.
+    Only ever called with AIS_NAME_FILTER on: match_by_name_candidates routes the off (revert)
+    case straight through _best_name_match instead, because that path must reproduce a single
+    top scorer with no re-ranking -- see the comment on that branch.
     """
-    if not AIS_NAME_FILTER:
-        hits = rf_process.extract(query, keys, scorer=rf_fuzz.WRatio,
-                                  limit=None, score_cutoff=cutoff)
-        return sorted([(name, score) for name, score, _ in hits], key=lambda pair: -pair[1])
-
     hits = rf_process.extract(query, keys, scorer=rf_fuzz.ratio,
                               limit=None, score_cutoff=cutoff)
     kept = [(name, score) for name, score, _ in hits
@@ -902,6 +901,21 @@ def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
         if best is None or score > best[1]:
             best = (name, score)
     return best[0] if best else None
+
+
+def _name_probes(query: str) -> list[str]:
+    """Word-window fallback probes for `query`, longest span first, type words stripped.
+
+    Shared by both branches of match_by_name_candidates so the AIS_NAME_FILTER=off revert
+    retries the same reduced phrases the on-filter path does -- the two must only differ in
+    scoring and cutoff, not in which probes get tried.
+    """
+    words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
+    probes = []
+    for length in range(len(words), 0, -1):
+        for start in range(len(words) - length + 1):
+            probes.append(" ".join(words[start:start + length]))
+    return probes
 
 
 def match_by_name(extracted_name: str) -> dict | None:
@@ -933,15 +947,29 @@ def match_by_name_candidates(extracted_name: str) -> list[dict]:
     if not keys:
         return []
 
-    cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
+    if not AIS_NAME_FILTER:
+        # A full revert to the pre-ambiguity-detection matcher, not merely to the unguarded
+        # WRatio scorer: single top scorer, no AIS_NAME_AMBIGUOUS_GAP expansion, no
+        # _candidate_sort_key re-ranking. WRatio produces huge exact-score plateaus on the
+        # live cache (one query landed 28 names all at 85.5) -- re-ranking a plateau by
+        # proximity picks a DIFFERENT ship than extractOne's first-in-list winner did, which
+        # would make this switch a close cousin of the original rather than the "restore the
+        # original behaviour exactly" comparison it exists to be. See the AIS_NAME_FILTER
+        # comment above. The word-window fallback keeps its own historical cutoff of 88
+        # (looser matches on a stripped-down phrase were never trusted at the main bar).
+        hit = _best_name_match(query, keys, 80)
+        if hit:
+            return [cache[hit]]
+        for probe in _name_probes(query):
+            hit = _best_name_match(probe, keys, 88)
+            if hit:
+                return [cache[hit]]
+        return []
+
+    cutoff = AIS_NAME_MIN_SCORE
     scored = _scored_name_matches(query, keys, cutoff)
     if not scored:
-        words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
-        probes = []
-        for length in range(len(words), 0, -1):
-            for start in range(len(words) - length + 1):
-                probes.append(" ".join(words[start:start + length]))
-        for probe in probes:
+        for probe in _name_probes(query):
             scored = _scored_name_matches(probe, keys, cutoff)
             if scored:
                 break
@@ -955,19 +983,26 @@ def match_by_name_candidates(extracted_name: str) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for name in names:
-        # candidates_for_name reads _mmsi_index/_name_index, which only record() populates.
-        # Falling back to the plain _fresh_snapshot() entry keeps this correct for a vessel
-        # cache written directly (record() is the only production path, but several tests
-        # pre-dating Task 4 build _vessel_cache by hand) -- the same single entry match_by_name
-        # returned before candidate expansion existed.
-        entries = candidates_for_name(name)
-        if not entries and name in cache:
+        # candidates_for_name reads _mmsi_index/_name_index, which only record() (and, at
+        # startup, _load_cache()/_refresh_name_view() reconstructing what record() already
+        # wrote) populate. Gating the fallback on `name not in _name_index` -- never indexed
+        # at all -- rather than on candidates_for_name returning empty distinguishes that
+        # from a rename: _name_index is append-only (Task 1), so a vacated name STAYS
+        # indexed, and candidates_for_name correctly returns [] for it once every holder has
+        # moved on (Task 4). Falling back to cache[name] there would resurrect the renamed
+        # ship as a ghost under its old name -- exactly what Task 4 fixed. This fallback only
+        # exists for a vessel cache built by hand (several fixtures pre-dating Task 4 write
+        # _vessel_cache directly and never touch _name_index at all), where "never indexed"
+        # and "not in cache" are the same thing.
+        entries = candidates_for_name(name, in_scope)
+        if not entries and name not in _name_index:
             entries = [cache[name]]
         for entry in entries:
             mmsi = str(entry.get("mmsi") or "")
-            if mmsi and mmsi in seen:
-                continue
-            seen.add(mmsi)
+            if mmsi:
+                if mmsi in seen:
+                    continue
+                seen.add(mmsi)
             out.append(entry)
     return sorted(out, key=lambda e: _candidate_sort_key(e, in_scope))
 
