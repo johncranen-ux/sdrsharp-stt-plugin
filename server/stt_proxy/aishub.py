@@ -15,8 +15,16 @@ caller leaves the cache untouched.
 """
 
 import datetime
+import gzip
 import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
+from stt_proxy import ais
 from stt_proxy.ais import _clean_destination
 
 API_URL = "https://data.aishub.net/ws.php"
@@ -64,7 +72,10 @@ def parse_response(payload: bytes) -> list[dict]:
     if not isinstance(body, list) or not body:
         raise AisHubError(f"unexpected response shape: {type(body).__name__}")
 
-    envelope = body[0] if isinstance(body[0], dict) else {}
+    if not isinstance(body[0], dict):
+        raise AisHubError(f"unexpected envelope shape: {type(body[0]).__name__}")
+
+    envelope = body[0]
     if envelope.get("ERROR"):
         detail = envelope.get("ERROR_MESSAGE") or "no message"
         raise AisHubError(f"server reported ERROR: {detail}")
@@ -102,3 +113,113 @@ def map_ship(ship: dict) -> dict | None:
         "cog": ship.get("COG"),
         "heading": ship.get("HEADING"),
     }
+
+
+def _resolve_bbox() -> tuple[float, float, float, float]:
+    """(latmin, latmax, lonmin, lonmax) for the poll.
+
+    Wide on purpose. The margin is what buys lead time: the western edge sits ~140 km from
+    Maas Center, which is over two hours of steaming at 15 knots, so a vessel is cached long
+    before it calls and the poll can be slow. The cost is that a wide box carries 777
+    duplicate-name groups against the approach box's 17 -- which is why matching ranks
+    candidates by proximity rather than trusting the box to disambiguate.
+    """
+    raw = os.environ.get("AISHUB_BBOX", "51.0,53.2,2.0,6.0")
+    try:
+        latmin, latmax, lonmin, lonmax = (float(p) for p in raw.split(","))
+    except ValueError:
+        print(f"[AISHub] bad AISHUB_BBOX {raw!r}, using the default", flush=True)
+        return (51.0, 53.2, 2.0, 6.0)
+    return (latmin, latmax, lonmin, lonmax)
+
+
+def _resolve_poll_sec() -> int:
+    """Seconds between polls, never below the rate limit whatever the environment says."""
+    try:
+        wanted = int(os.environ.get("AISHUB_POLL_SEC", "900"))
+    except ValueError:
+        wanted = 900
+    return max(wanted, MIN_INTERVAL_SEC)
+
+
+BBOX     = _resolve_bbox()
+POLL_SEC = _resolve_poll_sec()
+
+
+def build_url(username: str, bbox: tuple[float, float, float, float]) -> str:
+    latmin, latmax, lonmin, lonmax = bbox
+    query = urllib.parse.urlencode({
+        "username": username,
+        "format": 1,            # human-readable: degrees and knots, not raw AIS scaling
+        "output": "json",
+        "latmin": latmin, "latmax": latmax,
+        "lonmin": lonmin, "lonmax": lonmax,
+    })
+    return f"{API_URL}?{query}"
+
+
+def _fetch(url: str) -> bytes:
+    """GET the URL with gzip. Uncompressed this box is 2.66 MB a poll."""
+    request = urllib.request.Request(url, headers={
+        "Accept-Encoding": "gzip",
+        "User-Agent": "sdrsharp-stt-proxy/1.0",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            raw = response.read()
+            if response.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            return raw
+    except (urllib.error.URLError, OSError) as exc:
+        raise AisHubError(f"fetch failed: {exc}") from exc
+
+
+def poll_once(username: str, bbox, fetch=None) -> int:
+    """One poll. Returns vessels recorded, or raises AisHubError having changed nothing.
+
+    The cache is only touched once the whole response has been validated and parsed, so a
+    failure part-way through cannot leave a half-updated scope set.
+    """
+    ships = parse_response((fetch or _fetch)(build_url(username, bbox)))
+
+    seen: set[str] = set()
+    recorded = 0
+    for ship in ships:
+        fields = map_ship(ship)
+        if fields is None:
+            continue
+        seen.add(fields["mmsi"])
+        ais.record(fields, source="aishub", observed_at=parse_time(ship.get("TIME", "")))
+        recorded += 1
+
+    ais.set_in_scope(seen)
+    return recorded
+
+
+def poll_loop(username: str) -> None:
+    """Poll forever. Daemon-thread entry point; never raises."""
+    print(f"[AISHub] polling {BBOX} every {POLL_SEC}s", flush=True)
+    failures = 0
+    while True:
+        try:
+            count = poll_once(username, BBOX)
+            if failures:
+                print(f"[AISHub] recovered after {failures} failed poll(s)", flush=True)
+            failures = 0
+            print(f"[AISHub] {count} vessels", flush=True)
+        except AisHubError as exc:
+            failures += 1
+            # Rate-limited every time would be a configuration bug, so say so early and then
+            # stop repeating it; a long outage should not drown the console the way the
+            # aisstream silence warning did.
+            if failures <= 3 or failures % 20 == 0:
+                print(f"[AISHub] poll failed ({failures}): {exc}. "
+                      f"Cache and scope left untouched.", flush=True)
+        except Exception as exc:
+            failures += 1
+            print(f"[AISHub] unexpected poll error: {exc}", flush=True)
+        time.sleep(POLL_SEC)
+
+
+def start(username: str) -> None:
+    threading.Thread(target=poll_loop, args=(username,), daemon=True).start()

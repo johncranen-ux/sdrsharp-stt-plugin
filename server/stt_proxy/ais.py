@@ -428,6 +428,28 @@ _mmsi_index: dict[str, dict] = {}
 # matcher iterates those keys, and junk keys would become candidates for matching.
 _pending: dict[str, dict] = {}
 
+# MMSIs returned by the most recent SUCCESSFUL poll. Empty means "no source has reported yet"
+# and is treated as "everything is in scope", so aisstream and a cold start behave as before.
+#
+# Scope is defined against the last good poll rather than against wall-clock age deliberately.
+# "last_seen within N minutes of now" would make a feed outage indistinguishable from every
+# ship leaving the estuary -- and this project has already lost six days to a feed that failed
+# quietly.
+_in_scope: set[str] = set()
+
+
+def set_in_scope(mmsis: set[str]) -> None:
+    """Publish the vessels the latest good poll saw. Called only on success."""
+    global _in_scope
+    with _cache_lock:
+        _in_scope = set(mmsis)
+
+
+def get_in_scope() -> set[str]:
+    with _cache_lock:
+        return set(_in_scope)
+
+
 # NAME -> the MMSIs of every ship carrying it. _vessel_cache can only hold one entry per name,
 # so this is the only thing that keeps fourteen ALBATROS apart. Ranking them is Task 4's job;
 # this task only has to stop them overwriting each other.
