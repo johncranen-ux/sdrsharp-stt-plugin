@@ -5,8 +5,9 @@ escape untrusted values and link a vessel out to VesselFinder, and vessel_log.py
 "presentation only, kept apart from identification" -- so it must not import the resolver
 just to reach a helper.
 
-Everything rendered here is untrusted. Vessel names and callsigns come off the aisstream
-feed, which any transmitter can inject into; transcriptions come from the STT backend.
+Everything rendered here is untrusted. Vessel names and callsigns come off whichever AIS
+source is configured (AISHub by default, aisstream still selectable) and originate as
+free-text fields any transmitter can inject into; transcriptions come from the STT backend.
 None of it is authored by us, so all of it is escaped.
 """
 

@@ -261,16 +261,26 @@ def test_poll_once_publishes_the_in_scope_set(monkeypatch):
 
 
 def test_poll_once_ranks_within_the_same_poll_using_this_polls_scope(monkeypatch):
-    """set_in_scope must run BEFORE the write loop, not after: _refresh_name_view (called
-    from inside every ais.record() during the loop) ranks candidates against whatever scope
-    is CURRENTLY published. If set_in_scope ran after the loop, as it used to, every
-    ranking decision made during this poll would use the PREVIOUS poll's scope -- stale by
-    exactly one interval, and disagreeing with candidates_for_name(), which always reads
-    the current scope via get_in_scope(). Seeds a stale scope of {"111"} left over from a
-    hypothetical earlier poll, then polls two ALBATROS in the SAME response: 111 (far from
-    Maas Center) and 222 (at Maas Center). Both are in THIS poll's scope, so ranking must
-    fall through to proximity and pick 222 -- not 111, which only wins if the stale scope
-    from before this poll is still what's being consulted."""
+    """A poll must leave every name ranked against ITS OWN scope, not the previous poll's.
+
+    set_in_scope runs AFTER the write loop, deliberately -- publishing scope first would let
+    _in_scope claim the full scope of a poll that then failed partway through writing, which
+    is the atomicity guarantee poll_once's own docstring defends at length. Do NOT "fix" the
+    code to publish scope before the loop to satisfy this test; that reintroduces the bug
+    poll_once documents.
+
+    What makes the late publish correct is that set_in_scope re-ranks every name view itself,
+    under the same lock acquisition that publishes the new scope. Without that re-ranking,
+    _refresh_name_view (called from inside every ais.record() during the loop) would have
+    ranked every ship against whatever scope was published BEFORE this poll -- stale by
+    exactly one interval, and disagreeing with candidates_for_name(), which always reads the
+    current scope via get_in_scope().
+
+    Seeds a stale scope of {"111"} left over from a hypothetical earlier poll, then polls two
+    ALBATROS in the SAME response: 111 (far from Maas Center) and 222 (at Maas Center). Both
+    are in THIS poll's scope, so ranking must fall through to proximity and pick 222 -- not
+    111, which only wins if the stale scope from before this poll is still what the final
+    ranking rests on."""
     from stt_proxy import ais
     monkeypatch.setattr(ais, "_vessel_cache", {})
     monkeypatch.setattr(ais, "_callsign_cache", {})

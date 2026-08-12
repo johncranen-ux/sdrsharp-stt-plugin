@@ -171,8 +171,8 @@ _vessel_cache  : {NAME -> entry}        best candidate for that name; a VIEW
 _callsign_cache: {CALLSIGN -> entry}    unchanged
 ```
 
-`_vessel_cache` holds references to the same entry dicts, so `/api/vessels`
-(`whisper-proxy.py:339`), the bench scripts and the existing matchers keep working untouched.
+`_vessel_cache` holds references to the same entry dicts, so `/api/ais-cache`
+(`whisper-proxy.py:335`), the bench scripts and the existing matchers keep working untouched.
 
 **Relevance ranking**, used both to pick the view entry and to order candidates:
 

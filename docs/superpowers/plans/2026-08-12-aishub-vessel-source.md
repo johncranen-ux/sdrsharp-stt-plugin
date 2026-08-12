@@ -1823,7 +1823,7 @@ AIS feed: AISHub, box (51.0, 53.2, 2.0, 6.0), every 900s
 [AISHub] 9xxx vessels
 ```
 
-Then fetch `http://localhost:<port>/api/vessels` and confirm entries carry `last_seen` values matching AISHub report times rather than the moment the proxy started.
+Then fetch `http://localhost:<port>/api/ais-cache` and confirm entries carry `last_seen` values matching AISHub report times rather than the moment the proxy started.
 
 - [ ] **Step 4: Document the switch**
 
