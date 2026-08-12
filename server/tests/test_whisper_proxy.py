@@ -134,6 +134,17 @@ def ais_caches(monkeypatch):
     vessels, callsigns = {}, {}
     monkeypatch.setattr(ais, "_vessel_cache", vessels)
     monkeypatch.setattr(ais, "_callsign_cache", callsigns)
+    # record() indexes by MMSI, and these tests reuse MMSI 1 across many cases. Without
+    # resetting the index too, a later test's `record()` call finds the previous test's
+    # (now-orphaned) entry object still sitting under that MMSI and updates it in place,
+    # leaving the fresh `vessels` dict above empty.
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    # Scope is module-global too: leaving a prior test's set() in place would make some
+    # later test's candidates ranking depend on test order, the same reason the caches above
+    # are reset.
+    monkeypatch.setattr(ais, "_in_scope", set())
     # Feed-health state is module-global and its log is rate-limited, so without this a
     # test's output would depend on which tests ran before it.
     monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
@@ -362,6 +373,631 @@ def test_a_malformed_message_does_not_raise(ais_caches):
     """The feed is external; a shape change must not kill the websocket thread."""
     ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
                         "Message": None})
+
+
+# ---------------------------------------------------------------------------
+# record(): the multi-source merge core
+#
+# One merge point for whatever provider saw the observation, keyed by MMSI so two ships
+# sharing a name (17 duplicate-name groups in a live AISHub snapshot of the Maas approach)
+# stop overwriting each other.
+#
+# All on ais_caches rather than hand-rolled monkeypatch lines: record() also touches
+# _name_index, and the fixture is the one place that resets everything record() touches. A
+# test that reset only _vessel_cache/_callsign_cache/_mmsi_index/_pending by hand would leak
+# _name_index into whichever test runs next.
+# ---------------------------------------------------------------------------
+
+def test_record_admits_a_named_vessel_and_indexes_it_by_mmsi(ais_caches):
+    ais.record({"mmsi": "244123456", "name": "ORASUND", "callsign": "PBZL",
+                "latitude": 52.0, "longitude": 3.9}, source="test")
+
+    assert "ORASUND" in ais._vessel_cache
+    assert ais._mmsi_index["244123456"]["name"] == "ORASUND"
+    assert ais._callsign_cache["PBZL"]["mmsi"] == "244123456"
+
+
+def test_record_holds_a_position_until_a_name_arrives(ais_caches):
+    ais.record({"mmsi": "244000111", "latitude": 51.9, "longitude": 4.0},
+               source="test", observed_at=1000.0)
+    assert ais._vessel_cache == {}
+    assert "244000111" in ais._pending
+
+    ais.record({"mmsi": "244000111", "name": "LATE NAME"},
+               source="test", observed_at=1001.0)
+
+    entry = ais._vessel_cache["LATE NAME"]
+    assert entry["latitude"] == 51.9
+    assert "244000111" not in ais._pending
+
+
+def test_record_does_not_alias_two_ships_that_share_a_name(ais_caches):
+    ais.record({"mmsi": "111111111", "name": "ALBATROS"}, source="test")
+    ais.record({"mmsi": "222222222", "name": "ALBATROS"}, source="test")
+
+    assert ais._mmsi_index["111111111"]["mmsi"] == "111111111"
+    assert ais._mmsi_index["222222222"]["mmsi"] == "222222222"
+    assert ais._mmsi_index["111111111"] is not ais._mmsi_index["222222222"]
+
+
+def test_record_keeps_the_newer_position_when_an_older_one_arrives_late(ais_caches):
+    ais.record({"mmsi": "244777888", "name": "NEWEST WINS",
+                "latitude": 52.5, "longitude": 4.5}, source="a", observed_at=2000.0)
+    ais.record({"mmsi": "244777888", "latitude": 51.0, "longitude": 3.0},
+               source="b", observed_at=1000.0)
+
+    assert ais._vessel_cache["NEWEST WINS"]["latitude"] == 52.5
+
+
+def test_record_stamps_last_seen_from_the_observation_not_the_clock(ais_caches):
+    import datetime as _dt
+    observed = 1786528800.0        # 2026-08-12 10:00:00 UTC
+    ais.record({"mmsi": "244999000", "name": "TIMESTAMPED",
+                "latitude": 52.0, "longitude": 4.0},
+               source="aishub", observed_at=observed)
+
+    # Expectation computed, not hardcoded: last_seen is local wall-clock throughout this
+    # codebase, so a literal would only pass in one timezone.
+    expected = _dt.datetime.fromtimestamp(observed).strftime("%Y-%m-%d %H:%M:%S")
+    assert ais._vessel_cache["TIMESTAMPED"]["last_seen"] == expected
+    assert ais._vessel_cache["TIMESTAMPED"]["last_seen"] != ais._now()
+
+
+def test_record_never_blanks_a_name_with_an_empty_string(ais_caches):
+    ais.record({"mmsi": "244321000", "name": "KEEPS ITS NAME"}, source="test")
+    ais.record({"mmsi": "244321000", "name": "", "latitude": 52.0,
+                "longitude": 4.0}, source="test")
+
+    assert ais._mmsi_index["244321000"]["name"] == "KEEPS ITS NAME"
+
+
+def test_record_rekeys_the_cache_when_the_vessel_is_renamed(ais_caches):
+    """The already-admitted path never re-keyed _vessel_cache: record(mmsi=1, name="ANOUK")
+    then record(mmsi=1, name="ANOUK MARIA") left the cache keyed on the stale "ANOUK" while
+    entry["name"] read "ANOUK MARIA". _fresh_snapshot hands _vessel_cache.keys() straight to
+    the fuzzy matcher, so a vessel unreachable under its own current name is unmatchable by
+    that name, and a hit on the old key would display the wrong one."""
+    ais.record({"mmsi": "244888000", "name": "ANOUK"}, source="test")
+    ais.record({"mmsi": "244888000", "name": "ANOUK MARIA"}, source="test")
+
+    assert "ANOUK MARIA" in ais._vessel_cache
+    assert ais._vessel_cache["ANOUK MARIA"]["mmsi"] == "244888000"
+    assert ais._vessel_cache["ANOUK MARIA"]["name"] == "ANOUK MARIA"
+
+
+def test_record_flushes_a_pending_position_onto_a_newly_adopted_entry(ais_caches):
+    """The pending-flush branch (record(), "an observation for this MMSI seen before it was
+    admitted") is only reachable through name-adoption of a _vessel_cache entry carrying a
+    falsy mmsi -- never through the pending-accumulate path that
+    test_record_holds_a_position_until_a_name_arrives exercises. Seed exactly that: a
+    name-keyed entry with no mmsi yet, a position-only observation for the real MMSI that
+    can only land in _pending (it carries no name to adopt by), and then the name arriving
+    for that MMSI, which must adopt the seeded entry AND flush the held position onto it."""
+    vessels, _ = ais_caches
+    seeded = {"name": "PRE-SEEDED", "mmsi": "", "callsign": ""}
+    vessels["PRE-SEEDED"] = seeded
+
+    ais.record({"mmsi": "244555000", "latitude": 51.8, "longitude": 4.2},
+               source="test", observed_at=1000.0)
+    assert "244555000" in ais._pending
+    assert "latitude" not in seeded, "must not touch the seeded entry before adoption"
+
+    ais.record({"mmsi": "244555000", "name": "PRE-SEEDED"},
+               source="test", observed_at=1001.0)
+
+    entry = ais._vessel_cache["PRE-SEEDED"]
+    assert entry is seeded, "adopts the existing entry rather than creating a new one"
+    assert entry["mmsi"] == "244555000"
+    assert (entry["latitude"], entry["longitude"]) == (51.8, 4.2), (
+        "the held position must survive onto the adopted entry")
+    assert "244555000" not in ais._pending
+    assert ais._name_index["PRE-SEEDED"] == ["244555000"]
+
+
+# ---------------------------------------------------------------------------
+# Name index and candidate ranking
+#
+# A live snapshot of the Maas approach carries ALBATROS three times and the wider box
+# fourteen. _vessel_cache can only hold one entry per name, so _name_index is what keeps
+# them apart, and candidates_for_name() is what ranks them: presence in the last good poll,
+# then distance from Maas Center, then type plausibility, then recency.
+# ---------------------------------------------------------------------------
+
+
+def test_the_name_index_holds_every_ship_that_shares_a_name(ais_caches):
+    for mmsi in ("111", "222", "333"):
+        ais.record({"mmsi": mmsi, "name": "ALBATROS"}, source="test")
+
+    assert ais._name_index["ALBATROS"] == ["111", "222", "333"]
+
+
+def test_the_name_index_does_not_repeat_an_mmsi(ais_caches):
+    ais.record({"mmsi": "111", "name": "ALBATROS"}, source="test")
+    ais.record({"mmsi": "111", "name": "ALBATROS", "latitude": 52.0,
+                "longitude": 4.0}, source="test")
+
+    assert ais._name_index["ALBATROS"] == ["111"]
+
+
+def test_candidates_rank_an_in_scope_vessel_above_one_that_left(ais_caches):
+    ais.record({"mmsi": "gone", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "here", "name": "FORTUNA", "latitude": 51.0,
+                "longitude": 3.0, "type": 70}, source="test")
+    ais.set_in_scope({"here"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("FORTUNA")] == ["here", "gone"]
+
+
+def test_candidates_rank_the_nearer_vessel_first(ais_caches):
+    ais.record({"mmsi": "far", "name": "DELTA", "latitude": 51.2,
+                "longitude": 5.8, "type": 70}, source="test")
+    ais.record({"mmsi": "near", "name": "DELTA", "latitude": 52.03,
+                "longitude": 3.89, "type": 70}, source="test")
+    ais.set_in_scope({"far", "near"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("DELTA")] == ["near", "far"]
+
+
+def test_candidates_rank_a_tanker_above_a_yacht_at_the_same_place(ais_caches):
+    """The tanker is recorded FIRST here, on purpose: if _type_plausibility's contribution
+    were ever dropped from _candidate_sort_key, recency (-position_at) would take over as
+    the deciding term and rank the yacht -- recorded second, so newer -- ahead of the
+    tanker, flipping this assertion. Recording them the other way around left this test
+    unable to tell a working type term from a broken one, since recency alone already
+    produced the expected order (code review finding)."""
+    ais.record({"mmsi": "tanker", "name": "ZEUS", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "yacht", "name": "ZEUS", "latitude": 52.02,
+                "longitude": 3.88, "type": 36}, source="test")
+    ais.set_in_scope({"yacht", "tanker"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("ZEUS")] == ["tanker", "yacht"]
+
+
+def test_candidates_put_a_vessel_with_no_position_last_but_keep_it(ais_caches):
+    ais.record({"mmsi": "nopos", "name": "CONDOR", "type": 70}, source="test")
+    ais.record({"mmsi": "haspos", "name": "CONDOR", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"nopos", "haspos"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("CONDOR")] == ["haspos", "nopos"]
+
+
+def test_everything_is_in_scope_before_any_poll_has_succeeded(ais_caches):
+    """Two candidates, no set_in_scope call at all -- _in_scope stays the empty set the
+    fixture leaves it at, standing in for "no source has reported yet". Ranking must still
+    produce a sensible order (nearer first) rather than being disturbed by scope."""
+    ais.record({"mmsi": "far", "name": "SOLO", "latitude": 40.0,
+                "longitude": 2.0}, source="test")
+    ais.record({"mmsi": "near", "name": "SOLO", "latitude": 52.0,
+                "longitude": 3.9}, source="test")
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("SOLO")] == ["near", "far"]
+
+
+def test_the_in_scope_term_is_neutral_before_any_poll_has_succeeded(ais_caches):
+    """_candidate_sort_key's `in_scope and mmsi not in in_scope` guard is what makes an
+    empty in_scope mean "treat everyone as in scope" (term = 0) rather than "treat everyone
+    as out of scope" (term = 1). That guard is applied identically to every candidate in a
+    given call -- in_scope does not vary per-candidate -- so shifting the first tuple
+    element by the same constant for every entry can NEVER change a sort's relative order:
+    test_everything_is_in_scope_before_any_poll_has_succeeded above still passes unmodified
+    even with the "in_scope and" guard deleted outright (verified by hand while fixing code
+    review finding MINOR-3). An order comparison genuinely cannot exercise this guard, so
+    this checks the VALUE the guard produces directly, which is the only way it is
+    load-bearing."""
+    entry = {"mmsi": "111", "latitude": 52.0, "longitude": 3.9, "type": 70}
+    assert ais._candidate_sort_key(entry, set())[0] == 0
+
+
+def test_candidates_for_an_unknown_name_is_empty(ais_caches):
+    assert ais.candidates_for_name("NO SUCH SHIP") == []
+
+
+def test_candidates_for_name_excludes_a_vessel_that_has_since_been_renamed(ais_caches):
+    """Code-review case: _name_index is append-only (_index_name at ais.py only ever
+    appends, never removes), so a renamed vessel's OLD name keeps listing its MMSI forever --
+    and _refresh_name_view only ever refreshes the entry's NEW name, so nothing revisits the
+    vacated one on its own. 111 stays ORION; 222 starts as ORION and renames to ORION
+    MAERSK. Without filtering by the entry's CURRENT name, candidates_for_name('ORION')
+    would still return 222 -- a ghost whose real name is no longer ORION, directly
+    contradicting this function's own docstring ('every cached vessel carrying exactly this
+    name')."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.0, "longitude": 2.0},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 52.0, "longitude": 3.9},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION MAERSK"}, source="test")
+
+    # _name_index itself stays append-only -- the filtering happens at read time, not here.
+    assert ais._name_index["ORION"] == ["111", "222"]
+    assert [c["mmsi"] for c in ais.candidates_for_name("ORION")] == ["111"]
+
+
+def test_the_vacated_name_can_be_reclaimed_by_its_remaining_holder(ais_caches):
+    """Companion to the test above, for _refresh_name_view / _vessel_cache rather than
+    candidates_for_name: it needs the same current-name filter so that once 111 is the only
+    real ORION left, the next time anything touches "ORION" _vessel_cache reclaims it,
+    rather than staying keyed on 222's now-stale entry object (renamed in place, so its
+    "name" field reads 'ORION MAERSK')."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.0, "longitude": 2.0},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 52.0, "longitude": 3.9},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION MAERSK"}, source="test")
+    # Touch 111 again so _refresh_name_view("ORION") runs once more, now that only 111
+    # still carries the name.
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.01, "longitude": 2.01},
+               source="test")
+
+    assert ais._vessel_cache["ORION"]["mmsi"] == "111"
+
+
+def test_the_best_candidate_wins_the_name_key(ais_caches):
+    """Dedicated coverage for record()'s Step 4 wiring (a _refresh_name_view call after
+    each of the two _index_name calls): _vessel_cache[NAME] must hold the best-RANKED
+    candidate, not merely the last one recorded. "mid" is recorded last, so a plain
+    last-write-wins cache (the two _vessel_cache[...] = entry assignments in record(),
+    without _refresh_name_view following them) would leave _vessel_cache pointing at "mid" --
+    this asserts it points at "near" instead, the one actually closest to Maas Center.
+    Previously this composition was covered only incidentally, through a trailing assertion
+    in the deadlock regression test."""
+    ais.record({"mmsi": "far", "name": "ALBATROS", "latitude": 40.0, "longitude": 2.0,
+                "type": 36}, source="test")
+    ais.record({"mmsi": "near", "name": "ALBATROS", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais.record({"mmsi": "mid", "name": "ALBATROS", "latitude": 51.0, "longitude": 3.0,
+                "type": 70}, source="test")
+
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "near"
+
+
+def test_record_does_not_deadlock_when_a_scope_is_already_set(ais_caches):
+    """_refresh_name_view runs inside record() while _cache_lock is already held, and reads
+    _in_scope directly rather than calling get_in_scope() for exactly that reason -- that lock
+    is a plain threading.Lock, not reentrant, so acquiring it twice on the same thread would
+    hang forever. This must complete, not merely return the right value."""
+    ais.set_in_scope({"111"})
+
+    ais.record({"mmsi": "111", "name": "ALBATROS", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "222", "name": "ALBATROS", "latitude": 51.0,
+                "longitude": 3.0, "type": 70}, source="test")
+
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "111"
+
+
+def test_a_save_load_round_trip_preserves_two_ships_sharing_a_name(ais_caches, tmp_path,
+                                                                     monkeypatch):
+    """_save_cache used to persist from _vessel_cache, which holds only the single
+    best-ranked entry per NAME (Task 4) -- so a restart silently dropped every non-best
+    duplicate, undoing the entire point of _mmsi_index across a restart. Round-trip two
+    ALBATROS through the real save/load functions: both must survive, and _vessel_cache
+    must come back re-ranked (pointing at "near"), not keyed on whichever happened to be
+    written last in the file."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+
+    ais.record({"mmsi": "far", "name": "ALBATROS", "latitude": 40.0, "longitude": 2.0,
+                "type": 36}, source="test")
+    ais.record({"mmsi": "near", "name": "ALBATROS", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais._save_cache()
+
+    # A real restart starts with every cache empty; reload from the file just written.
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    ais._load_cache()
+
+    assert set(ais._mmsi_index.keys()) == {"far", "near"}, (
+        "both ships must survive the round trip, not just the best-ranked one")
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "near", (
+        "and _vessel_cache must be re-ranked after loading, not last-in-file-wins")
+
+
+def _write_cache(path, entries):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f)
+
+
+def _reset_caches(monkeypatch):
+    """Every AIS index empty, the way a real restart starts."""
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+
+
+def test_a_save_does_not_delete_an_entry_orphaned_by_a_duplicate_mmsi(ais_caches, tmp_path,
+                                                                     monkeypatch):
+    """_save_cache persisted from _mmsi_index alone, so anything in the cache that the index
+    does not point at was deleted from disk on the first save -- within 300s of start, via
+    _periodic_save, or at atexit.
+
+    The real cache file makes this concrete: 8,672 entries, 8,362 distinct MMSIs. 290 MMSIs
+    carry TWO entries each -- a real vessel plus an AIS 6-bit decode artefact broadcast under
+    the same MMSI, e.g. 244660257 -> ['REGULIERSGRACHT', '?!C?2H /8PA7NEH2]5D,']. _load_cache
+    seeds _mmsi_index last-in-file-wins, so one entry of each pair is orphaned: still in
+    _vessel_cache, unreachable through the index. Measured, saving from the index alone turned
+    8,672 rows into 8,362 and permanently lost 310 of them.
+
+    The fixture below is synthetic (never real cache data), but is the same shape: two entries
+    sharing MMSI 244660257, the garbage one written last so it wins the index."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "", "type": None},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert len(ais._vessel_cache) == 2 and len(ais._mmsi_index) == 1, "the shape under test"
+
+    ais._save_cache()
+
+    with open(cache_file, "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert sorted(e["name"] for e in saved) == sorted(["SPOOKSCHIP", "?!C?2H /8PA7NEH2]5D,"]), (
+        "a save must never remove an entry a load put in memory")
+
+
+def test_a_legacy_cache_file_without_mmsi_survives_a_save(ais_caches, tmp_path, monkeypatch):
+    """Same root cause, different victim: a cache file written before entries carried an
+    "mmsi" field indexes NOTHING (_load_cache only indexes on a truthy mmsi), so saving from
+    _mmsi_index rewrote the whole file as []. Measured: 500 legacy entries loaded fine
+    (_vessel_cache 500, _mmsi_index 0) and saved as 0. Master was lossless here."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    legacy = [{"name": f"LEGACY {i}", "callsign": f"CS{i}", "type": 70,
+               "latitude": 52.0, "longitude": 3.9} for i in range(5)]
+    _write_cache(cache_file, legacy)
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert (len(ais._vessel_cache), len(ais._mmsi_index)) == (5, 0), "the shape under test"
+
+    ais._save_cache()
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    assert len(ais._vessel_cache) == 5, "a legacy file must not be wiped by the first save"
+    assert ais._vessel_cache["LEGACY 3"]["callsign"] == "CS3"
+
+
+def test_a_vessel_orphaned_by_a_duplicate_mmsi_is_still_matchable_by_name(ais_caches, tmp_path,
+                                                                         monkeypatch):
+    """The other half of the same defect, and the one that silently broke identification:
+    with the real cache loaded, 310 cached names returned [] from candidates_for_name and 309
+    of them returned None from match_by_name on an EXACT query -- REGULIERSGRACHT, KRVE 60,
+    HEKGOLF, SANDRA W. among them. Master resolved all of them.
+
+    Why the chain: the losing entry wins _mmsi_index, so candidates_for_name -- which filters
+    holders by their CURRENT name -- finds no holder still called SPOOKSCHIP and returns [].
+    The fallback in match_by_name_candidates was gated on `name not in _name_index`, and the
+    name IS in _name_index (the orphan indexed itself at load), so it declined too.
+
+    THE FIXTURE CHANGED, THE ASSERTIONS DID NOT. It used to orphan SPOOKSCHIP behind a 6-bit
+    decode artefact ('?!C?2H /8PA7NEH2]5D,'), which was the shape the real cache showed at the
+    time. _load_cache now ranks a repeated MMSI instead of taking the last entry in the file,
+    and an artefact loses that ranking outright -- so an artefact can no longer orphan
+    anything, and this fixture would have stopped reproducing the situation under test rather
+    than stopped failing. The situation itself is very much still real: 39 MMSIs in the live
+    cache carry two entries whose names are BOTH plausible ships (a rename, or one MMSI used
+    by two vessels), e.g. 244660066 -> ['BUTSKOP', 'LA CAMARGUE']. One entry has to lose the
+    index, the loser is still a real ship, and it must still be findable under its own name.
+    That is the same property, on the shape that outlived the artefact.
+
+    The artefact shape keeps its own coverage in
+    test_a_save_does_not_delete_an_entry_orphaned_by_a_duplicate_mmsi above (which still uses
+    it, and still passes) and in the ranking tests below."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    # The second entry is the fuller record -- callsign, imo, dimensions, draught and
+    # destination against SPOOKSCHIP's callsign alone -- so it takes the MMSI index and
+    # SPOOKSCHIP is the orphan. Nothing here depends on file order.
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        {"name": "VLIEGENDE HOLLANDER", "mmsi": "244660257", "callsign": "PB1234",
+         "imo": 9123456, "length": 140, "beam": 22, "draught": 8.1,
+         "destination": "ROTTERDAM", "type": 70},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    assert ais.candidates_for_name("SPOOKSCHIP") == [], "the orphaning that causes this"
+    hit = ais.match_by_name("SPOOKSCHIP")
+    assert hit is not None and hit["name"] == "SPOOKSCHIP", (
+        "an entry the MMSI index cannot reach must still be findable by its own name")
+
+
+def test_match_by_mmsi_finds_a_ship_that_shares_its_name(ais_caches):
+    """match_by_mmsi scanned _vessel_cache, which since Task 4 holds only the BEST entry per
+    NAME -- so every non-best ship in a duplicate-name group was invisible to an exact-MMSI
+    lookup (~1,400 of them on a live AISHub poll). conversations._live_candidates re-resolves
+    a transmission's live_mmsi through here, so a ship positively identified BY MMSI dropped
+    out of the resolver's candidate list and the conversation ended unidentified."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 40.0, "longitude": 2.0,
+                "type": 70}, source="test")
+    assert ais._vessel_cache["ORION"]["mmsi"] == "111", "222 is the non-best duplicate"
+
+    hit = ais.match_by_mmsi("222")
+    assert hit is not None and hit["mmsi"] == "222", (
+        "the losing half of a name tie is still a real ship with a real MMSI")
+    assert ais.match_by_mmsi("999") is None
+
+
+# ---------------------------------------------------------------------------
+# Which entry wins a repeated MMSI at load time
+#
+# Measured on the real 8,672-entry cache: 8,362 distinct MMSIs, 290 of them carrying more
+# than one entry. _load_cache seeded _mmsi_index with a plain assignment, so the last entry
+# in the file won -- and the AIS 6-bit decode artefacts sit later in the file than the real
+# vessels they shadow, so the artefact took the index for 248 of the 290.
+# ---------------------------------------------------------------------------
+
+
+def test_an_artefact_name_is_recognised_by_its_characters_not_by_a_list(ais_caches):
+    """The artefact test has to be mechanical. There is no list of known-bad strings to
+    match against -- the cache accumulates new ones every time a message is decoded at the
+    wrong bit offset -- so what marks them is the 6-bit alphabet's symbol soup leaking into
+    a field that should hold a ship's name."""
+    assert ais._looks_like_ais_artefact("YESSLYNN @@<ZUQ0\\#@,")
+    assert ais._looks_like_ais_artefact("?!C?2H /8PA7NEH2]5D,")
+    assert ais._looks_like_ais_artefact("(5X/] CCH@A5[#@<OE@,")
+    # '@' is the padding character alone, with nothing else wrong -- still padding, and
+    # _clean_destination has split destinations on it for exactly this reason for months.
+    assert ais._looks_like_ais_artefact("CREATE@@@@@5PDP0LC@,")
+    assert ais._looks_like_ais_artefact("ALICE@@@@GS<")
+
+
+def test_a_real_vessel_name_is_not_mistaken_for_an_artefact(ais_caches):
+    """The other direction, and the one with a cost attached: a false positive here would
+    hand a real ship's MMSI to whatever it collided with.
+
+    Every punctuation mark below appears in real names in the live cache and is deliberately
+    absent from _NAME_ARTEFACT_CHARS -- '-' in 298 names, '.' in 61, brackets in 28, and the
+    rest in the handful the character survey turned up (DOC_HUDSON, OH SCRAP!, and
+    'DWAAL IK, WACHT U' are all real vessels)."""
+    for name in ("REGULIERSGRACHT", "KRVE 60", "SANDRA W.", "MSC MARIA PIA",
+                 "FAIRPLAY-63", "VLI-25 CINDY", "DOC_HUDSON", "OH SCRAP!",
+                 "DWAAL IK, WACHT U", "F/B ANNA REBECA 3", "P&O NEDLLOYD",
+                 "SCH63 QUO VADIS", "EILTANK 250 (EX)", "L'ESPERANCE"):
+        assert not ais._looks_like_ais_artefact(name), name
+    assert not ais._looks_like_ais_artefact("")
+    assert not ais._looks_like_ais_artefact(None)
+
+
+def test_an_artefact_loses_the_mmsi_however_full_its_record(ais_caches):
+    """Ordering, not addition: the artefact term outranks the field count rather than being
+    traded off against it. An artefact with every static field populated is still not a ship,
+    so a real vessel with nothing but a name must still beat it. Summing the two terms into
+    one score would get this backwards."""
+    real     = {"name": "REGULIERSGRACHT", "mmsi": "1"}
+    artefact = {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "1", "callsign": "PB1234",
+                "imo": 9123456, "length": 110, "beam": 11, "draught": 3.4,
+                "destination": "ROTTERDAM"}
+    assert ais._entry_rank(real) < ais._entry_rank(artefact)
+
+
+def test_the_fuller_record_wins_a_repeated_mmsi_between_two_real_names(ais_caches):
+    """39 of the 290 collisions carry two names that are both plausible ships (244660066 ->
+    ['BUTSKOP', 'LA CAMARGUE']), where the artefact term cannot separate them. Falling
+    through to how much is actually known about each is what keeps those deterministic."""
+    thin  = {"name": "BUTSKOP", "mmsi": "1", "callsign": "PB1", "type": 70}
+    full  = {"name": "LA CAMARGUE", "mmsi": "1", "callsign": "PB2", "imo": 9123456,
+             "length": 110, "beam": 11, "draught": 3.4, "destination": "ROTTERDAM"}
+    assert ais._entry_rank(full) < ais._entry_rank(thin)
+
+
+def test_a_field_present_but_empty_does_not_count_as_populated(ais_caches):
+    """A length of 0, an imo of 0 and a callsign of "" are missing data wearing a value's
+    clothes -- the aisstream adapter writes `(A + B) or None` for exactly this reason, and
+    adapters routinely default absent strings to "". Counting keys rather than values would
+    make a thin record look complete."""
+    empty = {"name": "A", "callsign": "", "imo": 0, "length": 0, "beam": 0,
+             "draught": 0.0, "destination": ""}
+    bare  = {"name": "B"}
+    assert ais._entry_rank(empty) == ais._entry_rank(bare)
+
+
+def test_a_repeated_mmsi_is_settled_the_same_way_whichever_order_it_is_read(ais_caches,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """The whole defect was that file order decided this. Load the same two entries in both
+    orders: the real vessel must take the index both times."""
+    for order in (0, 1):
+        cache_file = tmp_path / f"ais_cache_{order}.json"
+        monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+        rows = [
+            {"name": "REGULIERSGRACHT", "mmsi": "244660257", "callsign": "PB1234",
+             "type": 70, "latitude": 52.0, "longitude": 3.9},
+            {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "",
+             "type": None},
+        ]
+        _write_cache(cache_file, rows if order == 0 else list(reversed(rows)))
+
+        _reset_caches(monkeypatch)
+        ais._load_cache()
+
+        hit = ais.match_by_mmsi("244660257")
+        assert hit is not None and hit["name"] == "REGULIERSGRACHT", (
+            f"the artefact took the MMSI when the file was in order {order}")
+
+
+def test_an_exact_tie_on_a_repeated_mmsi_keeps_the_first_entry_in_the_file(ais_caches,
+                                                                           tmp_path,
+                                                                           monkeypatch):
+    """Two entries that rank identically still have to resolve to one, and a reload has to
+    reach the same answer every time or the whole pipeline moves under a restart. First in
+    the file wins, which needs _load_cache to replace the incumbent only on a STRICTLY better
+    rank -- `<=` here would silently restore last-in-file-wins for every tie."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "EERSTE", "mmsi": "244000001", "callsign": "PB1", "type": 70},
+        {"name": "TWEEDE", "mmsi": "244000001", "callsign": "PB2", "type": 70},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert ais.match_by_mmsi("244000001")["name"] == "EERSTE"
+
+
+def test_a_name_resolves_to_an_mmsi_that_resolves_back_to_the_same_entry(ais_caches,
+                                                                         tmp_path,
+                                                                         monkeypatch):
+    """The round-trip property, which is what this whole class of bug violates:
+
+        match_by_name(NAME) -> entry -> entry["mmsi"] -> match_by_mmsi(mmsi)
+
+    must land on THE SAME OBJECT. Nothing pinned it before, and that is why the regression
+    went unnoticed -- both lookups answered, plausibly, with different ships.
+
+    Identity rather than equality on purpose. The two indexes hold references to the same
+    dicts by design (_save_cache dedups on id() for that reason), so an == comparison would
+    pass against two entries that merely happen to carry the same fields, and would keep
+    passing if the indexes ever drifted into holding copies.
+
+    The fixture is the real collision SHAPE -- two entries, one MMSI, one of them an
+    artefact-looking name -- built by hand. Measured against the real cache: 310 names failed
+    this before the ranking, all 310 of them returning a different object rather than None."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        # Later in the file, as the artefacts are in the real one, so last-in-file-wins
+        # would hand it the index.
+        {"name": "SPOOKSCH@@<ZUQ0\\#@,", "mmsi": "244660257", "callsign": "", "type": None},
+        # A second, uncontested ship, so the property is checked somewhere the collision
+        # cannot be what makes it hold.
+        {"name": "ORASUND", "mmsi": "244700001", "callsign": "PB9999", "type": 80,
+         "latitude": 51.9, "longitude": 4.1},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    for name in ("SPOOKSCHIP", "ORASUND"):
+        entry = ais.match_by_name(name)
+        assert entry is not None, f"{name} is in the cache and must be matchable by name"
+        assert entry["name"] == name
+        back = ais.match_by_mmsi(entry["mmsi"])
+        assert back is entry, (
+            f"{name} resolved to MMSI {entry['mmsi']}, which resolved back to "
+            f"{back['name'] if back else None!r} -- a name and its own MMSI must not "
+            f"disagree about which ship they mean")
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +1445,159 @@ def test_name_filter_can_be_disabled(monkeypatch, name_cache):
     which is what makes the revert trustworthy."""
     monkeypatch.setattr(ais, "AIS_NAME_FILTER", False)
     assert proxy.match_by_name("ORASON")["name"] == "RA"
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity detection in name matching
+#
+# _best_name_match kept only the top score with `score > best[1]`, so an exact draw between
+# two cache names was settled by list order and reported as a confident identification --
+# "Delta" scores 83.3 against both DELTA 3 and DELTA D. match_by_name_candidates surfaces
+# every name within AIS_NAME_AMBIGUOUS_GAP of the best, and every ship behind each of those
+# names, so a caller can tell a contested call from a clear one.
+# ---------------------------------------------------------------------------
+
+def test_a_dropped_token_yields_both_ships_rather_than_one(ais_caches):
+    # "Delta" scores 83.3 against both DELTA 3 and DELTA D. The old matcher returned
+    # whichever came first in the list -- a confident identification decided by list order.
+    ais.record({"mmsi": "d3", "name": "DELTA 3", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "dd", "name": "DELTA D", "latitude": 52.02,
+                "longitude": 3.89, "type": 70}, source="test")
+    ais.set_in_scope({"d3", "dd"})
+
+    names = {c["name"] for c in ais.match_by_name_candidates("DELTA")}
+    assert names == {"DELTA 3", "DELTA D"}
+
+
+def test_a_clear_winner_yields_one_candidate(ais_caches):
+    ais.record({"mmsi": "v", "name": "VOLGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "w", "name": "VAGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"v", "w"})
+
+    # 100.0 vs 87.0 -- a 13 point gap is not a close call.
+    assert [c["name"] for c in ais.match_by_name_candidates("VOLGA MAERSK")] \
+        == ["VOLGA MAERSK"]
+
+
+def test_a_near_miss_within_the_gap_yields_both(ais_caches, monkeypatch):
+    ais.record({"mmsi": "v", "name": "VOLGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "w", "name": "VAGA MAERSK", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"v", "w"})
+
+    # "VOGA MAERSK": 95.7 vs 90.9, a 4.8 point gap. Contested.
+    monkeypatch.setattr(ais, "AIS_NAME_AMBIGUOUS_GAP", 5.0)
+    names = {c["name"] for c in ais.match_by_name_candidates("VOGA MAERSK")}
+    assert names == {"VOLGA MAERSK", "VAGA MAERSK"}
+
+
+def test_two_ships_sharing_one_name_are_both_candidates(ais_caches):
+    ais.record({"mmsi": "a", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "b", "name": "FORTUNA", "latitude": 52.05,
+                "longitude": 3.90, "type": 70}, source="test")
+    ais.set_in_scope({"a", "b"})
+
+    assert {c["mmsi"] for c in ais.match_by_name_candidates("FORTUNA")} == {"a", "b"}
+
+
+def test_match_by_name_still_returns_one_entry(ais_caches):
+    # The live path's contract is unchanged: one entry or None.
+    ais.record({"mmsi": "d3", "name": "DELTA 3", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "dd", "name": "DELTA D", "latitude": 52.5,
+                "longitude": 4.5, "type": 70}, source="test")
+    ais.set_in_scope({"d3", "dd"})
+
+    hit = ais.match_by_name("DELTA")
+    assert isinstance(hit, dict)
+    assert hit["mmsi"] == "d3"      # nearer Maas Center wins the tie
+
+
+def test_match_by_name_candidates_is_empty_for_no_match(ais_caches):
+    ais.record({"mmsi": "x", "name": "ORASUND"}, source="test")
+    assert ais.match_by_name_candidates("ZZZZZZZZ") == []
+
+
+def test_a_renamed_vessel_is_not_returned_under_its_vacated_name(ais_caches):
+    """Code-review finding: match_by_name_candidates' fallback for a name that
+    candidates_for_name can't expand (added so a vessel cache built by hand, bypassing
+    record(), still works -- several fixtures pre-dating Task 4 do exactly that) must not
+    resurrect a Task-4 rename ghost. _name_index is append-only (Task 1), so FORTUNA's mmsi
+    111 stays listed under FORTUNA forever even after it renames to BELLA; Task 4 made
+    candidates_for_name filter to the entry's CURRENT name, so candidates_for_name('FORTUNA')
+    correctly returns [] once 111 is the only holder and it has moved on. Gating the fallback
+    on `name not in _name_index` (never indexed at all) rather than on candidates_for_name
+    returning empty (indexed, and correctly refused) is what tells "never looked up" apart
+    from "looked up and correctly empty" -- get the gate backwards and this returns BELLA's
+    entry under the query 'FORTUNA'."""
+    ais.record({"mmsi": "111", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "111", "name": "BELLA"}, source="test")
+
+    assert ais.match_by_name("FORTUNA") is None
+
+
+def test_filter_off_ignores_the_ambiguity_gap_and_is_not_reranked(ais_caches, monkeypatch):
+    """Code-review finding: AIS_NAME_FILTER=off promises (see the comment above the flag) to
+    restore the pre-ambiguity-detection matcher exactly -- a single top scorer, decided by
+    list order on a tie, the way rf_process.extractOne always worked. WRatio falls back to
+    partial-ratio matching for a short query against a long candidate, so 'ORASON' scores
+    90.0 against EVERY two-letter substring of itself -- 'OR', 'RA', 'AS', 'SO', 'ON' -- a
+    5-way exact tie (verified with rapidfuzz directly). If the ambiguity gap and
+    _candidate_sort_key re-ranking were still applied in off-mode (as they were before this
+    fix), all five would tie within AIS_NAME_AMBIGUOUS_GAP and re-ranking by proximity would
+    hand the win to whichever candidate is nearest Maas Center -- 'RA', recorded second and
+    placed there on purpose -- rather than 'OR', recorded FIRST and so the list-order winner
+    extractOne would actually pick. Recording 'RA' closer than 'OR' is what makes this test
+    able to tell "restored exactly" apart from "re-ranked but still off nominally"."""
+    ais.record({"mmsi": "or", "name": "OR", "latitude": 40.0,
+                "longitude": 2.0, "type": 70}, source="test")     # recorded first, far away
+    ais.record({"mmsi": "ra", "name": "RA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")    # recorded second, at Maas Center
+    ais.set_in_scope({"or", "ra"})
+    monkeypatch.setattr(ais, "AIS_NAME_FILTER", False)
+
+    hit = ais.match_by_name("ORASON")
+    assert hit["name"] == "OR"      # list-order winner, not the nearer "RA"
+
+
+def test_the_shipped_default_gap_is_not_zero(ais_caches):
+    """Code-review finding: every other ambiguity test either uses an exact tie (gap=0, which
+    passes for any AIS_NAME_AMBIGUOUS_GAP >= 0) or monkeypatches the gap explicitly, so
+    nothing pinned the shipped default (3.0) itself -- it could silently regress to 0.0 with
+    every other test here still green. 'PACIFIC HORIZONS' scores 94.12 against 'PACIFIC
+    HORIZONS 3' and 91.43 against 'PACIFIC HORIZONS 37' (verified with rapidfuzz directly), a
+    2.69 point gap: inside the shipped default, so both must be contested."""
+    ais.record({"mmsi": "p3", "name": "PACIFIC HORIZONS 3", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "p37", "name": "PACIFIC HORIZONS 37", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"p3", "p37"})
+
+    assert ais.AIS_NAME_AMBIGUOUS_GAP == 3.0
+    names = {c["name"] for c in ais.match_by_name_candidates("PACIFIC HORIZONS")}
+    assert names == {"PACIFIC HORIZONS 3", "PACIFIC HORIZONS 37"}
+
+
+def test_the_shipped_default_gap_stops_contesting_below_the_measured_gap(ais_caches, monkeypatch):
+    """Companion to the test above: narrowing the gap below the measured 2.69 points makes the
+    same pair NOT contested, proving the default test above is actually exercising
+    AIS_NAME_AMBIGUOUS_GAP -- not some unrelated path that would return both names regardless
+    of the setting."""
+    ais.record({"mmsi": "p3", "name": "PACIFIC HORIZONS 3", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "p37", "name": "PACIFIC HORIZONS 37", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"p3", "p37"})
+
+    monkeypatch.setattr(ais, "AIS_NAME_AMBIGUOUS_GAP", 1.0)
+    names = {c["name"] for c in ais.match_by_name_candidates("PACIFIC HORIZONS")}
+    assert names == {"PACIFIC HORIZONS 3"}
 
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +2232,12 @@ def santa_caches(monkeypatch):
     monkeypatch.setattr(ais, "_vessel_cache", {"SANTA ISABEL MAERSK": _SANTA,
                                                "ISABEL": _ISABEL})
     monkeypatch.setattr(ais, "_callsign_cache", {"OXWU2": _SANTA, "PB7708": _ISABEL})
+    # _mmsi_index too, because match_by_mmsi now reads it rather than scanning _vessel_cache
+    # (_vessel_cache holds only the best entry per name, so ~1,400 live ships are not in it).
+    # record() always writes both, so a fixture holding only one was never a state the running
+    # server could be in -- and leaving it unpatched would also let a prior test's index leak
+    # into these, the same isolation problem the caches above are patched for.
+    monkeypatch.setattr(ais, "_mmsi_index", {"219077000": _SANTA, "244700279": _ISABEL})
 
 
 def test_the_live_match_becomes_a_candidate(santa_caches):
@@ -1543,6 +2338,9 @@ _PECHORA_CALL = ("Maaas Approach, Maaas Approach, this is Motortanker, Ikora Sta
 def pechora_caches(monkeypatch):
     monkeypatch.setattr(ais, "_vessel_cache", {"PECHORA STAR": _PECHORA, "VIKTORIA": _VIKTORIA})
     monkeypatch.setattr(ais, "_callsign_cache", {"9HA2788": _PECHORA, "DB6442": _VIKTORIA})
+    # See santa_caches: match_by_mmsi reads _mmsi_index, and record() always writes both.
+    monkeypatch.setattr(ais, "_mmsi_index", {_PECHORA["mmsi"]: _PECHORA,
+                                             _VIKTORIA["mmsi"]: _VIKTORIA})
 
 
 def test_a_spoken_callsign_outranks_a_fuzzy_name_match(pechora_caches):
@@ -1855,7 +2653,7 @@ def test_page_links_an_identified_vessel_to_vesselfinder():
         "vessel": "VISTA", "mmsi": "538009952", "confidence": "high",
         "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
     }])
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/538009952" '
             'target="_blank" rel="noopener noreferrer">VISTA</a>') in html
 
 
@@ -1887,8 +2685,8 @@ def test_page_cannot_be_broken_out_of_by_a_hostile_mmsi():
     # The href must be exactly the encoded URL, so nothing escaped the attribute. The same
     # value also appears further down as escaped text content, which is separately safe --
     # hence asserting on the anchor specifically rather than on the whole page.
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels'
-            '?name=%22%20onmouseover%3D%22alert%281%29" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/'
+            '%22%20onmouseover%3D%22alert%281%29" '
             'target="_blank" rel="noopener noreferrer">EVIL</a>') in html
 
 
@@ -1911,7 +2709,7 @@ def vessels_log(tmp_path, monkeypatch):
 def test_vessels_log_links_an_identified_vessel(vessels_log):
     proxy._append_vessel_to_log(
         {"vessel": "VISTA", "mmsi": "538009952", "callsign": "V7A5384"}, "Maas Approach, Vista.")
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/538009952" '
             'target="_blank" rel="noopener noreferrer">VISTA</a>') in vessels_log.read_text(
                 encoding="utf-8")
 
@@ -2873,3 +3671,105 @@ def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
     assert 'class="badge fixedcount"' not in html
     assert 'class="fixed"' not in html
     assert "Maas Approach, motor vision Example Trader." in html
+
+
+def test_the_vesselfinder_link_points_at_the_ship_not_a_search():
+    from stt_proxy import markup
+    link = markup._vessel_link("ORASUND", "244123456")
+    assert "vessels/details/244123456" in link
+    assert "?name=" not in link
+
+
+def test_a_contested_row_lists_its_candidates():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "DELTA 3", "mmsi": "d3", "confidence": "low",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Delta calling"}],
+        "candidates": [
+            {"name": "DELTA 3", "mmsi": "111", "type": "Tanker",
+             "km": 4.2, "destination": "NLRTM", "last_seen": "2026-08-12 10:14:00"},
+            {"name": "DELTA D", "mmsi": "222", "type": "General cargo",
+             "km": 31.5, "destination": None, "last_seen": "2026-08-12 10:11:00"},
+        ],
+    }])
+    assert "DELTA 3" in html and "DELTA D" in html
+    assert "vessels/details/111" in html and "vessels/details/222" in html
+    assert "4.2" in html and "31.5" in html
+
+
+def test_an_uncontested_row_shows_no_candidate_block():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "ORASUND", "mmsi": "244123456", "confidence": "high",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Orasund"}],
+    }])
+    assert "candidates" not in html.lower()
+
+
+def test_a_single_candidate_is_not_presented_as_a_choice():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "ORASUND", "mmsi": "111", "confidence": "high",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Orasund"}],
+        "candidates": [{"name": "ORASUND", "mmsi": "111", "type": "Tanker",
+                        "km": 4.2, "destination": "NLRTM",
+                        "last_seen": "2026-08-12 10:14:00"}],
+    }])
+    assert "candidates" not in html.lower()
+
+
+def test_candidate_names_are_escaped():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "X", "mmsi": "1", "confidence": "low",
+        "start": "s", "end": "e", "channel": "01", "turns": [],
+        "candidates": [
+            {"name": "<script>alert(1)</script>", "mmsi": "1", "type": "Tanker",
+             "km": 1.0, "destination": None, "last_seen": "t"},
+            {"name": "OTHER", "mmsi": "2", "type": "Tanker",
+             "km": 2.0, "destination": None, "last_seen": "t"},
+        ],
+    }])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_candidate_type_destination_and_last_seen_are_escaped():
+    """The name field already has a guard (test_candidate_names_are_escaped); type,
+    destination and last_seen do not, and destination in particular is "the most
+    attacker-controllable field on the feed" per conversations.py's own comment on
+    _format_particulars -- anyone with a transmitter in the Rotterdam box can set it to
+    whatever they like. Each payload is distinct so a leak names which field it came from."""
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "X", "mmsi": "1", "confidence": "low",
+        "start": "s", "end": "e", "channel": "01", "turns": [],
+        "candidates": [
+            {"name": "HOSTILE", "mmsi": "1",
+             "type": "<b>TypeAttack</b>",
+             "km": 1.0,
+             "destination": "<i>DestAttack</i>",
+             "last_seen": "<u>SeenAttack</u>"},
+            {"name": "OTHER", "mmsi": "2", "type": "Tanker",
+             "km": 2.0, "destination": None, "last_seen": "t"},
+        ],
+    }])
+    assert "<b>TypeAttack</b>" not in html
+    assert "<i>DestAttack</i>" not in html
+    assert "<u>SeenAttack</u>" not in html
+    assert "&lt;b&gt;TypeAttack&lt;/b&gt;" in html
+    assert "&lt;i&gt;DestAttack&lt;/i&gt;" in html
+    assert "&lt;u&gt;SeenAttack&lt;/u&gt;" in html
+
+
+def test_rows_stored_before_candidates_existed_still_render():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "OLD ROW", "mmsi": "9", "confidence": "high",
+        "start": "s", "end": "e", "channel": "01",
+        "turns": [{"time": "10:00:00", "text": "hello"}],
+    }])
+    assert "OLD ROW" in html

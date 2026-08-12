@@ -9,6 +9,10 @@ setlocal
 
 :: -- API Keys (edit these) -----------------------------------
 set ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
+:: AISHUB_USERNAME is the username/API key from AISHub's welcome mail. You only get one by
+:: contributing an AIS feed to AISHub -- signing up alone is not enough. AIS_SOURCE defaults
+:: to aishub below, so this is needed for vessel enrichment out of the box.
+set AISHUB_USERNAME=YOUR_AISHUB_USERNAME_HERE
 set AISSTREAM_API_KEY=YOUR_AISSTREAM_KEY_HERE
 set GROQ_API_KEY=gsk_YOUR_GROQ_KEY_HERE
 
@@ -39,6 +43,21 @@ set GROQ_MODEL=whisper-large-v3
 :: exchange, and publishes it at http://localhost:9000/conversations. It never touches the
 :: live transcript. On by default.
 :: set CONVERSATION_RESOLVER=off
+
+:: -- AIS vessel source -----------------------------------------
+:: AIS_SOURCE selects where vessel data comes from: aishub (default) polls AISHub's REST
+:: webservice using AISHUB_USERNAME above; aisstream is the original aisstream.io websocket,
+:: kept working as a rollback and needs AISSTREAM_API_KEY above; off disables vessel
+:: enrichment entirely.
+:: set AIS_SOURCE=aishub
+::
+:: AISHUB_BBOX is latmin,latmax,lonmin,lonmax. Deliberately wide -- a vessel is cached long
+:: before it calls Rotterdam, at the cost of more duplicate vessel names to disambiguate.
+:: set AISHUB_BBOX=51.0,53.2,2.0,6.0
+::
+:: AISHUB_POLL_SEC is seconds between polls. Values under 60 are raised to 60 in code
+:: regardless of this setting, because AISHub answers a faster caller with no data at all.
+:: set AISHUB_POLL_SEC=900
 
 :: -- Ports (defaults match whisper proxy settings) -----------
 :: Whisper-server listens on 8080 inside WSL (accessible as localhost:8080 from Windows)

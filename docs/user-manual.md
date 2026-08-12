@@ -333,6 +333,31 @@ Turning `AIS_NAME_FILTER` or `AIS_PARTIAL_CALLSIGN` off restores the previous be
 exactly, which is what makes them a usable rollback rather than a rough approximation. The
 defaults were measured, not chosen — see `docs/design-notes.md`.
 
+### AIS vessel source
+
+`AIS_SOURCE` selects where vessel data comes from:
+
+| value | meaning |
+|---|---|
+| `aishub` (default) | Poll AISHub every 15 minutes. Needs `AISHUB_USERNAME`. |
+| `aisstream` | The original aisstream.io websocket. Needs `AISSTREAM_API_KEY`. Dead since 2026-08-05; kept because it was reliable for a long time and may return. |
+| `off` | No vessel enrichment. |
+
+`AISHUB_USERNAME` is the key from AISHub's welcome mail. **It goes in `server/start-all.bat`
+alongside the other API keys — that file is gitignored. Never put it in a tracked file.** There
+is no `.env` loader in this project; every setting is read straight from the environment.
+
+Without `AISHUB_USERNAME` the proxy still starts and transcribes; it prints `AIS feed: disabled`
+and runs without vessel enrichment.
+
+Other settings: `AISHUB_BBOX` (`latmin,latmax,lonmin,lonmax`, default `51.0,53.2,2.0,6.0`) and
+`AISHUB_POLL_SEC` (default 900; values under 60 are raised to 60, because AISHub answers a
+faster caller with no data at all).
+
+When a heard name fits more than one ship, `/conversations` lists the candidates with
+VesselFinder links instead of choosing. Pick the one that fits what was said — a vessel already
+inside the harbour is not dropping anchor at Echo 3.
+
 ### Conversation resolution
 
 | Variable | Default | Meaning |

@@ -21,9 +21,9 @@ import threading
 
 from rapidfuzz import fuzz as rf_fuzz
 
-from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes,
+from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes, _km_from_maas,
                            match_by_callsign, match_by_callsign_pattern,
-                           match_by_callsign_suffix, match_by_mmsi)
+                           match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates)
 from stt_proxy.claude import _get_claude
 from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
@@ -561,6 +561,40 @@ def _format_particulars(row: dict) -> str:
     return " &middot; ".join(bits)
 
 
+def _format_candidates(row: dict) -> str:
+    """The candidate list for a contested identification, or "" when there is nothing to choose.
+
+    Rendered only for two or more: a single candidate is an answer, and presenting it as a
+    choice would train the reader to ignore the block that matters.
+
+    This is a display, not a feedback loop -- clicking records nothing. Deliberate: a click
+    that recorded "this was the right ship" is free labelled ground truth for the bench, but
+    it needs a store, a schema and a correction path, none of which this needs.
+    """
+    candidates = row.get("candidates") or []
+    if len(candidates) < 2:
+        return ""
+
+    items = []
+    for c in candidates:
+        bits = []
+        if c.get("type"):
+            bits.append(_html_escape(c["type"]))
+        if c.get("km") is not None:
+            bits.append(f"{float(c['km']):.1f} km from Maas Center")
+        if c.get("destination"):
+            bits.append(f"dest {_html_escape(c['destination'])}")
+        if c.get("last_seen"):
+            bits.append(f"seen {_html_escape(c['last_seen'])}")
+        items.append(
+            f'<li>{_vessel_link(c.get("name", "?"), c.get("mmsi"))} '
+            f'<span class="cmeta">{" &middot; ".join(bits)}</span></li>')
+
+    return (f'<div class="cands"><span class="clabel">{len(candidates)} candidates '
+            f'&mdash; pick the one that fits what was said:</span>'
+            f'<ul>{"".join(items)}</ul></div>')
+
+
 def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
     """Keep the model inside the candidate list and account for every transmission.
 
@@ -596,6 +630,22 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
         # would place it somewhere it was not when it called. The static fields come along
         # for the ride rather than being fetched separately.
         row.update({field: (ais.get(field) if ais else None) for field in _PARTICULARS})
+
+        # Attached to the exchange so _store_resolved's `**ex` spread carries it through to
+        # the page with no schema change. Rows stored before this existed simply lack the key.
+        if row["vessel"]:
+            found = match_by_name_candidates(row["vessel"])
+            if len(found) > 1:
+                row["candidates"] = [{
+                    "name": c.get("name"),
+                    "mmsi": c.get("mmsi"),
+                    "type": _get_ship_type_name(c.get("type")),
+                    "km": (_km_from_maas(c["latitude"], c["longitude"])
+                           if c.get("latitude") is not None
+                           and c.get("longitude") is not None else None),
+                    "destination": c.get("destination"),
+                    "last_seen": c.get("last_seen"),
+                } for c in found]
         out.append(row)
 
     missing = sorted(valid_ids - seen)
@@ -755,6 +805,7 @@ def render_conversations_page(rows: list[dict]) -> str:
         # and the rows stored before these fields existed, have nothing to say here.
         particulars = _format_particulars(row)
         ais_line = f'\n      <div class="ais">{particulars}</div>' if particulars else ""
+        cand_block = _format_candidates(row)
 
         blocks.append(f"""
     <div class="conv {'named' if vessel else 'unnamed'}">
@@ -764,7 +815,7 @@ def render_conversations_page(rows: list[dict]) -> str:
         <span class="meta">{' &middot; '.join(meta)}</span>
         <span class="when">{_html_escape(row.get('start',''))} &ndash; {_html_escape(row.get('end',''))[-8:]}
               &middot; ch {_html_escape(row.get('channel',''))} &middot; {len(row.get('turns', []))} turns</span>
-      </div>{ais_line}
+      </div>{ais_line}{cand_block}
       <div class="ev">{_html_escape(row.get('evidence',''))}</div>
       <ul>{''.join(turns)}</ul>
     </div>""")
@@ -805,6 +856,10 @@ def render_conversations_page(rows: list[dict]) -> str:
  .fixed {{ border-bottom: 1px dotted #2c7; cursor: help; }}
  .badge.fixedcount {{ background: #d4edda; }}
  .empty {{ color: #666; }}
+ .cands{{margin:.4em 0 .2em 0;padding:.4em .6em;border-left:3px solid #b58900;background:#fbf6e6}}
+ .cands .clabel{{font-size:.85em;color:#8a6d00}}
+ .cands ul{{margin:.3em 0 0 0;padding-left:1.2em}}
+ .cands .cmeta{{color:#666;font-size:.85em}}
 </style></head><body>
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>

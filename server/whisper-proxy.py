@@ -141,6 +141,7 @@ from stt_proxy.conversations import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 from stt_proxy import ais  # noqa: E402
+from stt_proxy import aishub  # noqa: E402
 from stt_proxy.ais import (  # noqa: E402
     AIS_CACHE_FILE,
     AIS_HINT_FILTER,
@@ -504,14 +505,32 @@ if __name__ == "__main__":
     else:
         print("Conversation resolver: disabled (CONVERSATION_RESOLVER=off)", flush=True)
 
-    ais_key = os.environ.get("AISSTREAM_API_KEY", "")
-    if ais_key:
-        threading.Thread(target=_ais_thread, args=(ais_key,), daemon=True).start()
-        threading.Thread(target=_periodic_save, daemon=True).start()
-        atexit.register(_save_cache)
-        print("AIS feed: starting...", flush=True)
+    ais_source = os.environ.get("AIS_SOURCE", "aishub").strip().lower()
+    if ais_source == "aishub":
+        aishub_user = os.environ.get("AISHUB_USERNAME", "")
+        if aishub_user:
+            aishub.start(aishub_user)
+            threading.Thread(target=_periodic_save, daemon=True).start()
+            atexit.register(_save_cache)
+            print(f"AIS feed: AISHub, box {aishub.BBOX}, every {aishub.POLL_SEC}s", flush=True)
+        else:
+            print("AIS feed: disabled (AIS_SOURCE=aishub but AISHUB_USERNAME is unset)",
+                  flush=True)
+    elif ais_source == "aisstream":
+        # Kept live and tested rather than commented out. aisstream was a reliable free
+        # source for a long time and may return; code that is not exercised does not work
+        # when it is reverted to.
+        ais_key = os.environ.get("AISSTREAM_API_KEY", "")
+        if ais_key:
+            threading.Thread(target=_ais_thread, args=(ais_key,), daemon=True).start()
+            threading.Thread(target=_periodic_save, daemon=True).start()
+            atexit.register(_save_cache)
+            print("AIS feed: aisstream, starting...", flush=True)
+        else:
+            print("AIS feed: disabled (AIS_SOURCE=aisstream but AISSTREAM_API_KEY is unset)",
+                  flush=True)
     else:
-        print("AIS feed: disabled (set AISSTREAM_API_KEY to enable)", flush=True)
+        print(f"AIS feed: disabled (AIS_SOURCE={ais_source})", flush=True)
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed

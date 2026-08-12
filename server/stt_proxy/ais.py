@@ -1,20 +1,30 @@
 """Live AIS vessel data, and matching transcribed names against it.
 
-Holds the vessel cache fed by the aisstream.io websocket, and the lookups that turn a name
-or callsign heard on the radio into a real ship. Both halves live here because the matching
-thresholds only make sense against the shape of the cache they search.
+Holds the vessel cache, and the lookups that turn a name or callsign heard on the radio into
+a real ship. Both halves live here because the matching thresholds only make sense against
+the shape of the cache they search.
+
+The cache is provider-agnostic: every observation arrives through `record()`, whichever
+source saw it. `AIS_SOURCE` picks the one that runs -- `aishub` (the default, polled by
+stt_proxy/aishub.py) or `aisstream` (the websocket feed implemented in this module, still
+live and still selectable). The merge lives in one place so two providers cannot get it
+wrong two different ways.
 
 State is module-level and shared with the feed thread, guarded by `_cache_lock`. Read it
 through this module (`ais._vessel_cache`) rather than importing the name, or you will bind
 a snapshot and, in tests, patch something nothing reads.
 
-Everything here degrades to a no-op when AISSTREAM_API_KEY is unset: the cache stays empty,
-lookups return None, and the rest of the pipeline carries on without vessel enrichment.
+Everything here degrades to a no-op when no source is configured -- AISHUB_USERNAME unset
+for aishub, AISSTREAM_API_KEY unset for aisstream: no feed thread starts, the cache holds
+only whatever ais_cache.json carried, and the rest of the pipeline carries on without live
+vessel enrichment.
 """
 
 import asyncio
 import datetime
+import itertools
 import json
+import math
 import os
 import random
 import re
@@ -79,16 +89,111 @@ _callsign_cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
 
 
+# Characters a real vessel name never contains, and an AIS 6-bit decode artefact routinely
+# does. AIS packs names into a closed 64-symbol alphabet (@ A-Z [ \ ] ^ _ SPACE ! " # $ % &
+# ' ( ) * + , - . / 0-9 : ; < = > ?), so when a message is decoded at the wrong bit offset
+# the result is not mojibake -- it is a plausible-looking string drawn from exactly that
+# alphabet, which is why 'YESSLYNN @@<ZUQ0\#@,' survived every other sanity check and got
+# cached as a ship.
+#
+# This is a DENYLIST rather than an allowlist of permitted characters, deliberately. The
+# alphabet above is closed, so enumerating the symbols that never occur legitimately is
+# complete for anything AIS can produce -- while an allowlist would also flag a name that
+# arrives through some other encoding (AISHub returns UTF-8, so an accented or non-Latin
+# name is possible) and is merely unusual rather than corrupt.
+#
+# Chosen by measurement over the real 8,672-entry cache, splitting names by whether their
+# MMSI carries one entry or several and counting which punctuation appears where. Every
+# symbol below occurs almost exclusively inside strings that are visibly garbage. The
+# characters deliberately left OUT of this set are the ones with real vessels behind them:
+# '-' (298 names), '.' (61), '(' / ')' (28/24), "'" (19), '/' (19), '&' (15), '_'
+# (DOC_HUDSON, NERODIA_), '!' (OH SCRAP!, JOBSKADE!), ',' (DWAAL IK, WACHT U) and '+'.
+#
+# '@' leads the list for the same reason _clean_destination splits on it: it is the null
+# character of the 6-bit alphabet, so it is padding, never content.
+_NAME_ARTEFACT_CHARS = frozenset('@#?\\<>[]$%="^*;:')
+
+
+def _looks_like_ais_artefact(name: str | None) -> bool:
+    """Whether this name looks like a mis-decoded AIS 6-bit string rather than a ship.
+
+    Pure and mechanical -- no vessel name is hardcoded here, and nothing about the real
+    cache file is baked in beyond the character set chosen above.
+    """
+    return any(ch in _NAME_ARTEFACT_CHARS for ch in (name or ""))
+
+
+# The static fields that make an entry worth keeping. `name` and `type` are excluded on
+# purpose: name is what the artefact test above already judges, and type is present on
+# almost everything, so neither separates a full record from a thin one.
+_RANK_STATIC_FIELDS = ("callsign", "imo", "length", "beam", "draught", "destination")
+
+
+def _entry_rank(entry: dict) -> tuple[int, int]:
+    """How good a claim this entry has to BE the vessel for its MMSI. Lower sorts better.
+
+    Pure, so the ranking can be unit-tested without a cache file, and takes no lock -- its
+    only caller holds `_cache_lock` already, and that lock is not reentrant.
+
+    Two terms, in this order:
+
+      1. artefact last. A name carrying the 6-bit alphabet's junk characters is not a ship,
+         and no amount of other data makes it one.
+      2. then the fuller record. Populated is TRUTHY rather than "not None": all six fields
+         are meaningfully falsy when absent -- a length of 0 or an imo of 0 is missing data
+         wearing a value's clothes, and adapters routinely default absent strings to "".
+
+    Note what is NOT here: position, freshness, and scope. Those rank vessels against each
+    other for a lookup (`_candidate_sort_key`), where the question is which of several real
+    ships is being called. This ranks two rows that claim the SAME MMSI, where the question
+    is which one is a real ship at all -- so it must stay a judgement about the record, not
+    about where the vessel is.
+
+    The caller breaks a remaining tie by file order, so a reload is reproducible.
+    """
+    populated = sum(1 for field in _RANK_STATIC_FIELDS if entry.get(field))
+    return (1 if _looks_like_ais_artefact(entry.get("name")) else 0, -populated)
+
+
 def _load_cache() -> None:
     global _vessel_cache, _callsign_cache
     try:
         with open(AIS_CACHE_FILE, "r", encoding="utf-8") as f:
             entries = json.load(f)
+        names = set()
         with _cache_lock:
             for entry in entries:
                 _vessel_cache[entry["name"].upper()] = entry
+                if entry.get("mmsi"):
+                    # NOT last-in-file-wins. 290 MMSIs in the real cache carry two entries --
+                    # a real vessel and an AIS 6-bit decode artefact broadcast under the same
+                    # MMSI -- and the artefact happens to sit later in the file, so plain
+                    # assignment handed it the index in 248 of the 290. That is what made
+                    # match_by_mmsi('244660257') answer '?!C?2H /8PA7NEH2]5D,' instead of
+                    # REGULIERSGRACHT: a REGRESSION, since the scan over _vessel_cache this
+                    # index replaced used to reach the clean entry. It also cost the vessel
+                    # its identification outright -- conversations._resolver_candidates keys
+                    # by MMSI, so the real name was never offered to the resolver at all and
+                    # the conversation ended '[resolve] dropped off-list vessel'.
+                    #
+                    # Strictly-better wins, so an exact tie keeps the FIRST entry in the file
+                    # and a reload is reproducible.
+                    mmsi = str(entry["mmsi"])
+                    incumbent = _mmsi_index.get(mmsi)
+                    if incumbent is None or _entry_rank(entry) < _entry_rank(incumbent):
+                        _mmsi_index[mmsi] = entry
                 if entry.get("callsign"):
                     _callsign_cache[entry["callsign"].upper()] = entry
+                _index_name(entry)
+                names.add(entry["name"].strip().upper())
+            # The loop above seeds _vessel_cache last-entry-in-file-wins, same as record()'s
+            # admission branch. Now that every entry AND _mmsi_index are fully loaded, re-pick
+            # the best candidate for each name -- the same seed-then-refresh composition
+            # record() uses, and for the same reason: without this, a reloaded cache stays
+            # keyed on whichever duplicate happened to be written last, not the best-ranked
+            # one, until a poll touches that name again.
+            for name in names:
+                _refresh_name_view(name)
         print(f"[AIS] loaded {len(_vessel_cache)} vessels from cache", flush=True)
     except FileNotFoundError:
         pass
@@ -99,7 +204,31 @@ def _load_cache() -> None:
 def _save_cache() -> None:
     try:
         with _cache_lock:
-            entries = list(_vessel_cache.values())
+            # Persist the UNION of both indexes, deduped by id(). Neither one alone is
+            # lossless, and each loses a different set of ships:
+            #
+            #   _vessel_cache alone holds only the single best-ranked entry per NAME (Task 4),
+            #   so saving from it discards every non-best duplicate on every save -- the
+            #   ALBATROS x14 problem this index exists to solve, reintroduced across a restart.
+            #
+            #   _mmsi_index alone drops every entry that is in the cache but not reachable
+            #   through it. Two ways that happens, both measured on the real 8,672-entry file:
+            #   290 MMSIs carry TWO entries (a real vessel plus an AIS 6-bit decode artefact
+            #   such as 'YESSLYNN @@<ZUQ0\#@,'), and _load_cache seeds last-in-file-wins, so
+            #   one of each pair is orphaned; and a legacy cache file written before entries
+            #   carried an "mmsi" field indexes NOTHING, so saving from _mmsi_index rewrote the
+            #   whole file as []. Saving from _mmsi_index alone turned 8,672 entries into
+            #   8,362, deleting 310 real rows from disk permanently.
+            #
+            # The invariant this restores: nothing that a load put in memory can be removed by
+            # a save. id()-dedup is what makes the union safe -- the same dict is normally
+            # reachable under both its MMSI and its name, and must be written once.
+            seen_ids = set()
+            entries = []
+            for entry in itertools.chain(_mmsi_index.values(), _vessel_cache.values()):
+                if id(entry) not in seen_ids:
+                    seen_ids.add(id(entry))
+                    entries.append(entry)
         with open(AIS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(entries, f)
     except Exception as exc:
@@ -243,6 +372,21 @@ _LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
 # 64 km west of Maas Center while inbound traffic arrives from the west, so a vessel calling
 # from further out is not being updated at all and any threshold will exclude it.
 AIS_MAX_AGE_MIN = int(os.environ.get("AIS_MAX_AGE_MIN", "0"))
+
+# Kept here rather than imported from bench_identify: the proxy must not depend on a
+# benchmarking script. Same coordinates as bench_identify._MAAS_CENTER.
+_MAAS_CENTER = (52.02, 3.88)
+
+
+def _km_from_maas(lat: float, lon: float) -> float:
+    lat0, lon0 = _MAAS_CENTER
+    dlat = math.radians(lat - lat0)
+    dlon = math.radians(lon - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(lat))
+         * math.sin(dlon / 2) ** 2)
+    return 6371 * 2 * math.asin(math.sqrt(a))
+
 
 _stale_filter_warned = False
 
@@ -395,7 +539,332 @@ def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
     return list(cache.keys()), cache
 
 
+# Vessels by MMSI -- the only identifier that actually distinguishes two ships. _vessel_cache
+# is keyed by name, and names collide: a live AISHub snapshot of the Maas approach carries 17
+# duplicate-name groups (ALBATROS x3, CORNELIA x3), and the wider box carries 777. Without
+# this index those merge into one entry and take the MMSI of whichever spoke last.
+_mmsi_index: dict[str, dict] = {}
+
+# Observations for vessels not yet admitted, keyed by MMSI and accumulated across messages.
+# Raw AIS splits a vessel across message types -- position without a name, name without a
+# position -- so neither alone can decide admission.
+#
+# Deliberately NOT stored in _vessel_cache under a synthetic "MMSI:244..." key: the fuzzy name
+# matcher iterates those keys, and junk keys would become candidates for matching.
+_pending: dict[str, dict] = {}
+
+# MMSIs returned by the most recent SUCCESSFUL poll. Empty means "no source has reported yet"
+# and is treated as "everything is in scope", so aisstream and a cold start behave as before.
+#
+# Scope is defined against the last good poll rather than against wall-clock age deliberately.
+# "last_seen within N minutes of now" would make a feed outage indistinguishable from every
+# ship leaving the estuary -- and this project has already lost six days to a feed that failed
+# quietly.
+_in_scope: set[str] = set()
+
+
+def set_in_scope(mmsis: set[str]) -> None:
+    """Publish the vessels the latest good poll saw, and re-rank every name view against it.
+
+    Called only on success, and (by `aishub.poll_once`) only AFTER that poll has finished
+    writing every vessel -- publishing the new scope is what makes every ranking decision
+    `record()` made during the write loop stale, since each of those used whatever scope was
+    published BEFORE this call (the previous poll's, or none). Rather than wait for some
+    future record() to touch a given name and refresh it incidentally, this re-ranks every
+    known name itself, in the same lock acquisition that publishes the new scope, so
+    _vessel_cache is never observably stale against the scope it should be ranked by. Cost is
+    bounded: _refresh_name_view over ~7,900 names at ~51us each is well under a second,
+    against a 900s poll interval.
+
+    Calls _refresh_name_view directly rather than through record() -- this already holds
+    _cache_lock, and _refresh_name_view's contract (documented on itself) is exactly "caller
+    holds _cache_lock, reads _in_scope directly, never calls get_in_scope()". Do not call
+    get_in_scope() from in here; that reacquires the lock and deadlocks the feed thread the
+    same way a `_refresh_name_view` call from inside `record()` would.
+    """
+    global _in_scope
+    with _cache_lock:
+        _in_scope = set(mmsis)
+        for name in _name_index:
+            _refresh_name_view(name)
+
+
+def get_in_scope() -> set[str]:
+    with _cache_lock:
+        return set(_in_scope)
+
+
+# NAME -> the MMSIs of every ship carrying it. _vessel_cache can only hold one entry per name,
+# so this is the only thing that keeps fourteen ALBATROS apart. Ranking them is Task 4's job;
+# this task only has to stop them overwriting each other.
+_name_index: dict[str, list[str]] = {}
+
+_STATIC_FIELDS   = ("name", "callsign", "type", "imo", "length", "beam",
+                    "draught", "destination")
+_POSITION_FIELDS = ("latitude", "longitude", "sog", "cog", "heading")
+
+# Upper bound on _pending. A vessel that never gets a name would otherwise be re-held on every
+# message forever -- the proxy is long-running, so "forever" is real unbounded growth. If this
+# cap is ever hit that is a signal something upstream is wrong, not a reason to raise it.
+# Eviction is oldest-first by the observation's own timestamp, so it stays deterministic under
+# a backdated observed_at the same way position freshness does.
+_PENDING_MAX = 2000
+
+
+def record(fields: dict, *, source: str, observed_at: float | None = None) -> None:
+    """Merge one observation into the vessel cache, whatever provider saw it.
+
+    One implementation on purpose. The merge is where the subtle bugs lived: static messages
+    wholesale-replacing position data left 25% of the vessels in the labelled conversations
+    with no position at all until the MERGE-never-replace fix. Two providers writing the cache
+    through two code paths would be two chances to get that wrong, with only one covered by
+    these tests.
+
+    `observed_at` is a UNIX timestamp for the observation; it defaults to now. Position writes
+    apply only if newer than the stored fix.
+    """
+    mmsi = str(fields.get("mmsi") or "").strip()
+    if not mmsi:
+        return
+    when = time.time() if observed_at is None else observed_at
+    stamp_now = observed_at is None
+
+    with _cache_lock:
+        entry = _mmsi_index.get(mmsi)
+        if entry is None:
+            name = (fields.get("name") or "").strip()
+            if name:
+                candidate = _vessel_cache.get(name.upper())
+                # Adopt a name-keyed entry only if its MMSI agrees, or it doesn't have one
+                # yet. Matching on name alone would permanently alias a second vessel's MMSI
+                # onto the first's entry, and "mmsi" is not in _STATIC_FIELDS so nothing would
+                # ever correct it.
+                if candidate is not None and candidate.get("mmsi") in (mmsi, None, ""):
+                    entry = candidate
+                    # The candidate's mmsi was missing or "" -- fill it in now. Without this,
+                    # entry["mmsi"] stays falsy and _index_name() below silently drops the
+                    # vessel from _name_index (it early-returns on a falsy mmsi), even though
+                    # _mmsi_index[mmsi] correctly points at it.
+                    entry["mmsi"] = mmsi
+
+        if entry is not None:
+            # An observation for this MMSI seen before it was admitted -- held in _pending
+            # because nothing existed to attach it to -- must not be discarded now that
+            # something does. Flushed BEFORE the current observation so the newest-wins
+            # position logic still picks whichever is actually newer.
+            pending = _pending.pop(mmsi, None)
+            if pending is not None:
+                _apply(entry, pending, pending.get("position_at", when),
+                       pending.get("source", source))
+
+            _apply(entry, fields, when, source, stamp_now=stamp_now)
+
+            # A rename (ShipStaticData.Name differing from the MetaData.ShipName the vessel
+            # was first admitted under) must not leave the cache keyed on the stale name --
+            # _fresh_snapshot hands _vessel_cache.keys() straight to the fuzzy matcher, so a
+            # vessel invisible under its own current name is a vessel that cannot be found.
+            key = entry["name"].upper()
+            if _vessel_cache.get(key) is not entry:
+                _vessel_cache[key] = entry
+
+            _mmsi_index[mmsi] = entry
+            _index_name(entry)
+            _refresh_name_view(entry.get("name", ""))
+            if entry.get("callsign"):
+                _callsign_cache[entry["callsign"].upper()] = entry
+            return
+
+        # Not yet admitted: accumulate until there is a name.
+        held = _pending.setdefault(mmsi, {"mmsi": mmsi})
+        _apply(held, fields, when, source, stamp_now=stamp_now)
+        held["_touched"] = when
+
+        if len(_pending) > _PENDING_MAX:
+            oldest_mmsi = min(_pending, key=lambda k: _pending[k].get("_touched", 0.0))
+            if oldest_mmsi != mmsi:
+                del _pending[oldest_mmsi]
+
+        if not (held.get("name") or "").strip():
+            return
+
+        entry = _pending.pop(mmsi)
+        entry.pop("_touched", None)
+        entry.setdefault("callsign", "")
+        # Every static field gets a key even when no observation carried a value: consumers
+        # index these directly rather than through .get, the way the pre-record() code always
+        # populated them via a dict literal.
+        for key in ("type", "imo", "length", "beam", "draught", "destination"):
+            entry.setdefault(key, None)
+        _vessel_cache[entry["name"].upper()] = entry
+        _mmsi_index[mmsi] = entry
+        _index_name(entry)
+        _refresh_name_view(entry["name"])
+        if entry.get("callsign"):
+            _callsign_cache[entry["callsign"].upper()] = entry
+
+
+def _index_name(entry: dict) -> None:
+    """Record this MMSI under its name. Caller holds _cache_lock."""
+    name = (entry.get("name") or "").strip().upper()
+    mmsi = str(entry.get("mmsi") or "").strip()
+    if not name or not mmsi:
+        return
+    holders = _name_index.setdefault(name, [])
+    if mmsi not in holders:
+        holders.append(mmsi)
+
+
+# How likely a vessel of this type is to be working Maas Approach. Used only to break ties
+# between ships that share a name, never to exclude anything: a sailing yacht CAN call, it is
+# just the least likely of several candidates at the same place.
+_TYPE_PLAUSIBILITY = {
+    "Tanker": 3, "General cargo": 3, "Container ship": 3, "Bulk carrier": 3,
+    "Cargo ship": 3, "Passenger ship": 3,
+    "Sailing": 1, "Pleasure craft": 1,
+}
+_TYPE_PLAUSIBILITY_DEFAULT = 2
+
+
+def _type_plausibility(type_code) -> int:
+    return _TYPE_PLAUSIBILITY.get(_get_ship_type_name(type_code),
+                                  _TYPE_PLAUSIBILITY_DEFAULT)
+
+
+def _candidate_sort_key(entry: dict, in_scope: set[str]) -> tuple:
+    """Sort key for one candidate; lower sorts first.
+
+    Order: in scope, then nearest Maas Center, then most plausible type, then most recent fix.
+    Proximity outranks type because it discriminates even when every candidate is equally
+    live -- which is the case that actually occurs, with 17 duplicate-name groups
+    simultaneously present in the approach box.
+    """
+    mmsi = str(entry.get("mmsi") or "")
+    out_of_scope = 1 if (in_scope and mmsi not in in_scope) else 0
+
+    lat, lon = entry.get("latitude"), entry.get("longitude")
+    km = _km_from_maas(lat, lon) if lat is not None and lon is not None else float("inf")
+
+    return (out_of_scope, km, -_type_plausibility(entry.get("type")),
+            -entry.get("position_at", 0.0))
+
+
+def candidates_for_name(name: str, in_scope: set[str] | None = None) -> list[dict]:
+    """Every cached vessel carrying exactly this name, best first.
+
+    Exact-name only. Fuzzy matching happens a layer up in match_by_name, which then asks this
+    for the ships behind the name it landed on.
+
+    Reads _mmsi_index directly rather than _fresh_snapshot(), so AIS_MAX_AGE_MIN does not
+    filter here. Deliberate and currently inert: that setting defaults to 0, and the in-scope
+    set is what replaces it -- scope against the last good poll rather than against wall-clock
+    age, which is the distinction a feed outage turns on. The caller still derives its
+    searchable NAMES from _fresh_snapshot(), so the age filter still bounds what can be found.
+
+    `in_scope` defaults to None, meaning "fetch it yourself" (one `get_in_scope()` call, one
+    lock acquisition) -- the original signature. A caller ranking several names in one
+    lookup (match_by_name_candidates) can fetch scope once and pass it down instead of paying
+    a lock acquisition per name.
+    """
+    key = (name or "").strip().upper()
+    if not key:
+        return []
+    if in_scope is None:
+        in_scope = get_in_scope()
+    with _cache_lock:
+        # _name_index is append-only (Task 1): a renamed vessel's old name keeps listing its
+        # MMSI forever. Filtering by the entry's CURRENT name excludes ships that used to
+        # carry this name but no longer do -- otherwise a rename leaves a ghost candidate
+        # here indefinitely, contradicting "every cached vessel carrying exactly this name".
+        entries = [_mmsi_index[m] for m in _name_index.get(key, [])
+                   if m in _mmsi_index and _mmsi_index[m].get("name", "").strip().upper() == key]
+    # sorted() runs after the lock is released, dereferencing dicts the feed thread may be
+    # concurrently mutating. Deliberate, not an oversight: _apply() only ever writes
+    # latitude/longitude together, never leaves one None while the other is set, so the worst
+    # case is one candidate ranked on a fix that finishes updating a moment later -- never a
+    # crash. Locking around the sort too would serialise every lookup behind the feed thread
+    # for no correctness gain.
+    return sorted(entries, key=lambda e: _candidate_sort_key(e, in_scope))
+
+
+def _refresh_name_view(name: str) -> None:
+    """Point _vessel_cache at the best candidate for this name. Caller holds _cache_lock.
+
+    _vessel_cache stays {NAME: entry} rather than becoming {NAME: [entry]}: twenty production
+    call sites and a large number of test fixtures index it that way, and it holds references
+    to the same dicts, so this is an ordering choice and not a second copy of the data.
+
+    Reads _in_scope directly rather than calling get_in_scope() -- this runs inside record(),
+    which already holds _cache_lock, and that lock is not reentrant. Do not "tidy" this into
+    get_in_scope(); that reacquires the lock and deadlocks the feed thread.
+
+    Filters holders down to entries whose CURRENT name still matches `key`, the same fix as
+    candidates_for_name and for the same reason: _name_index is append-only, so a renamed
+    vessel's old name keeps listing its MMSI here forever. Without the filter, a vacated name
+    could stay pointed at the renamed vessel's (now differently-named) entry indefinitely;
+    with it, calling this again for the vacated name lets the genuine holder reclaim it.
+    """
+    key = (name or "").strip().upper()
+    holders = _name_index.get(key, [])
+    entries = [_mmsi_index[m] for m in holders
+               if m in _mmsi_index and _mmsi_index[m].get("name", "").strip().upper() == key]
+    if not entries:
+        return
+    in_scope = set(_in_scope)
+    _vessel_cache[key] = min(entries, key=lambda e: _candidate_sort_key(e, in_scope))
+
+
+def _apply(entry: dict, fields: dict, when: float, source: str, *, stamp_now: bool = False) -> None:
+    """Merge one observation's fields into `entry`, in place.
+
+    Static fields fill or update. Position applies only if this observation is newer than the
+    stored fix -- newest-wins, so a vessel heard two hours ago does not keep a stale fix over
+    a fresh one.
+
+    A static field of "" is treated the same as absent, never written: "" is exactly as
+    uninformative as a missing key for every field record() recognises, and adapters routinely
+    default absent strings to "".
+
+    `last_seen` is stamped from `when` -- the OBSERVATION time -- not from the clock -- UNLESS
+    `stamp_now` is set, in which case it goes through `_now()` instead. The two are
+    value-equivalent whenever `when` is `time.time()` (aisstream's case, `record()` passing no
+    `observed_at`): `fromtimestamp(time.time())` and `_now()`'s `datetime.now()` land on the
+    same wall-clock second either way. But they are not the same CALL, and `_now()` is what the
+    rest of this module -- including a pre-existing test -- patches to control "the current
+    time"; `stamp_now` is what lets that keep working instead of the mock silently doing
+    nothing. AISHub's explicit `observed_at` always leaves `stamp_now` False, since its TIME
+    field is when the position was reported and making last_seen true to that is the whole
+    reason for adopting it.
+
+    LOCAL time, not UTC, and that is not an oversight. _now() used datetime.now() and
+    _is_fresh compares the parsed stamp against a naive local cutoff, so every last_seen in
+    the cache and in the stored conversations is local wall-clock. Writing UTC here would
+    shift new entries two hours away from the old ones and silently break the freshness
+    comparison. parse_time() resolves AISHub's GMT stamp to a true epoch first, so the
+    conversion is correct rather than merely consistent.
+    """
+    applied = False
+    for key in _STATIC_FIELDS:
+        value = fields.get(key)
+        if value is not None and value != "":
+            entry[key] = value
+            applied = True
+
+    if fields.get("latitude") is not None and fields.get("longitude") is not None:
+        if when >= entry.get("position_at", float("-inf")):
+            for key in _POSITION_FIELDS:
+                if key in fields:
+                    entry[key] = fields[key]
+            entry["position_at"] = when
+            applied = True
+
+    if applied:
+        entry["source"] = source
+        entry["last_seen"] = (_now() if stamp_now else
+                               datetime.datetime.fromtimestamp(when).strftime(_LAST_SEEN_FMT))
+
+
 def _process_ais(msg: dict) -> None:
+    """aisstream adapter over record(). Kept thin on purpose: the merge lives in one place."""
     global _last_message_at
     try:
         msg_type = msg.get("MessageType", "")
@@ -407,66 +876,37 @@ def _process_ais(msg: dict) -> None:
         # which is true of any well-formed frame whether or not it names a usable vessel.
         _last_message_at = time.monotonic()
 
-        meta     = msg.get("MetaData", {})
-        mmsi     = str(meta.get("MMSI", "")).strip()
+        meta = msg.get("MetaData", {})
+        mmsi = str(meta.get("MMSI", "")).strip()
         if not mmsi:
             return
 
         if msg_type == "ShipStaticData":
-            ship     = msg.get("Message", {}).get("ShipStaticData", {})
-            name     = (ship.get("Name") or meta.get("ShipName") or "").strip()
-            callsign = ship.get("CallSign", "").strip()
-            if name:
-                dim    = ship.get("Dimension", {})
-                imo    = ship.get("ImoNumber")
-                stype  = ship.get("Type")
-                length = (dim.get("A", 0) + dim.get("B", 0)) or None
-                beam   = (dim.get("C", 0) + dim.get("D", 0)) or None
-                # Draught and destination are what CH01 actually asks about, on nearly every
-                # call: "what is your maximum draught" and where the ship is bound.
-                entry  = {"name": name, "callsign": callsign, "mmsi": mmsi,
-                          "type": stype, "imo": imo, "length": length, "beam": beam,
-                          "draught": ship.get("MaximumStaticDraught"),
-                          "destination": _clean_destination(ship.get("Destination", "")),
-                          "last_seen": _now()}
-                with _cache_lock:
-                    # MERGE, never replace. Static data carries no position, so assigning
-                    # this dict wholesale deleted whatever PositionReport had recorded --
-                    # and static messages repeat every ~6 minutes, so a vessel sitting in
-                    # the box lost its position over and over. Measured before this fix:
-                    # 25% of the vessels in the labelled conversations had no position at
-                    # all, which is the failure that made distance data unusable.
-                    existing = _vessel_cache.get(name.upper())
-                    if existing is not None:
-                        existing.update(entry)
-                        entry = existing
-                    else:
-                        _vessel_cache[name.upper()] = entry
-                    if callsign:
-                        _callsign_cache[callsign.upper()] = entry
+            ship = msg.get("Message", {}).get("ShipStaticData", {})
+            dim  = ship.get("Dimension", {})
+            record({
+                "mmsi": mmsi,
+                "name": (ship.get("Name") or meta.get("ShipName") or "").strip(),
+                "callsign": ship.get("CallSign", "").strip(),
+                "type": ship.get("Type"),
+                "imo": ship.get("ImoNumber"),
+                "length": (dim.get("A", 0) + dim.get("B", 0)) or None,
+                "beam": (dim.get("C", 0) + dim.get("D", 0)) or None,
+                "draught": ship.get("MaximumStaticDraught"),
+                "destination": _clean_destination(ship.get("Destination", "")),
+            }, source="aisstream")
 
         elif msg_type == "PositionReport":
-            name = meta.get("ShipName", "").strip()
-            if name:
-                key = name.upper()
-                pos = msg.get("Message", {}).get("PositionReport", {})
-                lat = pos.get("Latitude")
-                lon = pos.get("Longitude")
-                sog = pos.get("Sog")
-                cog = pos.get("Cog")
-                heading = pos.get("TrueHeading")
-                with _cache_lock:
-                    if key not in _vessel_cache:
-                        _vessel_cache[key] = {"name": name, "callsign": "", "mmsi": mmsi,
-                                              "type": None, "imo": None, "length": None, "beam": None,
-                                              "latitude": lat, "longitude": lon, "sog": sog,
-                                              "cog": cog, "heading": heading,
-                                              "last_seen": _now()}
-                    else:
-                        e = _vessel_cache[key]
-                        e["latitude"] = lat; e["longitude"] = lon
-                        e["sog"] = sog; e["cog"] = cog; e["heading"] = heading
-                        e["last_seen"] = _now()
+            pos = msg.get("Message", {}).get("PositionReport", {})
+            record({
+                "mmsi": mmsi,
+                "name": meta.get("ShipName", "").strip(),
+                "latitude": pos.get("Latitude"),
+                "longitude": pos.get("Longitude"),
+                "sog": pos.get("Sog"),
+                "cog": pos.get("Cog"),
+                "heading": pos.get("TrueHeading"),
+            }, source="aisstream")
     except Exception as exc:
         print(f"[AIS] process error: {exc}", flush=True)
 
@@ -517,8 +957,32 @@ AIS_NAME_FILTER    = os.environ.get("AIS_NAME_FILTER", "on").strip().lower() != 
 AIS_NAME_MIN_SCORE = int(os.environ.get("AIS_NAME_MIN_SCORE", "76"))
 AIS_NAME_MIN_TOKEN = int(os.environ.get("AIS_NAME_MIN_TOKEN", "4"))
 
+# Two cache names within this many points of each other are a tie, not a winner and a loser.
+# Measured: "Delta" scores 83.3 against both DELTA 3 and DELTA D, and one dropped letter puts
+# VOLGA MAERSK and VAGA MAERSK 4.7 apart. 3.0 catches the exact ties and the tightest
+# near-misses without flagging the ordinary 13-point gap of clean speech as contested.
+AIS_NAME_AMBIGUOUS_GAP = float(os.environ.get("AIS_NAME_AMBIGUOUS_GAP", "3.0"))
+
 _NAME_SKIP = {"MV", "MT", "MS", "SV", "SS", "TUG", "MOTOR", "TANKER",
               "BULKER", "VESSEL", "CONTAINER", "MOTORTANKER", "MOTORVESSEL"}
+
+
+def _scored_name_matches(query: str, keys: list[str], cutoff: int) -> list[tuple[str, float]]:
+    """(name, score) for every cache name at or above `cutoff`, best first.
+
+    _best_name_match keeps only the winner, which is what made a tie invisible: it used
+    `score > best[1]`, so an exact draw was settled by list order and reported as an
+    identification. This keeps the runners-up so the caller can see a close call.
+
+    Only ever called with AIS_NAME_FILTER on: match_by_name_candidates routes the off (revert)
+    case straight through _best_name_match instead, because that path must reproduce a single
+    top scorer with no re-ranking -- see the comment on that branch.
+    """
+    hits = rf_process.extract(query, keys, scorer=rf_fuzz.ratio,
+                              limit=None, score_cutoff=cutoff)
+    kept = [(name, score) for name, score, _ in hits
+            if len(name.replace(" ", "")) >= AIS_NAME_MIN_TOKEN or name == query]
+    return sorted(kept, key=lambda pair: -pair[1])
 
 
 def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
@@ -543,27 +1007,123 @@ def _best_name_match(query: str, keys: list[str], cutoff: int) -> str | None:
     return best[0] if best else None
 
 
+def _name_probes(query: str) -> list[str]:
+    """Word-window fallback probes for `query`, longest span first, type words stripped.
+
+    Shared by both branches of match_by_name_candidates so the AIS_NAME_FILTER=off revert
+    retries the same reduced phrases the on-filter path does -- the two must only differ in
+    scoring and cutoff, not in which probes get tried.
+    """
+    words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
+    probes = []
+    for length in range(len(words), 0, -1):
+        for start in range(len(words) - length + 1):
+            probes.append(" ".join(words[start:start + length]))
+    return probes
+
+
 def match_by_name(extracted_name: str) -> dict | None:
+    """The single best vessel for a heard name, or None.
+
+    Unchanged contract for the live path. It is now the head of the candidate ranking rather
+    than the highest fuzzy score, so a tie is settled by presence and proximity instead of by
+    list order.
+    """
+    candidates = match_by_name_candidates(extracted_name)
+    return candidates[0] if candidates else None
+
+
+def match_by_name_candidates(extracted_name: str) -> list[dict]:
+    """Every vessel a heard name plausibly refers to, best first.
+
+    Two sources of ambiguity, and both matter:
+      - several cache NAMES score within AIS_NAME_AMBIGUOUS_GAP of the best ("Delta" against
+        DELTA 3 and DELTA D at 83.3 apiece);
+      - one name carried by several SHIPS (FORTUNA twice, ALBATROS three times).
+
+    Returns [] when nothing matches, and a single-element list when the identification is
+    clear -- so a caller can treat len() > 1 as "contested" without a second rule.
+    """
     if not extracted_name:
-        return None
+        return []
     query = extracted_name.upper()
     keys, cache = _fresh_snapshot()
     if not keys:
-        return None
-    cutoff = AIS_NAME_MIN_SCORE if AIS_NAME_FILTER else 80
-    hit = _best_name_match(query, keys, cutoff)
-    if hit:
-        return cache[hit]
-    words = [w for w in query.split() if w not in _NAME_SKIP and len(w) >= 3]
-    candidates = []
-    for length in range(len(words), 0, -1):
-        for start in range(len(words) - length + 1):
-            candidates.append(" ".join(words[start:start + length]))
-    for candidate in candidates:
-        hit = _best_name_match(candidate, keys, cutoff if AIS_NAME_FILTER else 88)
+        return []
+
+    if not AIS_NAME_FILTER:
+        # A full revert to the pre-ambiguity-detection matcher, not merely to the unguarded
+        # WRatio scorer: single top scorer, no AIS_NAME_AMBIGUOUS_GAP expansion, no
+        # _candidate_sort_key re-ranking. WRatio produces huge exact-score plateaus on the
+        # live cache (one query landed 28 names all at 85.5) -- re-ranking a plateau by
+        # proximity picks a DIFFERENT ship than extractOne's first-in-list winner did, which
+        # would make this switch a close cousin of the original rather than the "restore the
+        # original behaviour exactly" comparison it exists to be. See the AIS_NAME_FILTER
+        # comment above. The word-window fallback keeps its own historical cutoff of 88
+        # (looser matches on a stripped-down phrase were never trusted at the main bar).
+        hit = _best_name_match(query, keys, 80)
         if hit:
-            return cache[hit]
-    return None
+            return [cache[hit]]
+        for probe in _name_probes(query):
+            hit = _best_name_match(probe, keys, 88)
+            if hit:
+                return [cache[hit]]
+        return []
+
+    cutoff = AIS_NAME_MIN_SCORE
+    scored = _scored_name_matches(query, keys, cutoff)
+    if not scored:
+        for probe in _name_probes(query):
+            scored = _scored_name_matches(probe, keys, cutoff)
+            if scored:
+                break
+    if not scored:
+        return []
+
+    best = scored[0][1]
+    names = [name for name, score in scored if best - score <= AIS_NAME_AMBIGUOUS_GAP]
+
+    in_scope = get_in_scope()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name in names:
+        # candidates_for_name reads _mmsi_index/_name_index, which only record() (and, at
+        # startup, _load_cache()/_refresh_name_view() reconstructing what record() already
+        # wrote) populate. It can come back empty for three different reasons, and only two
+        # of them deserve the cache entry as a fallback:
+        #
+        #   never indexed at all -- a vessel cache built by hand (several fixtures pre-dating
+        #   Task 4 write _vessel_cache directly and never touch _name_index), where "never
+        #   indexed" and "not in the cache" are the same thing. Falls back.
+        #
+        #   indexed, but the cache entry is NOT the one _mmsi_index holds for its MMSI --
+        #   i.e. this entry was orphaned when a second entry claimed the same MMSI. On the
+        #   real cache 290 MMSIs carry two entries each (a real vessel plus a 6-bit decode
+        #   artefact), _load_cache seeds last-in-file-wins, and candidates_for_name filters
+        #   holders by CURRENT name, so the orphan is unreachable through the index while
+        #   sitting right there in _vessel_cache. Measured: 309 real cached names -- among
+        #   them REGULIERSGRACHT, KRVE 60, HEKGOLF -- returned None from an EXACT query.
+        #   Falls back, on IDENTITY: the orphan is precisely the entry the index does not
+        #   point at.
+        #
+        #   indexed, and _mmsi_index DOES point at this entry, which has since been renamed
+        #   -- a Task-4 rename ghost. _name_index is append-only (Task 1), so a vacated name
+        #   stays indexed and candidates_for_name correctly refuses it. Does NOT fall back;
+        #   returning cache[name] here would resurrect the renamed ship under its old name.
+        entries = candidates_for_name(name, in_scope)
+        if not entries:
+            orphan = cache[name]
+            if (name not in _name_index
+                    or _mmsi_index.get(str(orphan.get("mmsi") or "")) is not orphan):
+                entries = [orphan]
+        for entry in entries:
+            mmsi = str(entry.get("mmsi") or "")
+            if mmsi:
+                if mmsi in seen:
+                    continue
+                seen.add(mmsi)
+            out.append(entry)
+    return sorted(out, key=lambda e: _candidate_sort_key(e, in_scope))
 
 
 def match_by_callsign(extracted_callsign: str) -> dict | None:
@@ -576,18 +1136,22 @@ def match_by_callsign(extracted_callsign: str) -> dict | None:
 def match_by_mmsi(mmsi: str) -> dict | None:
     """The cached vessel with this MMSI, or None.
 
-    A scan rather than a dict lookup: the cache is keyed by name because that is what every
-    other path searches by, and 7,000-odd entries is nothing next to the fuzzy matching
-    happening either side of this call.
+    Reads _mmsi_index, the one index keyed by the identifier actually being asked for. It
+    used to scan _vessel_cache instead, which was defensible while that dict held every ship;
+    since Task 4 it holds only the single best-ranked entry per NAME, so under AISHub
+    (~9,300 ships across ~7,900 names) roughly 1,400 ships are simply absent from it and an
+    exact-MMSI lookup returned None for them.
+
+    That is not a cosmetic miss: conversations._live_candidates re-resolves a transmission's
+    live_mmsi through here, so a ship positively identified BY MMSI dropped out of the
+    resolver's candidate list, _validate_exchanges then discarded its name as off-list, and
+    the conversation ended unidentified -- the shared-name case (ORION x16) this index exists
+    for, failing on the one lookup that could not be ambiguous.
     """
     if not mmsi:
         return None
-    wanted = str(mmsi)
     with _cache_lock:
-        for entry in _vessel_cache.values():
-            if entry.get("mmsi") == wanted:
-                return entry
-    return None
+        return _mmsi_index.get(str(mmsi))
 
 
 def match_by_callsign_pattern(pattern: str) -> dict | None:
