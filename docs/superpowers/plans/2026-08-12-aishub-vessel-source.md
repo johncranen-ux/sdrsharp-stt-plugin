@@ -14,7 +14,8 @@
 
 - **Run all tests from the `server/` directory:** `python -m pytest tests/ -q`. Baseline is **654 passing** before any change; it must never drop.
 - **No new runtime dependencies.** `server/requirements.txt` stays exactly as it is. Use `urllib.request` from the stdlib, not `requests`. Do **not** add `pyais`.
-- **Never commit the AISHub credential.** It lives in `.env` (already gitignored under the "Secrets — never commit API keys" comment). No key in source, tests, fixtures, docs, or commit messages. This repo already required a `git filter-repo` history rewrite over committed data.
+- **Never commit the AISHub credential.** No key in source, tests, fixtures, docs, or commit messages. This repo already required a `git filter-repo` history rewrite over committed data.
+- **Configuration reaches the proxy through `server/start-all.bat`, not through a `.env` file.** Nothing in the Python loads dotenv — every setting is a plain `os.environ.get`. `AISHUB_USERNAME` is already set there alongside the other keys (the file is gitignored and untracked; verified with `git check-ignore`). For the manually-run scripts in Tasks 3 and 7, export it in the shell for that session — do **not** add a second copy of the secret to a `.env`, and do **not** add a dotenv loader, which would be a new dependency outside this plan's scope.
 - **Never commit real AIS payloads as fixtures.** `ais_cache.json` and vessel data are gitignored under NL Telecommunicatiewet 18.13 / ITU RR 17.3. All fixtures are synthetic and hand-written.
 - **AISHub rate limit is one request per minute**, enforced by them with silent data denial (HTTP 200, `ERROR: true`, no ships). Any code path that calls the API enforces a 60-second floor itself.
 - **Work on branch `feat/aishub-vessel-source`**, which already exists and holds the design commit `67d0174`.
@@ -991,7 +992,7 @@ Expected: **654 passed** plus the new `test_aishub.py` tests.
 
 - [ ] **Step 7: Verify against the live endpoint by hand**
 
-Put `AISHUB_USERNAME` in `server/.env` (create it if absent — it is gitignored). Then from `server/`:
+`AISHUB_USERNAME` is already set in `server/start-all.bat`, but that only applies to a proxy launched by it. For this one-off, export it into your shell first (PowerShell: `$env:AISHUB_USERNAME = "<the key from start-all.bat>"`). Then from `server/`:
 
 ```bash
 python -c "
@@ -1831,8 +1832,12 @@ Add to `docs/user-manual.md`, in the configuration section:
 | `aisstream` | The original aisstream.io websocket. Needs `AISSTREAM_API_KEY`. Dead since 2026-08-05; kept because it was reliable for a long time and may return. |
 | `off` | No vessel enrichment. |
 
-`AISHUB_USERNAME` is the key from AISHub's welcome mail. **Put it in `server/.env`, never in a
-tracked file.**
+`AISHUB_USERNAME` is the key from AISHub's welcome mail. **It goes in `server/start-all.bat`
+alongside the other API keys — that file is gitignored. Never put it in a tracked file.** There
+is no `.env` loader in this project; every setting is read straight from the environment.
+
+Without `AISHUB_USERNAME` the proxy still starts and transcribes; it prints `AIS feed: disabled`
+and runs without vessel enrichment.
 
 Other settings: `AISHUB_BBOX` (`latmin,latmax,lonmin,lonmax`, default `51.0,53.2,2.0,6.0`) and
 `AISHUB_POLL_SEC` (default 900; values under 60 are raised to 60, because AISHub answers a
