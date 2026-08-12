@@ -525,6 +525,7 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
 
             _mmsi_index[mmsi] = entry
             _index_name(entry)
+            _refresh_name_view(entry.get("name", ""))
             if entry.get("callsign"):
                 _callsign_cache[entry["callsign"].upper()] = entry
             return
@@ -553,6 +554,7 @@ def record(fields: dict, *, source: str, observed_at: float | None = None) -> No
         _vessel_cache[entry["name"].upper()] = entry
         _mmsi_index[mmsi] = entry
         _index_name(entry)
+        _refresh_name_view(entry["name"])
         if entry.get("callsign"):
             _callsign_cache[entry["callsign"].upper()] = entry
 
@@ -566,6 +568,81 @@ def _index_name(entry: dict) -> None:
     holders = _name_index.setdefault(name, [])
     if mmsi not in holders:
         holders.append(mmsi)
+
+
+# How likely a vessel of this type is to be working Maas Approach. Used only to break ties
+# between ships that share a name, never to exclude anything: a sailing yacht CAN call, it is
+# just the least likely of several candidates at the same place.
+_TYPE_PLAUSIBILITY = {
+    "Tanker": 3, "General cargo": 3, "Container ship": 3, "Bulk carrier": 3,
+    "Cargo ship": 3, "Passenger ship": 3,
+    "Sailing": 1, "Pleasure craft": 1,
+}
+_TYPE_PLAUSIBILITY_DEFAULT = 2
+
+
+def _type_plausibility(type_code) -> int:
+    return _TYPE_PLAUSIBILITY.get(_get_ship_type_name(type_code),
+                                  _TYPE_PLAUSIBILITY_DEFAULT)
+
+
+def _candidate_sort_key(entry: dict, in_scope: set[str]) -> tuple:
+    """Sort key for one candidate; lower sorts first.
+
+    Order: in scope, then nearest Maas Center, then most plausible type, then most recent fix.
+    Proximity outranks type because it discriminates even when every candidate is equally
+    live -- which is the case that actually occurs, with 17 duplicate-name groups
+    simultaneously present in the approach box.
+    """
+    mmsi = str(entry.get("mmsi") or "")
+    out_of_scope = 1 if (in_scope and mmsi not in in_scope) else 0
+
+    lat, lon = entry.get("latitude"), entry.get("longitude")
+    km = _km_from_maas(lat, lon) if lat is not None and lon is not None else float("inf")
+
+    return (out_of_scope, km, -_type_plausibility(entry.get("type")),
+            -entry.get("position_at", 0.0))
+
+
+def candidates_for_name(name: str) -> list[dict]:
+    """Every cached vessel carrying exactly this name, best first.
+
+    Exact-name only. Fuzzy matching happens a layer up in match_by_name, which then asks this
+    for the ships behind the name it landed on.
+
+    Reads _mmsi_index directly rather than _fresh_snapshot(), so AIS_MAX_AGE_MIN does not
+    filter here. Deliberate and currently inert: that setting defaults to 0, and the in-scope
+    set is what replaces it -- scope against the last good poll rather than against wall-clock
+    age, which is the distinction a feed outage turns on. The caller still derives its
+    searchable NAMES from _fresh_snapshot(), so the age filter still bounds what can be found.
+    """
+    key = (name or "").strip().upper()
+    if not key:
+        return []
+    in_scope = get_in_scope()
+    with _cache_lock:
+        entries = [_mmsi_index[m] for m in _name_index.get(key, []) if m in _mmsi_index]
+    return sorted(entries, key=lambda e: _candidate_sort_key(e, in_scope))
+
+
+def _refresh_name_view(name: str) -> None:
+    """Point _vessel_cache at the best candidate for this name. Caller holds _cache_lock.
+
+    _vessel_cache stays {NAME: entry} rather than becoming {NAME: [entry]}: twenty production
+    call sites and a large number of test fixtures index it that way, and it holds references
+    to the same dicts, so this is an ordering choice and not a second copy of the data.
+
+    Reads _in_scope directly rather than calling get_in_scope() -- this runs inside record(),
+    which already holds _cache_lock, and that lock is not reentrant. Do not "tidy" this into
+    get_in_scope(); that reacquires the lock and deadlocks the feed thread.
+    """
+    key = (name or "").strip().upper()
+    holders = _name_index.get(key, [])
+    entries = [_mmsi_index[m] for m in holders if m in _mmsi_index]
+    if not entries:
+        return
+    in_scope = set(_in_scope)
+    _vessel_cache[key] = min(entries, key=lambda e: _candidate_sort_key(e, in_scope))
 
 
 def _apply(entry: dict, fields: dict, when: float, source: str, *, stamp_now: bool = False) -> None:

@@ -141,6 +141,10 @@ def ais_caches(monkeypatch):
     monkeypatch.setattr(ais, "_mmsi_index", {})
     monkeypatch.setattr(ais, "_pending", {})
     monkeypatch.setattr(ais, "_name_index", {})
+    # Scope is module-global too: leaving a prior test's set() in place would make some
+    # later test's candidates ranking depend on test order, the same reason the caches above
+    # are reset.
+    monkeypatch.setattr(ais, "_in_scope", set())
     # Feed-health state is module-global and its log is rate-limited, so without this a
     # test's output would depend on which tests ran before it.
     monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
@@ -488,6 +492,96 @@ def test_record_flushes_a_pending_position_onto_a_newly_adopted_entry(ais_caches
         "the held position must survive onto the adopted entry")
     assert "244555000" not in ais._pending
     assert ais._name_index["PRE-SEEDED"] == ["244555000"]
+
+
+# ---------------------------------------------------------------------------
+# Name index and candidate ranking
+#
+# A live snapshot of the Maas approach carries ALBATROS three times and the wider box
+# fourteen. _vessel_cache can only hold one entry per name, so _name_index is what keeps
+# them apart, and candidates_for_name() is what ranks them: presence in the last good poll,
+# then distance from Maas Center, then type plausibility, then recency.
+# ---------------------------------------------------------------------------
+
+
+def test_the_name_index_holds_every_ship_that_shares_a_name(ais_caches):
+    for mmsi in ("111", "222", "333"):
+        ais.record({"mmsi": mmsi, "name": "ALBATROS"}, source="test")
+
+    assert ais._name_index["ALBATROS"] == ["111", "222", "333"]
+
+
+def test_the_name_index_does_not_repeat_an_mmsi(ais_caches):
+    ais.record({"mmsi": "111", "name": "ALBATROS"}, source="test")
+    ais.record({"mmsi": "111", "name": "ALBATROS", "latitude": 52.0,
+                "longitude": 4.0}, source="test")
+
+    assert ais._name_index["ALBATROS"] == ["111"]
+
+
+def test_candidates_rank_an_in_scope_vessel_above_one_that_left(ais_caches):
+    ais.record({"mmsi": "gone", "name": "FORTUNA", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "here", "name": "FORTUNA", "latitude": 51.0,
+                "longitude": 3.0, "type": 70}, source="test")
+    ais.set_in_scope({"here"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("FORTUNA")] == ["here", "gone"]
+
+
+def test_candidates_rank_the_nearer_vessel_first(ais_caches):
+    ais.record({"mmsi": "far", "name": "DELTA", "latitude": 51.2,
+                "longitude": 5.8, "type": 70}, source="test")
+    ais.record({"mmsi": "near", "name": "DELTA", "latitude": 52.03,
+                "longitude": 3.89, "type": 70}, source="test")
+    ais.set_in_scope({"far", "near"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("DELTA")] == ["near", "far"]
+
+
+def test_candidates_rank_a_tanker_above_a_yacht_at_the_same_place(ais_caches):
+    ais.record({"mmsi": "yacht", "name": "ZEUS", "latitude": 52.02,
+                "longitude": 3.88, "type": 36}, source="test")
+    ais.record({"mmsi": "tanker", "name": "ZEUS", "latitude": 52.02,
+                "longitude": 3.88, "type": 70}, source="test")
+    ais.set_in_scope({"yacht", "tanker"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("ZEUS")] == ["tanker", "yacht"]
+
+
+def test_candidates_put_a_vessel_with_no_position_last_but_keep_it(ais_caches):
+    ais.record({"mmsi": "nopos", "name": "CONDOR", "type": 70}, source="test")
+    ais.record({"mmsi": "haspos", "name": "CONDOR", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.set_in_scope({"nopos", "haspos"})
+
+    assert [c["mmsi"] for c in ais.candidates_for_name("CONDOR")] == ["haspos", "nopos"]
+
+
+def test_everything_is_in_scope_before_any_poll_has_succeeded(ais_caches):
+    ais.record({"mmsi": "a", "name": "SOLO", "latitude": 52.0,
+                "longitude": 3.9}, source="test")
+
+    assert len(ais.candidates_for_name("SOLO")) == 1
+
+
+def test_candidates_for_an_unknown_name_is_empty(ais_caches):
+    assert ais.candidates_for_name("NO SUCH SHIP") == []
+
+
+def test_record_does_not_deadlock_when_a_scope_is_already_set(ais_caches):
+    """_refresh_name_view runs inside record() while _cache_lock is already held, and reads
+    _in_scope directly rather than calling get_in_scope() for exactly that reason -- that lock
+    is a plain threading.Lock, not reentrant, so acquiring it twice on the same thread would
+    hang forever. This must complete, not merely return the right value."""
+    ais.set_in_scope({"111"})
+
+    ais.record({"mmsi": "111", "name": "ALBATROS", "latitude": 52.0,
+                "longitude": 3.9, "type": 70}, source="test")
+    ais.record({"mmsi": "222", "name": "ALBATROS", "latitude": 51.0,
+                "longitude": 3.0, "type": 70}, source="test")
+
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "111"
 
 
 # ---------------------------------------------------------------------------
