@@ -2343,7 +2343,7 @@ def test_page_links_an_identified_vessel_to_vesselfinder():
         "vessel": "VISTA", "mmsi": "538009952", "confidence": "high",
         "start": "2026-07-31 12:00:00", "end": "2026-07-31 12:00:30", "turns": [],
     }])
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/538009952" '
             'target="_blank" rel="noopener noreferrer">VISTA</a>') in html
 
 
@@ -2375,8 +2375,8 @@ def test_page_cannot_be_broken_out_of_by_a_hostile_mmsi():
     # The href must be exactly the encoded URL, so nothing escaped the attribute. The same
     # value also appears further down as escaped text content, which is separately safe --
     # hence asserting on the anchor specifically rather than on the whole page.
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels'
-            '?name=%22%20onmouseover%3D%22alert%281%29" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/'
+            '%22%20onmouseover%3D%22alert%281%29" '
             'target="_blank" rel="noopener noreferrer">EVIL</a>') in html
 
 
@@ -2399,7 +2399,7 @@ def vessels_log(tmp_path, monkeypatch):
 def test_vessels_log_links_an_identified_vessel(vessels_log):
     proxy._append_vessel_to_log(
         {"vessel": "VISTA", "mmsi": "538009952", "callsign": "V7A5384"}, "Maas Approach, Vista.")
-    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels?name=538009952" '
+    assert ('<a class="vf" href="https://www.vesselfinder.com/vessels/details/538009952" '
             'target="_blank" rel="noopener noreferrer">VISTA</a>') in vessels_log.read_text(
                 encoding="utf-8")
 
@@ -3361,3 +3361,77 @@ def test_an_uncorrected_conversation_shows_no_badge_and_no_marked_text():
     assert 'class="badge fixedcount"' not in html
     assert 'class="fixed"' not in html
     assert "Maas Approach, motor vision Example Trader." in html
+
+
+def test_the_vesselfinder_link_points_at_the_ship_not_a_search():
+    from stt_proxy import markup
+    link = markup._vessel_link("ORASUND", "244123456")
+    assert "vessels/details/244123456" in link
+    assert "?name=" not in link
+
+
+def test_a_contested_row_lists_its_candidates():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "DELTA 3", "mmsi": "d3", "confidence": "low",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Delta calling"}],
+        "candidates": [
+            {"name": "DELTA 3", "mmsi": "111", "type": "Tanker",
+             "km": 4.2, "destination": "NLRTM", "last_seen": "2026-08-12 10:14:00"},
+            {"name": "DELTA D", "mmsi": "222", "type": "General cargo",
+             "km": 31.5, "destination": None, "last_seen": "2026-08-12 10:11:00"},
+        ],
+    }])
+    assert "DELTA 3" in html and "DELTA D" in html
+    assert "vessels/details/111" in html and "vessels/details/222" in html
+    assert "4.2" in html and "31.5" in html
+
+
+def test_an_uncontested_row_shows_no_candidate_block():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "ORASUND", "mmsi": "244123456", "confidence": "high",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Orasund"}],
+    }])
+    assert "candidates" not in html.lower()
+
+
+def test_a_single_candidate_is_not_presented_as_a_choice():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "ORASUND", "mmsi": "111", "confidence": "high",
+        "start": "2026-08-12 10:00:00", "end": "2026-08-12 10:01:00",
+        "channel": "01", "turns": [{"time": "10:00:00", "text": "Orasund"}],
+        "candidates": [{"name": "ORASUND", "mmsi": "111", "type": "Tanker",
+                        "km": 4.2, "destination": "NLRTM",
+                        "last_seen": "2026-08-12 10:14:00"}],
+    }])
+    assert "candidates" not in html.lower()
+
+
+def test_candidate_names_are_escaped():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "X", "mmsi": "1", "confidence": "low",
+        "start": "s", "end": "e", "channel": "01", "turns": [],
+        "candidates": [
+            {"name": "<script>alert(1)</script>", "mmsi": "1", "type": "Tanker",
+             "km": 1.0, "destination": None, "last_seen": "t"},
+            {"name": "OTHER", "mmsi": "2", "type": "Tanker",
+             "km": 2.0, "destination": None, "last_seen": "t"},
+        ],
+    }])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_rows_stored_before_candidates_existed_still_render():
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "OLD ROW", "mmsi": "9", "confidence": "high",
+        "start": "s", "end": "e", "channel": "01",
+        "turns": [{"time": "10:00:00", "text": "hello"}],
+    }])
+    assert "OLD ROW" in html

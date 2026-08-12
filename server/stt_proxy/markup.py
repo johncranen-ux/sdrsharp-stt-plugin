@@ -18,10 +18,14 @@ def _html_escape(text: str) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-# Looked up by MMSI rather than by name, even though the parameter is called "name":
-# vessel names are not unique, and the ones here have been through STT. The MMSI is the
-# thing the AIS match actually established, so it is what resolves to the right ship.
-VESSELFINDER_URL = "https://www.vesselfinder.com/vessels?name={mmsi}"
+# Looked up by MMSI rather than by name, even though a name would read better: vessel names
+# are not unique -- a live snapshot of the Maas approach carries ALBATROS three times -- and
+# the ones here have been through STT. The MMSI is the thing the AIS match actually
+# established, so it is what resolves to the right ship.
+#
+# The details path rather than the search path: this is used where the reader is choosing
+# between candidates, and a search result page makes them choose twice.
+VESSELFINDER_URL = "https://www.vesselfinder.com/vessels/details/{mmsi}"
 
 
 def _vessel_link(vessel: str, mmsi: str | None) -> str:
