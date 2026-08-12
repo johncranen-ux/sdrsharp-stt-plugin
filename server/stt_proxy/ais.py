@@ -460,10 +460,29 @@ _in_scope: set[str] = set()
 
 
 def set_in_scope(mmsis: set[str]) -> None:
-    """Publish the vessels the latest good poll saw. Called only on success."""
+    """Publish the vessels the latest good poll saw, and re-rank every name view against it.
+
+    Called only on success, and (by `aishub.poll_once`) only AFTER that poll has finished
+    writing every vessel -- publishing the new scope is what makes every ranking decision
+    `record()` made during the write loop stale, since each of those used whatever scope was
+    published BEFORE this call (the previous poll's, or none). Rather than wait for some
+    future record() to touch a given name and refresh it incidentally, this re-ranks every
+    known name itself, in the same lock acquisition that publishes the new scope, so
+    _vessel_cache is never observably stale against the scope it should be ranked by. Cost is
+    bounded: _refresh_name_view over ~7,900 names at ~51us each is well under a second,
+    against a 900s poll interval.
+
+    Calls _refresh_name_view directly rather than through record() -- this already holds
+    _cache_lock, and _refresh_name_view's contract (documented on itself) is exactly "caller
+    holds _cache_lock, reads _in_scope directly, never calls get_in_scope()". Do not call
+    get_in_scope() from in here; that reacquires the lock and deadlocks the feed thread the
+    same way a `_refresh_name_view` call from inside `record()` would.
+    """
     global _in_scope
     with _cache_lock:
         _in_scope = set(mmsis)
+        for name in _name_index:
+            _refresh_name_view(name)
 
 
 def get_in_scope() -> set[str]:

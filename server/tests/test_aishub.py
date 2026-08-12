@@ -112,10 +112,9 @@ def test_map_ship_coerces_a_numeric_position_to_float():
 
 def test_poll_once_survives_a_non_numeric_position(monkeypatch):
     """Integration-level companion to the map_ship tests above: without the coercion, this
-    poll would raise TypeError from inside ais._km_from_maas -- reached mid-way through
-    poll_once's write loop, after set_in_scope has already published this poll's scope --
-    which would contradict poll_once's own atomicity guarantee (a failed poll must change
-    nothing). With the fix, the bad position simply becomes an absent one."""
+    poll would raise TypeError from inside ais._km_from_maas, reached mid-way through
+    poll_once's write loop (via _refresh_name_view -> _candidate_sort_key). With the fix, the
+    bad position simply becomes an absent one and the poll completes normally."""
     from stt_proxy import ais
     monkeypatch.setattr(ais, "_vessel_cache", {})
     monkeypatch.setattr(ais, "_callsign_cache", {})
@@ -132,6 +131,53 @@ def test_poll_once_survives_a_non_numeric_position(monkeypatch):
     # key holding None. The point under test is simply that this line is reached without
     # raising.
     assert ais._mmsi_index["244123456"].get("latitude") is None
+
+
+def test_map_ship_maps_a_non_string_name_callsign_and_dest_to_empty():
+    """NAME, CALLSIGN and DEST are unconditionally .strip()ed/.split()ed downstream (in
+    map_ship itself and in _clean_destination), which raises AttributeError on anything that
+    is not already a string. A malformed or future AISHub response is the plausible source --
+    the same defensive posture _coerce_float already takes for LATITUDE/LONGITUDE."""
+    fields = aishub.map_ship({**SHIP, "NAME": ["not", "a", "string"], "CALLSIGN": {"x": 1},
+                               "DEST": 12345})
+    assert fields["name"] == ""
+    assert fields["callsign"] == ""
+    assert fields["destination"] is None
+
+
+def test_map_ship_maps_a_non_numeric_type_to_none():
+    """ais._get_ship_type_name uses this value as an AIS_SHIP_TYPES dict key, reached from
+    _refresh_name_view -> _candidate_sort_key -> _type_plausibility while record() holds
+    _cache_lock. An unhashable TYPE (a list, here) would raise TypeError: unhashable type
+    there -- the mechanism code review found still open after LATITUDE/LONGITUDE were closed."""
+    fields = aishub.map_ship({**SHIP, "TYPE": ["not", "hashable"]})
+    assert fields["type"] is None
+
+
+def test_map_ship_coerces_a_numeric_string_type_to_int():
+    fields = aishub.map_ship({**SHIP, "TYPE": "70"})
+    assert fields["type"] == 70
+    assert isinstance(fields["type"], int)
+
+
+def test_poll_once_survives_an_unhashable_type(monkeypatch):
+    """Integration-level companion, reproducing the exact mechanism the coordinator's finding
+    described: without the TYPE coercion, this poll raises TypeError: unhashable type from
+    inside ais._get_ship_type_name, reached mid-way through poll_once's write loop via
+    _refresh_name_view. With the fix, the bad type simply becomes an absent one."""
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    monkeypatch.setattr(ais, "_in_scope", set())
+
+    bad = {**SHIP, "TYPE": ["not", "hashable"]}
+    count = aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([bad]))
+
+    assert count == 1
+    assert ais._mmsi_index["244123456"]["type"] is None
 
 
 def test_parse_time_reads_the_gmt_stamp():
@@ -292,6 +338,56 @@ def test_a_poll_that_fails_after_parsing_leaves_the_cache_and_the_scope_alone(mo
 
     assert ais._vessel_cache == before_cache
     assert ais.get_in_scope() == before_scope
+
+
+def test_a_record_failure_mid_write_loop_leaves_the_cache_and_the_scope_alone(monkeypatch):
+    """Distinct from both tests above: those fail during VALIDATION (parse_response, or the
+    malformed-element check), entirely before poll_once has called ais.record even once. This
+    fails INSIDE the write loop itself, on the second of two ships -- the case a code-review
+    round found genuinely broken when set_in_scope was (briefly) moved to run BEFORE this
+    loop: with that ordering, the scope would already have been published as {'111', '999'}
+    -- this poll's FULL scope -- while _mmsi_index held only the first ship, the two
+    disagreeing about which poll they describe. ais.record can fail here for real reasons,
+    not just this test's simulation: a non-scalar AISHub TYPE reaches
+    ais._get_ship_type_name (via _refresh_name_view -> _candidate_sort_key ->
+    _type_plausibility) and raises TypeError -- map_ship's coercions do not close every such
+    field. With set_in_scope restored to running AFTER the loop, a mid-loop failure must
+    leave BOTH the cache and the scope exactly where they were before this poll, the same
+    guarantee poll_once's docstring gives the validation-pass failures.
+    """
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    monkeypatch.setattr(ais, "_in_scope", {"PRE_EXISTING"})
+
+    real_record = ais.record
+    calls = {"n": 0}
+
+    def flaky_record(fields, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise TypeError("simulated failure partway through the write loop")
+        real_record(fields, **kwargs)
+
+    monkeypatch.setattr(ais, "record", flaky_record)
+
+    payload = _envelope([SHIP, {**SHIP, "MMSI": 999, "NAME": "SECOND"}])
+    with pytest.raises(TypeError):
+        aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: payload)
+
+    # The write loop itself is not, and was never, atomic across ships: ship 1 is expected to
+    # have been written before ship 2's simulated failure, the same way it always would be if
+    # a real network drop happened mid-poll. That is accepted, not the regression this test
+    # guards. What must hold is that the SCOPE never advances past a poll that didn't finish --
+    # under the (fixed and reverted) ordering where set_in_scope ran before the write loop,
+    # this would already read {'244123456', '999'}, the full scope of a poll that never
+    # actually finished writing.
+    assert "244123456" in ais._mmsi_index
+    assert ais.get_in_scope() == {"PRE_EXISTING"}, (
+        "the scope must not have been published for a poll that never finished")
 
 
 def test_poll_once_converts_a_urlopen_failure_and_changes_nothing(monkeypatch):

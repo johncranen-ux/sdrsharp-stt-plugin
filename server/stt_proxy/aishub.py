@@ -95,18 +95,49 @@ def _dimension(ship: dict, near: str, far: str):
 def _coerce_float(value) -> float | None:
     """A position coordinate as float, or None if it is missing or not numeric.
 
-    `ais.record()` -> `_apply()` -> `ais._km_from_maas()` now runs INSIDE `record()`'s
+    `ais.record()` -> `_apply()` -> `ais._km_from_maas()` runs INSIDE `record()`'s
     `_cache_lock`, called from `_refresh_name_view` -> `_candidate_sort_key`. A non-numeric
-    LATITUDE/LONGITUDE reaching that far would raise TypeError mid-way through poll_once's
-    write loop, leaving the cache partly written with `set_in_scope` already published --
-    exactly the partial-write poll_once's own docstring says cannot happen. Mapping it to
-    None here instead means `ais.record()` treats the position as absent, the same as any
-    other AISHub field it never received.
+    LATITUDE/LONGITUDE reaching that far would raise TypeError partway through poll_once's
+    write loop -- one instance of the general class of failure this, `_coerce_str` and
+    `_coerce_type_code` below all guard against (poll_once's docstring does not claim the
+    write loop is exception-free, only that a failure there cannot corrupt the published
+    scope; closing off the failure at the boundary is still worth doing). Mapping a bad value
+    to None here means `ais.record()` treats the position as absent, the same as any other
+    AISHub field it never received.
     """
     if value is None:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_str(value) -> str:
+    """A text field as itself, or "" if it is missing or not a string.
+
+    NAME, CALLSIGN and DEST are all unconditionally `.strip()`ed or `.split()`ed downstream,
+    which raises AttributeError on anything that is not already a string -- a list or dict
+    from a malformed or future AISHub response, say. "" is what those calls already treat an
+    absent field as, so a non-string one degrades the same way instead of raising.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _coerce_type_code(value) -> int | None:
+    """AIS ship type as an int, or None if it is missing or not coercible.
+
+    `ais._get_ship_type_name` uses this value as an `AIS_SHIP_TYPES` dict key
+    (`AIS_SHIP_TYPES.get(type_code, ...)`), reached from `_refresh_name_view` ->
+    `_candidate_sort_key` -> `_type_plausibility` while `record()` holds `_cache_lock`. An
+    unhashable TYPE (a list or dict) would raise `TypeError: unhashable type` there -- this is
+    the mechanism a code review round found still open after `_coerce_float` closed the same
+    class of bug for LATITUDE/LONGITUDE.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -118,14 +149,14 @@ def map_ship(ship: dict) -> dict | None:
         return None
     return {
         "mmsi": mmsi,
-        "name": (ship.get("NAME") or "").strip(),
-        "callsign": (ship.get("CALLSIGN") or "").strip(),
-        "type": ship.get("TYPE"),
+        "name": _coerce_str(ship.get("NAME")).strip(),
+        "callsign": _coerce_str(ship.get("CALLSIGN")).strip(),
+        "type": _coerce_type_code(ship.get("TYPE")),
         "imo": ship.get("IMO"),
         "length": _dimension(ship, "A", "B"),
         "beam": _dimension(ship, "C", "D"),
         "draught": ship.get("DRAUGHT"),
-        "destination": _clean_destination(ship.get("DEST") or ""),
+        "destination": _clean_destination(_coerce_str(ship.get("DEST"))),
         "latitude": _coerce_float(ship.get("LATITUDE")),
         "longitude": _coerce_float(ship.get("LONGITUDE")),
         "sog": ship.get("SOG"),
@@ -203,14 +234,24 @@ def poll_once(username: str, bbox, fetch=None) -> int:
     in-scope set exactly as they were, the same guarantee the ERROR-flag case already gave.
     Splitting validation from writing is what makes that true rather than merely documented.
 
-    `set_in_scope` runs immediately BEFORE the write loop, not after: `_refresh_name_view`
-    (called from inside every `ais.record()` in the loop) ranks candidates against whatever
-    scope is currently published, so publishing it after the loop would leave every ranking
-    decision made during THIS poll working off the PREVIOUS poll's scope -- self-correcting a
-    poll later, but meaning `_vessel_cache[NAME]` and `candidates_for_name(NAME)[0]` (which
-    reads the now-current scope) could disagree for one whole poll interval. Moving this
-    earlier does not weaken the atomicity guarantee above: validation above still fails, when
-    it fails, before this line is ever reached, so a failed poll still changes nothing.
+    `set_in_scope` runs AFTER the write loop, not before -- a previous version of this
+    function moved it earlier to fix ranking staleness (see `ais.set_in_scope`'s docstring)
+    and that broke a narrower guarantee: `ais.record()` itself can fail partway through the
+    loop (a non-scalar AISHub TYPE reaching `_get_ship_type_name` inside `_refresh_name_view`
+    was one real mechanism -- `map_ship` now coerces TYPE defensively, closing that specific
+    one, but the loop calling into `ais.record()` is not proven exception-free in general, so
+    the guarantee below does not depend on it being so). With scope published first, such a
+    failure would leave `_in_scope` claiming the FULL scope of a poll that never finished
+    writing, while `_mmsi_index` held only the ships processed before the failure -- the two
+    disagreeing about which poll they describe. The write loop itself is NOT atomic across
+    ships and this does not change that: a failure partway through can leave some ships
+    written and others not, same as a real network drop mid-poll always could. What keeping
+    `set_in_scope` last DOES guarantee is that the published scope never gets ahead of what
+    was actually captured -- a failure anywhere in the loop leaves `_in_scope` exactly as it
+    was before this call, describing the last poll that actually completed rather than one
+    that didn't. The staleness `set_in_scope` running late used to cause is now handled
+    inside `set_in_scope` itself, which re-ranks every name view under the same lock that
+    publishes the new scope -- see its docstring.
     """
     ships = parse_response((fetch or _fetch)(build_url(username, bbox)))
 
@@ -225,10 +266,10 @@ def poll_once(username: str, bbox, fetch=None) -> int:
         to_record.append((fields, parse_time(ship.get("TIME", ""))))
         seen.add(fields["mmsi"])
 
-    ais.set_in_scope(seen)
     for fields, observed_at in to_record:
         ais.record(fields, source="aishub", observed_at=observed_at)
 
+    ais.set_in_scope(seen)
     return len(to_record)
 
 
