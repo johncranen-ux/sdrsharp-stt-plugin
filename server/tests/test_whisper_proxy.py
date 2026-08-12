@@ -540,10 +540,16 @@ def test_candidates_rank_the_nearer_vessel_first(ais_caches):
 
 
 def test_candidates_rank_a_tanker_above_a_yacht_at_the_same_place(ais_caches):
-    ais.record({"mmsi": "yacht", "name": "ZEUS", "latitude": 52.02,
-                "longitude": 3.88, "type": 36}, source="test")
+    """The tanker is recorded FIRST here, on purpose: if _type_plausibility's contribution
+    were ever dropped from _candidate_sort_key, recency (-position_at) would take over as
+    the deciding term and rank the yacht -- recorded second, so newer -- ahead of the
+    tanker, flipping this assertion. Recording them the other way around left this test
+    unable to tell a working type term from a broken one, since recency alone already
+    produced the expected order (code review finding)."""
     ais.record({"mmsi": "tanker", "name": "ZEUS", "latitude": 52.02,
                 "longitude": 3.88, "type": 70}, source="test")
+    ais.record({"mmsi": "yacht", "name": "ZEUS", "latitude": 52.02,
+                "longitude": 3.88, "type": 36}, source="test")
     ais.set_in_scope({"yacht", "tanker"})
 
     assert [c["mmsi"] for c in ais.candidates_for_name("ZEUS")] == ["tanker", "yacht"]
@@ -559,14 +565,92 @@ def test_candidates_put_a_vessel_with_no_position_last_but_keep_it(ais_caches):
 
 
 def test_everything_is_in_scope_before_any_poll_has_succeeded(ais_caches):
-    ais.record({"mmsi": "a", "name": "SOLO", "latitude": 52.0,
+    """Two candidates, no set_in_scope call at all -- _in_scope stays the empty set the
+    fixture leaves it at, standing in for "no source has reported yet". Ranking must still
+    produce a sensible order (nearer first) rather than being disturbed by scope."""
+    ais.record({"mmsi": "far", "name": "SOLO", "latitude": 40.0,
+                "longitude": 2.0}, source="test")
+    ais.record({"mmsi": "near", "name": "SOLO", "latitude": 52.0,
                 "longitude": 3.9}, source="test")
 
-    assert len(ais.candidates_for_name("SOLO")) == 1
+    assert [c["mmsi"] for c in ais.candidates_for_name("SOLO")] == ["near", "far"]
+
+
+def test_the_in_scope_term_is_neutral_before_any_poll_has_succeeded(ais_caches):
+    """_candidate_sort_key's `in_scope and mmsi not in in_scope` guard is what makes an
+    empty in_scope mean "treat everyone as in scope" (term = 0) rather than "treat everyone
+    as out of scope" (term = 1). That guard is applied identically to every candidate in a
+    given call -- in_scope does not vary per-candidate -- so shifting the first tuple
+    element by the same constant for every entry can NEVER change a sort's relative order:
+    test_everything_is_in_scope_before_any_poll_has_succeeded above still passes unmodified
+    even with the "in_scope and" guard deleted outright (verified by hand while fixing code
+    review finding MINOR-3). An order comparison genuinely cannot exercise this guard, so
+    this checks the VALUE the guard produces directly, which is the only way it is
+    load-bearing."""
+    entry = {"mmsi": "111", "latitude": 52.0, "longitude": 3.9, "type": 70}
+    assert ais._candidate_sort_key(entry, set())[0] == 0
 
 
 def test_candidates_for_an_unknown_name_is_empty(ais_caches):
     assert ais.candidates_for_name("NO SUCH SHIP") == []
+
+
+def test_candidates_for_name_excludes_a_vessel_that_has_since_been_renamed(ais_caches):
+    """Code-review case: _name_index is append-only (_index_name at ais.py only ever
+    appends, never removes), so a renamed vessel's OLD name keeps listing its MMSI forever --
+    and _refresh_name_view only ever refreshes the entry's NEW name, so nothing revisits the
+    vacated one on its own. 111 stays ORION; 222 starts as ORION and renames to ORION
+    MAERSK. Without filtering by the entry's CURRENT name, candidates_for_name('ORION')
+    would still return 222 -- a ghost whose real name is no longer ORION, directly
+    contradicting this function's own docstring ('every cached vessel carrying exactly this
+    name')."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.0, "longitude": 2.0},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 52.0, "longitude": 3.9},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION MAERSK"}, source="test")
+
+    # _name_index itself stays append-only -- the filtering happens at read time, not here.
+    assert ais._name_index["ORION"] == ["111", "222"]
+    assert [c["mmsi"] for c in ais.candidates_for_name("ORION")] == ["111"]
+
+
+def test_the_vacated_name_can_be_reclaimed_by_its_remaining_holder(ais_caches):
+    """Companion to the test above, for _refresh_name_view / _vessel_cache rather than
+    candidates_for_name: it needs the same current-name filter so that once 111 is the only
+    real ORION left, the next time anything touches "ORION" _vessel_cache reclaims it,
+    rather than staying keyed on 222's now-stale entry object (renamed in place, so its
+    "name" field reads 'ORION MAERSK')."""
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.0, "longitude": 2.0},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION", "latitude": 52.0, "longitude": 3.9},
+               source="test")
+    ais.record({"mmsi": "222", "name": "ORION MAERSK"}, source="test")
+    # Touch 111 again so _refresh_name_view("ORION") runs once more, now that only 111
+    # still carries the name.
+    ais.record({"mmsi": "111", "name": "ORION", "latitude": 50.01, "longitude": 2.01},
+               source="test")
+
+    assert ais._vessel_cache["ORION"]["mmsi"] == "111"
+
+
+def test_the_best_candidate_wins_the_name_key(ais_caches):
+    """Dedicated coverage for record()'s Step 4 wiring (a _refresh_name_view call after
+    each of the two _index_name calls): _vessel_cache[NAME] must hold the best-RANKED
+    candidate, not merely the last one recorded. "mid" is recorded last, so a plain
+    last-write-wins cache (the two _vessel_cache[...] = entry assignments in record(),
+    without _refresh_name_view following them) would leave _vessel_cache pointing at "mid" --
+    this asserts it points at "near" instead, the one actually closest to Maas Center.
+    Previously this composition was covered only incidentally, through a trailing assertion
+    in the deadlock regression test."""
+    ais.record({"mmsi": "far", "name": "ALBATROS", "latitude": 40.0, "longitude": 2.0,
+                "type": 36}, source="test")
+    ais.record({"mmsi": "near", "name": "ALBATROS", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais.record({"mmsi": "mid", "name": "ALBATROS", "latitude": 51.0, "longitude": 3.0,
+                "type": 70}, source="test")
+
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "near"
 
 
 def test_record_does_not_deadlock_when_a_scope_is_already_set(ais_caches):
@@ -582,6 +666,37 @@ def test_record_does_not_deadlock_when_a_scope_is_already_set(ais_caches):
                 "longitude": 3.0, "type": 70}, source="test")
 
     assert ais._vessel_cache["ALBATROS"]["mmsi"] == "111"
+
+
+def test_a_save_load_round_trip_preserves_two_ships_sharing_a_name(ais_caches, tmp_path,
+                                                                     monkeypatch):
+    """_save_cache used to persist from _vessel_cache, which holds only the single
+    best-ranked entry per NAME (Task 4) -- so a restart silently dropped every non-best
+    duplicate, undoing the entire point of _mmsi_index across a restart. Round-trip two
+    ALBATROS through the real save/load functions: both must survive, and _vessel_cache
+    must come back re-ranked (pointing at "near"), not keyed on whichever happened to be
+    written last in the file."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+
+    ais.record({"mmsi": "far", "name": "ALBATROS", "latitude": 40.0, "longitude": 2.0,
+                "type": 36}, source="test")
+    ais.record({"mmsi": "near", "name": "ALBATROS", "latitude": 52.02, "longitude": 3.88,
+                "type": 70}, source="test")
+    ais._save_cache()
+
+    # A real restart starts with every cache empty; reload from the file just written.
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    ais._load_cache()
+
+    assert set(ais._mmsi_index.keys()) == {"far", "near"}, (
+        "both ships must survive the round trip, not just the best-ranked one")
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "near", (
+        "and _vessel_cache must be re-ranked after loading, not last-in-file-wins")
 
 
 # ---------------------------------------------------------------------------

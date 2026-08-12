@@ -85,6 +85,7 @@ def _load_cache() -> None:
     try:
         with open(AIS_CACHE_FILE, "r", encoding="utf-8") as f:
             entries = json.load(f)
+        names = set()
         with _cache_lock:
             for entry in entries:
                 _vessel_cache[entry["name"].upper()] = entry
@@ -93,6 +94,15 @@ def _load_cache() -> None:
                 if entry.get("callsign"):
                     _callsign_cache[entry["callsign"].upper()] = entry
                 _index_name(entry)
+                names.add(entry["name"].strip().upper())
+            # The loop above seeds _vessel_cache last-entry-in-file-wins, same as record()'s
+            # admission branch. Now that every entry AND _mmsi_index are fully loaded, re-pick
+            # the best candidate for each name -- the same seed-then-refresh composition
+            # record() uses, and for the same reason: without this, a reloaded cache stays
+            # keyed on whichever duplicate happened to be written last, not the best-ranked
+            # one, until a poll touches that name again.
+            for name in names:
+                _refresh_name_view(name)
         print(f"[AIS] loaded {len(_vessel_cache)} vessels from cache", flush=True)
     except FileNotFoundError:
         pass
@@ -103,7 +113,18 @@ def _load_cache() -> None:
 def _save_cache() -> None:
     try:
         with _cache_lock:
-            entries = list(_vessel_cache.values())
+            # Persist from _mmsi_index, not _vessel_cache: _vessel_cache holds only the single
+            # best-ranked entry per NAME (Task 4), so saving from it would silently discard
+            # every non-best duplicate on every save -- exactly the ALBATROS x14 problem this
+            # index exists to solve, reintroduced across a restart. _mmsi_index holds every
+            # ship; id()-dedup guards against two MMSI keys ever aliasing the same dict, which
+            # should not happen but would otherwise double an entry in the saved file.
+            seen_ids = set()
+            entries = []
+            for entry in _mmsi_index.values():
+                if id(entry) not in seen_ids:
+                    seen_ids.add(id(entry))
+                    entries.append(entry)
         with open(AIS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(entries, f)
     except Exception as exc:
@@ -621,7 +642,18 @@ def candidates_for_name(name: str) -> list[dict]:
         return []
     in_scope = get_in_scope()
     with _cache_lock:
-        entries = [_mmsi_index[m] for m in _name_index.get(key, []) if m in _mmsi_index]
+        # _name_index is append-only (Task 1): a renamed vessel's old name keeps listing its
+        # MMSI forever. Filtering by the entry's CURRENT name excludes ships that used to
+        # carry this name but no longer do -- otherwise a rename leaves a ghost candidate
+        # here indefinitely, contradicting "every cached vessel carrying exactly this name".
+        entries = [_mmsi_index[m] for m in _name_index.get(key, [])
+                   if m in _mmsi_index and _mmsi_index[m].get("name", "").strip().upper() == key]
+    # sorted() runs after the lock is released, dereferencing dicts the feed thread may be
+    # concurrently mutating. Deliberate, not an oversight: _apply() only ever writes
+    # latitude/longitude together, never leaves one None while the other is set, so the worst
+    # case is one candidate ranked on a fix that finishes updating a moment later -- never a
+    # crash. Locking around the sort too would serialise every lookup behind the feed thread
+    # for no correctness gain.
     return sorted(entries, key=lambda e: _candidate_sort_key(e, in_scope))
 
 
@@ -635,10 +667,17 @@ def _refresh_name_view(name: str) -> None:
     Reads _in_scope directly rather than calling get_in_scope() -- this runs inside record(),
     which already holds _cache_lock, and that lock is not reentrant. Do not "tidy" this into
     get_in_scope(); that reacquires the lock and deadlocks the feed thread.
+
+    Filters holders down to entries whose CURRENT name still matches `key`, the same fix as
+    candidates_for_name and for the same reason: _name_index is append-only, so a renamed
+    vessel's old name keeps listing its MMSI here forever. Without the filter, a vacated name
+    could stay pointed at the renamed vessel's (now differently-named) entry indefinitely;
+    with it, calling this again for the vacated name lets the genuine holder reclaim it.
     """
     key = (name or "").strip().upper()
     holders = _name_index.get(key, [])
-    entries = [_mmsi_index[m] for m in holders if m in _mmsi_index]
+    entries = [_mmsi_index[m] for m in holders
+               if m in _mmsi_index and _mmsi_index[m].get("name", "").strip().upper() == key]
     if not entries:
         return
     in_scope = set(_in_scope)

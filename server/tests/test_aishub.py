@@ -91,6 +91,49 @@ def test_map_ship_strips_ais_destination_padding():
     assert fields["destination"] == "ROTTERDAM"
 
 
+def test_map_ship_maps_a_non_numeric_position_to_none():
+    """ais.record() -> _apply() -> ais._km_from_maas() now runs INSIDE record()'s
+    _cache_lock (reached via _refresh_name_view -> _candidate_sort_key). A non-numeric
+    LATITUDE/LONGITUDE reaching that far raises TypeError mid-write, so map_ship must
+    neutralise it before it ever gets there -- the same way any other absent AISHub field
+    is neutralised to None, not passed through as garbage."""
+    fields = aishub.map_ship({**SHIP, "LATITUDE": "not-a-number", "LONGITUDE": None})
+    assert fields["latitude"] is None
+    assert fields["longitude"] is None
+
+
+def test_map_ship_coerces_a_numeric_position_to_float():
+    fields = aishub.map_ship({**SHIP, "LATITUDE": "52.5", "LONGITUDE": 3})
+    assert fields["latitude"] == 52.5
+    assert fields["longitude"] == 3.0
+    assert isinstance(fields["latitude"], float)
+    assert isinstance(fields["longitude"], float)
+
+
+def test_poll_once_survives_a_non_numeric_position(monkeypatch):
+    """Integration-level companion to the map_ship tests above: without the coercion, this
+    poll would raise TypeError from inside ais._km_from_maas -- reached mid-way through
+    poll_once's write loop, after set_in_scope has already published this poll's scope --
+    which would contradict poll_once's own atomicity guarantee (a failed poll must change
+    nothing). With the fix, the bad position simply becomes an absent one."""
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_in_scope", set())
+
+    bad = {**SHIP, "LATITUDE": "GARBAGE"}
+    count = aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([bad]))
+
+    assert count == 1
+    # _apply() only ever writes latitude/longitude together, so a coerced-to-None latitude
+    # means the position is treated as entirely absent -- no "latitude" key at all, not a
+    # key holding None. The point under test is simply that this line is reached without
+    # raising.
+    assert ais._mmsi_index["244123456"].get("latitude") is None
+
+
 def test_parse_time_reads_the_gmt_stamp():
     # Absolute epoch, so this assertion is timezone-independent.
     assert aishub.parse_time("2026-08-12 10:02:58 GMT") == 1786528978.0
@@ -165,6 +208,32 @@ def test_poll_once_publishes_the_in_scope_set(monkeypatch):
     aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: payload)
 
     assert ais.get_in_scope() == {"244123456", "999"}
+
+
+def test_poll_once_ranks_within_the_same_poll_using_this_polls_scope(monkeypatch):
+    """set_in_scope must run BEFORE the write loop, not after: _refresh_name_view (called
+    from inside every ais.record() during the loop) ranks candidates against whatever scope
+    is CURRENTLY published. If set_in_scope ran after the loop, as it used to, every
+    ranking decision made during this poll would use the PREVIOUS poll's scope -- stale by
+    exactly one interval, and disagreeing with candidates_for_name(), which always reads
+    the current scope via get_in_scope(). Seeds a stale scope of {"111"} left over from a
+    hypothetical earlier poll, then polls two ALBATROS in the SAME response: 111 (far from
+    Maas Center) and 222 (at Maas Center). Both are in THIS poll's scope, so ranking must
+    fall through to proximity and pick 222 -- not 111, which only wins if the stale scope
+    from before this poll is still what's being consulted."""
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
+    monkeypatch.setattr(ais, "_in_scope", {"111"})
+
+    far  = {**SHIP, "MMSI": 111, "NAME": "ALBATROS", "LATITUDE": 40.0, "LONGITUDE": 2.0}
+    near = {**SHIP, "MMSI": 222, "NAME": "ALBATROS", "LATITUDE": 52.02, "LONGITUDE": 3.88}
+    aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([far, near]))
+
+    assert ais._vessel_cache["ALBATROS"]["mmsi"] == "222"
 
 
 def test_a_failed_poll_leaves_the_cache_and_the_scope_alone(monkeypatch):

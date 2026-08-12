@@ -92,6 +92,25 @@ def _dimension(ship: dict, near: str, far: str):
     return total or None
 
 
+def _coerce_float(value) -> float | None:
+    """A position coordinate as float, or None if it is missing or not numeric.
+
+    `ais.record()` -> `_apply()` -> `ais._km_from_maas()` now runs INSIDE `record()`'s
+    `_cache_lock`, called from `_refresh_name_view` -> `_candidate_sort_key`. A non-numeric
+    LATITUDE/LONGITUDE reaching that far would raise TypeError mid-way through poll_once's
+    write loop, leaving the cache partly written with `set_in_scope` already published --
+    exactly the partial-write poll_once's own docstring says cannot happen. Mapping it to
+    None here instead means `ais.record()` treats the position as absent, the same as any
+    other AISHub field it never received.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def map_ship(ship: dict) -> dict | None:
     """One AISHub record as the fields `ais.record()` understands, or None if unusable."""
     mmsi = str(ship.get("MMSI") or "").strip()
@@ -107,8 +126,8 @@ def map_ship(ship: dict) -> dict | None:
         "beam": _dimension(ship, "C", "D"),
         "draught": ship.get("DRAUGHT"),
         "destination": _clean_destination(ship.get("DEST") or ""),
-        "latitude": ship.get("LATITUDE"),
-        "longitude": ship.get("LONGITUDE"),
+        "latitude": _coerce_float(ship.get("LATITUDE")),
+        "longitude": _coerce_float(ship.get("LONGITUDE")),
         "sog": ship.get("SOG"),
         "cog": ship.get("COG"),
         "heading": ship.get("HEADING"),
@@ -183,6 +202,15 @@ def poll_once(username: str, bbox, fetch=None) -> int:
     that its elements are dicts -- therefore raises AisHubError with the cache and the
     in-scope set exactly as they were, the same guarantee the ERROR-flag case already gave.
     Splitting validation from writing is what makes that true rather than merely documented.
+
+    `set_in_scope` runs immediately BEFORE the write loop, not after: `_refresh_name_view`
+    (called from inside every `ais.record()` in the loop) ranks candidates against whatever
+    scope is currently published, so publishing it after the loop would leave every ranking
+    decision made during THIS poll working off the PREVIOUS poll's scope -- self-correcting a
+    poll later, but meaning `_vessel_cache[NAME]` and `candidates_for_name(NAME)[0]` (which
+    reads the now-current scope) could disagree for one whole poll interval. Moving this
+    earlier does not weaken the atomicity guarantee above: validation above still fails, when
+    it fails, before this line is ever reached, so a failed poll still changes nothing.
     """
     ships = parse_response((fetch or _fetch)(build_url(username, bbox)))
 
@@ -197,10 +225,10 @@ def poll_once(username: str, bbox, fetch=None) -> int:
         to_record.append((fields, parse_time(ship.get("TIME", ""))))
         seen.add(fields["mmsi"])
 
+    ais.set_in_scope(seen)
     for fields, observed_at in to_record:
         ais.record(fields, source="aishub", observed_at=observed_at)
 
-    ais.set_in_scope(seen)
     return len(to_record)
 
 
