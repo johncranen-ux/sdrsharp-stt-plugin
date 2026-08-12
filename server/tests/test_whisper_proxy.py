@@ -778,16 +778,36 @@ def test_a_vessel_orphaned_by_a_duplicate_mmsi_is_still_matchable_by_name(ais_ca
     of them returned None from match_by_name on an EXACT query -- REGULIERSGRACHT, KRVE 60,
     HEKGOLF, SANDRA W. among them. Master resolved all of them.
 
-    Why the chain: the garbage entry wins _mmsi_index, so candidates_for_name -- which filters
+    Why the chain: the losing entry wins _mmsi_index, so candidates_for_name -- which filters
     holders by their CURRENT name -- finds no holder still called SPOOKSCHIP and returns [].
     The fallback in match_by_name_candidates was gated on `name not in _name_index`, and the
-    name IS in _name_index (the orphan indexed itself at load), so it declined too."""
+    name IS in _name_index (the orphan indexed itself at load), so it declined too.
+
+    THE FIXTURE CHANGED, THE ASSERTIONS DID NOT. It used to orphan SPOOKSCHIP behind a 6-bit
+    decode artefact ('?!C?2H /8PA7NEH2]5D,'), which was the shape the real cache showed at the
+    time. _load_cache now ranks a repeated MMSI instead of taking the last entry in the file,
+    and an artefact loses that ranking outright -- so an artefact can no longer orphan
+    anything, and this fixture would have stopped reproducing the situation under test rather
+    than stopped failing. The situation itself is very much still real: 39 MMSIs in the live
+    cache carry two entries whose names are BOTH plausible ships (a rename, or one MMSI used
+    by two vessels), e.g. 244660066 -> ['BUTSKOP', 'LA CAMARGUE']. One entry has to lose the
+    index, the loser is still a real ship, and it must still be findable under its own name.
+    That is the same property, on the shape that outlived the artefact.
+
+    The artefact shape keeps its own coverage in
+    test_a_save_does_not_delete_an_entry_orphaned_by_a_duplicate_mmsi above (which still uses
+    it, and still passes) and in the ranking tests below."""
     cache_file = tmp_path / "ais_cache.json"
     monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    # The second entry is the fuller record -- callsign, imo, dimensions, draught and
+    # destination against SPOOKSCHIP's callsign alone -- so it takes the MMSI index and
+    # SPOOKSCHIP is the orphan. Nothing here depends on file order.
     _write_cache(cache_file, [
         {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
          "latitude": 52.0, "longitude": 3.9},
-        {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "", "type": None},
+        {"name": "VLIEGENDE HOLLANDER", "mmsi": "244660257", "callsign": "PB1234",
+         "imo": 9123456, "length": 140, "beam": 22, "draught": 8.1,
+         "destination": "ROTTERDAM", "type": 70},
     ])
 
     _reset_caches(monkeypatch)
@@ -815,6 +835,169 @@ def test_match_by_mmsi_finds_a_ship_that_shares_its_name(ais_caches):
     assert hit is not None and hit["mmsi"] == "222", (
         "the losing half of a name tie is still a real ship with a real MMSI")
     assert ais.match_by_mmsi("999") is None
+
+
+# ---------------------------------------------------------------------------
+# Which entry wins a repeated MMSI at load time
+#
+# Measured on the real 8,672-entry cache: 8,362 distinct MMSIs, 290 of them carrying more
+# than one entry. _load_cache seeded _mmsi_index with a plain assignment, so the last entry
+# in the file won -- and the AIS 6-bit decode artefacts sit later in the file than the real
+# vessels they shadow, so the artefact took the index for 248 of the 290.
+# ---------------------------------------------------------------------------
+
+
+def test_an_artefact_name_is_recognised_by_its_characters_not_by_a_list(ais_caches):
+    """The artefact test has to be mechanical. There is no list of known-bad strings to
+    match against -- the cache accumulates new ones every time a message is decoded at the
+    wrong bit offset -- so what marks them is the 6-bit alphabet's symbol soup leaking into
+    a field that should hold a ship's name."""
+    assert ais._looks_like_ais_artefact("YESSLYNN @@<ZUQ0\\#@,")
+    assert ais._looks_like_ais_artefact("?!C?2H /8PA7NEH2]5D,")
+    assert ais._looks_like_ais_artefact("(5X/] CCH@A5[#@<OE@,")
+    # '@' is the padding character alone, with nothing else wrong -- still padding, and
+    # _clean_destination has split destinations on it for exactly this reason for months.
+    assert ais._looks_like_ais_artefact("CREATE@@@@@5PDP0LC@,")
+    assert ais._looks_like_ais_artefact("ALICE@@@@GS<")
+
+
+def test_a_real_vessel_name_is_not_mistaken_for_an_artefact(ais_caches):
+    """The other direction, and the one with a cost attached: a false positive here would
+    hand a real ship's MMSI to whatever it collided with.
+
+    Every punctuation mark below appears in real names in the live cache and is deliberately
+    absent from _NAME_ARTEFACT_CHARS -- '-' in 298 names, '.' in 61, brackets in 28, and the
+    rest in the handful the character survey turned up (DOC_HUDSON, OH SCRAP!, and
+    'DWAAL IK, WACHT U' are all real vessels)."""
+    for name in ("REGULIERSGRACHT", "KRVE 60", "SANDRA W.", "MSC MARIA PIA",
+                 "FAIRPLAY-63", "VLI-25 CINDY", "DOC_HUDSON", "OH SCRAP!",
+                 "DWAAL IK, WACHT U", "F/B ANNA REBECA 3", "P&O NEDLLOYD",
+                 "SCH63 QUO VADIS", "EILTANK 250 (EX)", "L'ESPERANCE"):
+        assert not ais._looks_like_ais_artefact(name), name
+    assert not ais._looks_like_ais_artefact("")
+    assert not ais._looks_like_ais_artefact(None)
+
+
+def test_an_artefact_loses_the_mmsi_however_full_its_record(ais_caches):
+    """Ordering, not addition: the artefact term outranks the field count rather than being
+    traded off against it. An artefact with every static field populated is still not a ship,
+    so a real vessel with nothing but a name must still beat it. Summing the two terms into
+    one score would get this backwards."""
+    real     = {"name": "REGULIERSGRACHT", "mmsi": "1"}
+    artefact = {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "1", "callsign": "PB1234",
+                "imo": 9123456, "length": 110, "beam": 11, "draught": 3.4,
+                "destination": "ROTTERDAM"}
+    assert ais._entry_rank(real) < ais._entry_rank(artefact)
+
+
+def test_the_fuller_record_wins_a_repeated_mmsi_between_two_real_names(ais_caches):
+    """39 of the 290 collisions carry two names that are both plausible ships (244660066 ->
+    ['BUTSKOP', 'LA CAMARGUE']), where the artefact term cannot separate them. Falling
+    through to how much is actually known about each is what keeps those deterministic."""
+    thin  = {"name": "BUTSKOP", "mmsi": "1", "callsign": "PB1", "type": 70}
+    full  = {"name": "LA CAMARGUE", "mmsi": "1", "callsign": "PB2", "imo": 9123456,
+             "length": 110, "beam": 11, "draught": 3.4, "destination": "ROTTERDAM"}
+    assert ais._entry_rank(full) < ais._entry_rank(thin)
+
+
+def test_a_field_present_but_empty_does_not_count_as_populated(ais_caches):
+    """A length of 0, an imo of 0 and a callsign of "" are missing data wearing a value's
+    clothes -- the aisstream adapter writes `(A + B) or None` for exactly this reason, and
+    adapters routinely default absent strings to "". Counting keys rather than values would
+    make a thin record look complete."""
+    empty = {"name": "A", "callsign": "", "imo": 0, "length": 0, "beam": 0,
+             "draught": 0.0, "destination": ""}
+    bare  = {"name": "B"}
+    assert ais._entry_rank(empty) == ais._entry_rank(bare)
+
+
+def test_a_repeated_mmsi_is_settled_the_same_way_whichever_order_it_is_read(ais_caches,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """The whole defect was that file order decided this. Load the same two entries in both
+    orders: the real vessel must take the index both times."""
+    for order in (0, 1):
+        cache_file = tmp_path / f"ais_cache_{order}.json"
+        monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+        rows = [
+            {"name": "REGULIERSGRACHT", "mmsi": "244660257", "callsign": "PB1234",
+             "type": 70, "latitude": 52.0, "longitude": 3.9},
+            {"name": "?!C?2H /8PA7NEH2]5D,", "mmsi": "244660257", "callsign": "",
+             "type": None},
+        ]
+        _write_cache(cache_file, rows if order == 0 else list(reversed(rows)))
+
+        _reset_caches(monkeypatch)
+        ais._load_cache()
+
+        hit = ais.match_by_mmsi("244660257")
+        assert hit is not None and hit["name"] == "REGULIERSGRACHT", (
+            f"the artefact took the MMSI when the file was in order {order}")
+
+
+def test_an_exact_tie_on_a_repeated_mmsi_keeps_the_first_entry_in_the_file(ais_caches,
+                                                                           tmp_path,
+                                                                           monkeypatch):
+    """Two entries that rank identically still have to resolve to one, and a reload has to
+    reach the same answer every time or the whole pipeline moves under a restart. First in
+    the file wins, which needs _load_cache to replace the incumbent only on a STRICTLY better
+    rank -- `<=` here would silently restore last-in-file-wins for every tie."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "EERSTE", "mmsi": "244000001", "callsign": "PB1", "type": 70},
+        {"name": "TWEEDE", "mmsi": "244000001", "callsign": "PB2", "type": 70},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+    assert ais.match_by_mmsi("244000001")["name"] == "EERSTE"
+
+
+def test_a_name_resolves_to_an_mmsi_that_resolves_back_to_the_same_entry(ais_caches,
+                                                                         tmp_path,
+                                                                         monkeypatch):
+    """The round-trip property, which is what this whole class of bug violates:
+
+        match_by_name(NAME) -> entry -> entry["mmsi"] -> match_by_mmsi(mmsi)
+
+    must land on THE SAME OBJECT. Nothing pinned it before, and that is why the regression
+    went unnoticed -- both lookups answered, plausibly, with different ships.
+
+    Identity rather than equality on purpose. The two indexes hold references to the same
+    dicts by design (_save_cache dedups on id() for that reason), so an == comparison would
+    pass against two entries that merely happen to carry the same fields, and would keep
+    passing if the indexes ever drifted into holding copies.
+
+    The fixture is the real collision SHAPE -- two entries, one MMSI, one of them an
+    artefact-looking name -- built by hand. Measured against the real cache: 310 names failed
+    this before the ranking, all 310 of them returning a different object rather than None."""
+    cache_file = tmp_path / "ais_cache.json"
+    monkeypatch.setattr(ais, "AIS_CACHE_FILE", str(cache_file))
+    _write_cache(cache_file, [
+        {"name": "SPOOKSCHIP", "mmsi": "244660257", "callsign": "PB1234", "type": 70,
+         "latitude": 52.0, "longitude": 3.9},
+        # Later in the file, as the artefacts are in the real one, so last-in-file-wins
+        # would hand it the index.
+        {"name": "SPOOKSCH@@<ZUQ0\\#@,", "mmsi": "244660257", "callsign": "", "type": None},
+        # A second, uncontested ship, so the property is checked somewhere the collision
+        # cannot be what makes it hold.
+        {"name": "ORASUND", "mmsi": "244700001", "callsign": "PB9999", "type": 80,
+         "latitude": 51.9, "longitude": 4.1},
+    ])
+
+    _reset_caches(monkeypatch)
+    ais._load_cache()
+
+    for name in ("SPOOKSCHIP", "ORASUND"):
+        entry = ais.match_by_name(name)
+        assert entry is not None, f"{name} is in the cache and must be matchable by name"
+        assert entry["name"] == name
+        back = ais.match_by_mmsi(entry["mmsi"])
+        assert back is entry, (
+            f"{name} resolved to MMSI {entry['mmsi']}, which resolved back to "
+            f"{back['name'] if back else None!r} -- a name and its own MMSI must not "
+            f"disagree about which ship they mean")
 
 
 # ---------------------------------------------------------------------------

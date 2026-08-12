@@ -89,6 +89,72 @@ _callsign_cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
 
 
+# Characters a real vessel name never contains, and an AIS 6-bit decode artefact routinely
+# does. AIS packs names into a closed 64-symbol alphabet (@ A-Z [ \ ] ^ _ SPACE ! " # $ % &
+# ' ( ) * + , - . / 0-9 : ; < = > ?), so when a message is decoded at the wrong bit offset
+# the result is not mojibake -- it is a plausible-looking string drawn from exactly that
+# alphabet, which is why 'YESSLYNN @@<ZUQ0\#@,' survived every other sanity check and got
+# cached as a ship.
+#
+# This is a DENYLIST rather than an allowlist of permitted characters, deliberately. The
+# alphabet above is closed, so enumerating the symbols that never occur legitimately is
+# complete for anything AIS can produce -- while an allowlist would also flag a name that
+# arrives through some other encoding (AISHub returns UTF-8, so an accented or non-Latin
+# name is possible) and is merely unusual rather than corrupt.
+#
+# Chosen by measurement over the real 8,672-entry cache, splitting names by whether their
+# MMSI carries one entry or several and counting which punctuation appears where. Every
+# symbol below occurs almost exclusively inside strings that are visibly garbage. The
+# characters deliberately left OUT of this set are the ones with real vessels behind them:
+# '-' (298 names), '.' (61), '(' / ')' (28/24), "'" (19), '/' (19), '&' (15), '_'
+# (DOC_HUDSON, NERODIA_), '!' (OH SCRAP!, JOBSKADE!), ',' (DWAAL IK, WACHT U) and '+'.
+#
+# '@' leads the list for the same reason _clean_destination splits on it: it is the null
+# character of the 6-bit alphabet, so it is padding, never content.
+_NAME_ARTEFACT_CHARS = frozenset('@#?\\<>[]$%="^*;:')
+
+
+def _looks_like_ais_artefact(name: str | None) -> bool:
+    """Whether this name looks like a mis-decoded AIS 6-bit string rather than a ship.
+
+    Pure and mechanical -- no vessel name is hardcoded here, and nothing about the real
+    cache file is baked in beyond the character set chosen above.
+    """
+    return any(ch in _NAME_ARTEFACT_CHARS for ch in (name or ""))
+
+
+# The static fields that make an entry worth keeping. `name` and `type` are excluded on
+# purpose: name is what the artefact test above already judges, and type is present on
+# almost everything, so neither separates a full record from a thin one.
+_RANK_STATIC_FIELDS = ("callsign", "imo", "length", "beam", "draught", "destination")
+
+
+def _entry_rank(entry: dict) -> tuple[int, int]:
+    """How good a claim this entry has to BE the vessel for its MMSI. Lower sorts better.
+
+    Pure, so the ranking can be unit-tested without a cache file, and takes no lock -- its
+    only caller holds `_cache_lock` already, and that lock is not reentrant.
+
+    Two terms, in this order:
+
+      1. artefact last. A name carrying the 6-bit alphabet's junk characters is not a ship,
+         and no amount of other data makes it one.
+      2. then the fuller record. Populated is TRUTHY rather than "not None": all six fields
+         are meaningfully falsy when absent -- a length of 0 or an imo of 0 is missing data
+         wearing a value's clothes, and adapters routinely default absent strings to "".
+
+    Note what is NOT here: position, freshness, and scope. Those rank vessels against each
+    other for a lookup (`_candidate_sort_key`), where the question is which of several real
+    ships is being called. This ranks two rows that claim the SAME MMSI, where the question
+    is which one is a real ship at all -- so it must stay a judgement about the record, not
+    about where the vessel is.
+
+    The caller breaks a remaining tie by file order, so a reload is reproducible.
+    """
+    populated = sum(1 for field in _RANK_STATIC_FIELDS if entry.get(field))
+    return (1 if _looks_like_ais_artefact(entry.get("name")) else 0, -populated)
+
+
 def _load_cache() -> None:
     global _vessel_cache, _callsign_cache
     try:
@@ -99,7 +165,23 @@ def _load_cache() -> None:
             for entry in entries:
                 _vessel_cache[entry["name"].upper()] = entry
                 if entry.get("mmsi"):
-                    _mmsi_index[str(entry["mmsi"])] = entry
+                    # NOT last-in-file-wins. 290 MMSIs in the real cache carry two entries --
+                    # a real vessel and an AIS 6-bit decode artefact broadcast under the same
+                    # MMSI -- and the artefact happens to sit later in the file, so plain
+                    # assignment handed it the index in 248 of the 290. That is what made
+                    # match_by_mmsi('244660257') answer '?!C?2H /8PA7NEH2]5D,' instead of
+                    # REGULIERSGRACHT: a REGRESSION, since the scan over _vessel_cache this
+                    # index replaced used to reach the clean entry. It also cost the vessel
+                    # its identification outright -- conversations._resolver_candidates keys
+                    # by MMSI, so the real name was never offered to the resolver at all and
+                    # the conversation ended '[resolve] dropped off-list vessel'.
+                    #
+                    # Strictly-better wins, so an exact tie keeps the FIRST entry in the file
+                    # and a reload is reproducible.
+                    mmsi = str(entry["mmsi"])
+                    incumbent = _mmsi_index.get(mmsi)
+                    if incumbent is None or _entry_rank(entry) < _entry_rank(incumbent):
+                        _mmsi_index[mmsi] = entry
                 if entry.get("callsign"):
                     _callsign_cache[entry["callsign"].upper()] = entry
                 _index_name(entry)
