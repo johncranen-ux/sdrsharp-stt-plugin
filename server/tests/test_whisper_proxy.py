@@ -3427,6 +3427,34 @@ def test_candidate_names_are_escaped():
     assert "&lt;script&gt;" in html
 
 
+def test_candidate_type_destination_and_last_seen_are_escaped():
+    """The name field already has a guard (test_candidate_names_are_escaped); type,
+    destination and last_seen do not, and destination in particular is "the most
+    attacker-controllable field on the feed" per conversations.py's own comment on
+    _format_particulars -- anyone with a transmitter in the Rotterdam box can set it to
+    whatever they like. Each payload is distinct so a leak names which field it came from."""
+    from stt_proxy.conversations import render_conversations_page
+    html = render_conversations_page([{
+        "vessel": "X", "mmsi": "1", "confidence": "low",
+        "start": "s", "end": "e", "channel": "01", "turns": [],
+        "candidates": [
+            {"name": "HOSTILE", "mmsi": "1",
+             "type": "<b>TypeAttack</b>",
+             "km": 1.0,
+             "destination": "<i>DestAttack</i>",
+             "last_seen": "<u>SeenAttack</u>"},
+            {"name": "OTHER", "mmsi": "2", "type": "Tanker",
+             "km": 2.0, "destination": None, "last_seen": "t"},
+        ],
+    }])
+    assert "<b>TypeAttack</b>" not in html
+    assert "<i>DestAttack</i>" not in html
+    assert "<u>SeenAttack</u>" not in html
+    assert "&lt;b&gt;TypeAttack&lt;/b&gt;" in html
+    assert "&lt;i&gt;DestAttack&lt;/i&gt;" in html
+    assert "&lt;u&gt;SeenAttack&lt;/u&gt;" in html
+
+
 def test_rows_stored_before_candidates_existed_still_render():
     from stt_proxy.conversations import render_conversations_page
     html = render_conversations_page([{

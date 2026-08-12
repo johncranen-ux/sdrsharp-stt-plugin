@@ -31,7 +31,7 @@ VESSELFINDER_URL = "https://www.vesselfinder.com/vessels/details/{mmsi}"
 def _vessel_link(vessel: str, mmsi: str | None) -> str:
     """The vessel name, linked to its VesselFinder page when the MMSI is known.
 
-    The MMSI is percent-encoded into the query and then escaped into the attribute -- never
+    The MMSI is percent-encoded into the path and then escaped into the attribute -- never
     interpolated raw. Without an MMSI there is nothing to look up, so the name is returned
     as plain escaped text rather than as a link that would go nowhere useful.
     """
