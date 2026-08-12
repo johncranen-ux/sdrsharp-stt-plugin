@@ -134,6 +134,13 @@ def ais_caches(monkeypatch):
     vessels, callsigns = {}, {}
     monkeypatch.setattr(ais, "_vessel_cache", vessels)
     monkeypatch.setattr(ais, "_callsign_cache", callsigns)
+    # record() indexes by MMSI, and these tests reuse MMSI 1 across many cases. Without
+    # resetting the index too, a later test's `record()` call finds the previous test's
+    # (now-orphaned) entry object still sitting under that MMSI and updates it in place,
+    # leaving the fresh `vessels` dict above empty.
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_name_index", {})
     # Feed-health state is module-global and its log is rate-limited, so without this a
     # test's output would depend on which tests ran before it.
     monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
@@ -362,6 +369,107 @@ def test_a_malformed_message_does_not_raise(ais_caches):
     """The feed is external; a shape change must not kill the websocket thread."""
     ais._process_ais({"MessageType": "PositionReport", "MetaData": {"MMSI": 1},
                         "Message": None})
+
+
+# ---------------------------------------------------------------------------
+# record(): the multi-source merge core
+#
+# One merge point for whatever provider saw the observation, keyed by MMSI so two ships
+# sharing a name (17 duplicate-name groups in a live AISHub snapshot of the Maas approach)
+# stop overwriting each other.
+# ---------------------------------------------------------------------------
+
+def test_record_admits_a_named_vessel_and_indexes_it_by_mmsi(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    ais.record({"mmsi": "244123456", "name": "ORASUND", "callsign": "PBZL",
+                "latitude": 52.0, "longitude": 3.9}, source="test")
+
+    assert "ORASUND" in ais._vessel_cache
+    assert ais._mmsi_index["244123456"]["name"] == "ORASUND"
+    assert ais._callsign_cache["PBZL"]["mmsi"] == "244123456"
+
+
+def test_record_holds_a_position_until_a_name_arrives(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    ais.record({"mmsi": "244000111", "latitude": 51.9, "longitude": 4.0},
+               source="test", observed_at=1000.0)
+    assert ais._vessel_cache == {}
+    assert "244000111" in ais._pending
+
+    ais.record({"mmsi": "244000111", "name": "LATE NAME"},
+               source="test", observed_at=1001.0)
+
+    entry = ais._vessel_cache["LATE NAME"]
+    assert entry["latitude"] == 51.9
+    assert "244000111" not in ais._pending
+
+
+def test_record_does_not_alias_two_ships_that_share_a_name(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    ais.record({"mmsi": "111111111", "name": "ALBATROS"}, source="test")
+    ais.record({"mmsi": "222222222", "name": "ALBATROS"}, source="test")
+
+    assert ais._mmsi_index["111111111"]["mmsi"] == "111111111"
+    assert ais._mmsi_index["222222222"]["mmsi"] == "222222222"
+    assert ais._mmsi_index["111111111"] is not ais._mmsi_index["222222222"]
+
+
+def test_record_keeps_the_newer_position_when_an_older_one_arrives_late(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    ais.record({"mmsi": "244777888", "name": "NEWEST WINS",
+                "latitude": 52.5, "longitude": 4.5}, source="a", observed_at=2000.0)
+    ais.record({"mmsi": "244777888", "latitude": 51.0, "longitude": 3.0},
+               source="b", observed_at=1000.0)
+
+    assert ais._vessel_cache["NEWEST WINS"]["latitude"] == 52.5
+
+
+def test_record_stamps_last_seen_from_the_observation_not_the_clock(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    import datetime as _dt
+    observed = 1786528800.0        # 2026-08-12 10:00:00 UTC
+    ais.record({"mmsi": "244999000", "name": "TIMESTAMPED",
+                "latitude": 52.0, "longitude": 4.0},
+               source="aishub", observed_at=observed)
+
+    # Expectation computed, not hardcoded: last_seen is local wall-clock throughout this
+    # codebase, so a literal would only pass in one timezone.
+    expected = _dt.datetime.fromtimestamp(observed).strftime("%Y-%m-%d %H:%M:%S")
+    assert ais._vessel_cache["TIMESTAMPED"]["last_seen"] == expected
+    assert ais._vessel_cache["TIMESTAMPED"]["last_seen"] != ais._now()
+
+
+def test_record_never_blanks_a_name_with_an_empty_string(monkeypatch):
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+
+    ais.record({"mmsi": "244321000", "name": "KEEPS ITS NAME"}, source="test")
+    ais.record({"mmsi": "244321000", "name": "", "latitude": 52.0,
+                "longitude": 4.0}, source="test")
+
+    assert ais._mmsi_index["244321000"]["name"] == "KEEPS ITS NAME"
 
 
 # ---------------------------------------------------------------------------

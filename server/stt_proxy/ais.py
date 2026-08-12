@@ -15,6 +15,7 @@ lookups return None, and the rest of the pipeline carries on without vessel enri
 import asyncio
 import datetime
 import json
+import math
 import os
 import random
 import re
@@ -87,8 +88,11 @@ def _load_cache() -> None:
         with _cache_lock:
             for entry in entries:
                 _vessel_cache[entry["name"].upper()] = entry
+                if entry.get("mmsi"):
+                    _mmsi_index[str(entry["mmsi"])] = entry
                 if entry.get("callsign"):
                     _callsign_cache[entry["callsign"].upper()] = entry
+                _index_name(entry)
         print(f"[AIS] loaded {len(_vessel_cache)} vessels from cache", flush=True)
     except FileNotFoundError:
         pass
@@ -244,6 +248,21 @@ _LAST_SEEN_FMT = "%Y-%m-%d %H:%M:%S"
 # from further out is not being updated at all and any threshold will exclude it.
 AIS_MAX_AGE_MIN = int(os.environ.get("AIS_MAX_AGE_MIN", "0"))
 
+# Kept here rather than imported from bench_identify: the proxy must not depend on a
+# benchmarking script. Same coordinates as bench_identify._MAAS_CENTER.
+_MAAS_CENTER = (52.02, 3.88)
+
+
+def _km_from_maas(lat: float, lon: float) -> float:
+    lat0, lon0 = _MAAS_CENTER
+    dlat = math.radians(lat - lat0)
+    dlon = math.radians(lon - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(lat))
+         * math.sin(dlon / 2) ** 2)
+    return 6371 * 2 * math.asin(math.sqrt(a))
+
+
 _stale_filter_warned = False
 
 # Seconds of total silence on a connected feed before saying so. 0 disables the check.
@@ -395,7 +414,184 @@ def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
     return list(cache.keys()), cache
 
 
+# Vessels by MMSI -- the only identifier that actually distinguishes two ships. _vessel_cache
+# is keyed by name, and names collide: a live AISHub snapshot of the Maas approach carries 17
+# duplicate-name groups (ALBATROS x3, CORNELIA x3), and the wider box carries 777. Without
+# this index those merge into one entry and take the MMSI of whichever spoke last.
+_mmsi_index: dict[str, dict] = {}
+
+# Observations for vessels not yet admitted, keyed by MMSI and accumulated across messages.
+# Raw AIS splits a vessel across message types -- position without a name, name without a
+# position -- so neither alone can decide admission.
+#
+# Deliberately NOT stored in _vessel_cache under a synthetic "MMSI:244..." key: the fuzzy name
+# matcher iterates those keys, and junk keys would become candidates for matching.
+_pending: dict[str, dict] = {}
+
+# NAME -> the MMSIs of every ship carrying it. _vessel_cache can only hold one entry per name,
+# so this is the only thing that keeps fourteen ALBATROS apart. Ranking them is Task 4's job;
+# this task only has to stop them overwriting each other.
+_name_index: dict[str, list[str]] = {}
+
+_STATIC_FIELDS   = ("name", "callsign", "type", "imo", "length", "beam",
+                    "draught", "destination")
+_POSITION_FIELDS = ("latitude", "longitude", "sog", "cog", "heading")
+
+# Upper bound on _pending. A vessel that never gets a name would otherwise be re-held on every
+# message forever -- the proxy is long-running, so "forever" is real unbounded growth. If this
+# cap is ever hit that is a signal something upstream is wrong, not a reason to raise it.
+# Eviction is oldest-first by the observation's own timestamp, so it stays deterministic under
+# a backdated observed_at the same way position freshness does.
+_PENDING_MAX = 2000
+
+
+def record(fields: dict, *, source: str, observed_at: float | None = None) -> None:
+    """Merge one observation into the vessel cache, whatever provider saw it.
+
+    One implementation on purpose. The merge is where the subtle bugs lived: static messages
+    wholesale-replacing position data left 25% of the vessels in the labelled conversations
+    with no position at all until the MERGE-never-replace fix. Two providers writing the cache
+    through two code paths would be two chances to get that wrong, with only one covered by
+    these tests.
+
+    `observed_at` is a UNIX timestamp for the observation; it defaults to now. Position writes
+    apply only if newer than the stored fix.
+    """
+    mmsi = str(fields.get("mmsi") or "").strip()
+    if not mmsi:
+        return
+    when = time.time() if observed_at is None else observed_at
+
+    def _apply_current(target: dict) -> None:
+        """_apply() for THIS observation, then re-stamp last_seen through _now() when the
+        caller left observed_at unset.
+
+        _apply() always stamps last_seen via fromtimestamp(when), which is value-equivalent
+        to _now() for a live aisstream message (when == time.time() either way) but not the
+        same call -- and _now() is what the rest of this module, including tests, patches to
+        control "the current time". Only the current observation is re-stamped this way; a
+        flushed _pending observation keeps its own recorded time, explicit or not, because
+        it is not "now" regardless of how this call was invoked.
+        """
+        before = target.get("last_seen")
+        _apply(target, fields, when, source)
+        if observed_at is None and target.get("last_seen") != before:
+            target["last_seen"] = _now()
+
+    with _cache_lock:
+        entry = _mmsi_index.get(mmsi)
+        if entry is None:
+            name = (fields.get("name") or "").strip()
+            if name:
+                candidate = _vessel_cache.get(name.upper())
+                # Adopt a name-keyed entry only if its MMSI agrees, or it doesn't have one
+                # yet. Matching on name alone would permanently alias a second vessel's MMSI
+                # onto the first's entry, and "mmsi" is not in _STATIC_FIELDS so nothing would
+                # ever correct it.
+                if candidate is not None and candidate.get("mmsi") in (mmsi, None, ""):
+                    entry = candidate
+
+        if entry is not None:
+            # An observation for this MMSI seen before it was admitted -- held in _pending
+            # because nothing existed to attach it to -- must not be discarded now that
+            # something does. Flushed BEFORE the current observation so the newest-wins
+            # position logic still picks whichever is actually newer.
+            pending = _pending.pop(mmsi, None)
+            if pending is not None:
+                _apply(entry, pending, pending.get("position_at", when),
+                       pending.get("source", source))
+
+            _apply_current(entry)
+            _mmsi_index[mmsi] = entry
+            _index_name(entry)
+            if entry.get("callsign"):
+                _callsign_cache[entry["callsign"].upper()] = entry
+            return
+
+        # Not yet admitted: accumulate until there is a name.
+        held = _pending.setdefault(mmsi, {"mmsi": mmsi})
+        _apply_current(held)
+        held["_touched"] = when
+
+        if len(_pending) > _PENDING_MAX:
+            oldest_mmsi = min(_pending, key=lambda k: _pending[k].get("_touched", 0.0))
+            if oldest_mmsi != mmsi:
+                del _pending[oldest_mmsi]
+
+        if not (held.get("name") or "").strip():
+            return
+
+        entry = _pending.pop(mmsi)
+        entry.pop("_touched", None)
+        entry.setdefault("callsign", "")
+        # Every static field gets a key even when no observation carried a value: consumers
+        # index these directly rather than through .get, the way the pre-record() code always
+        # populated them via a dict literal.
+        for key in ("type", "imo", "length", "beam", "draught", "destination"):
+            entry.setdefault(key, None)
+        _vessel_cache[entry["name"].upper()] = entry
+        _mmsi_index[mmsi] = entry
+        _index_name(entry)
+        if entry.get("callsign"):
+            _callsign_cache[entry["callsign"].upper()] = entry
+
+
+def _index_name(entry: dict) -> None:
+    """Record this MMSI under its name. Caller holds _cache_lock."""
+    name = (entry.get("name") or "").strip().upper()
+    mmsi = str(entry.get("mmsi") or "").strip()
+    if not name or not mmsi:
+        return
+    holders = _name_index.setdefault(name, [])
+    if mmsi not in holders:
+        holders.append(mmsi)
+
+
+def _apply(entry: dict, fields: dict, when: float, source: str) -> None:
+    """Merge one observation's fields into `entry`, in place.
+
+    Static fields fill or update. Position applies only if this observation is newer than the
+    stored fix -- newest-wins, so a vessel heard two hours ago does not keep a stale fix over
+    a fresh one.
+
+    A static field of "" is treated the same as absent, never written: "" is exactly as
+    uninformative as a missing key for every field record() recognises, and adapters routinely
+    default absent strings to "".
+
+    `last_seen` is stamped from `when` -- the OBSERVATION time -- not from the clock. AISHub's
+    TIME field is when the position was reported, and making last_seen true is the whole
+    reason for adopting it. For aisstream nothing changes: its adapter passes time.time(), and
+    fromtimestamp(time.time()) is exactly what _now() produced.
+
+    LOCAL time, not UTC, and that is not an oversight. _now() used datetime.now() and
+    _is_fresh compares the parsed stamp against a naive local cutoff, so every last_seen in
+    the cache and in the stored conversations is local wall-clock. Writing UTC here would
+    shift new entries two hours away from the old ones and silently break the freshness
+    comparison. parse_time() resolves AISHub's GMT stamp to a true epoch first, so the
+    conversion is correct rather than merely consistent.
+    """
+    applied = False
+    for key in _STATIC_FIELDS:
+        value = fields.get(key)
+        if value is not None and value != "":
+            entry[key] = value
+            applied = True
+
+    if fields.get("latitude") is not None and fields.get("longitude") is not None:
+        if when >= entry.get("position_at", float("-inf")):
+            for key in _POSITION_FIELDS:
+                if key in fields:
+                    entry[key] = fields[key]
+            entry["position_at"] = when
+            applied = True
+
+    if applied:
+        entry["source"] = source
+        entry["last_seen"] = datetime.datetime.fromtimestamp(when).strftime(_LAST_SEEN_FMT)
+
+
 def _process_ais(msg: dict) -> None:
+    """aisstream adapter over record(). Kept thin on purpose: the merge lives in one place."""
     global _last_message_at
     try:
         msg_type = msg.get("MessageType", "")
@@ -407,66 +603,37 @@ def _process_ais(msg: dict) -> None:
         # which is true of any well-formed frame whether or not it names a usable vessel.
         _last_message_at = time.monotonic()
 
-        meta     = msg.get("MetaData", {})
-        mmsi     = str(meta.get("MMSI", "")).strip()
+        meta = msg.get("MetaData", {})
+        mmsi = str(meta.get("MMSI", "")).strip()
         if not mmsi:
             return
 
         if msg_type == "ShipStaticData":
-            ship     = msg.get("Message", {}).get("ShipStaticData", {})
-            name     = (ship.get("Name") or meta.get("ShipName") or "").strip()
-            callsign = ship.get("CallSign", "").strip()
-            if name:
-                dim    = ship.get("Dimension", {})
-                imo    = ship.get("ImoNumber")
-                stype  = ship.get("Type")
-                length = (dim.get("A", 0) + dim.get("B", 0)) or None
-                beam   = (dim.get("C", 0) + dim.get("D", 0)) or None
-                # Draught and destination are what CH01 actually asks about, on nearly every
-                # call: "what is your maximum draught" and where the ship is bound.
-                entry  = {"name": name, "callsign": callsign, "mmsi": mmsi,
-                          "type": stype, "imo": imo, "length": length, "beam": beam,
-                          "draught": ship.get("MaximumStaticDraught"),
-                          "destination": _clean_destination(ship.get("Destination", "")),
-                          "last_seen": _now()}
-                with _cache_lock:
-                    # MERGE, never replace. Static data carries no position, so assigning
-                    # this dict wholesale deleted whatever PositionReport had recorded --
-                    # and static messages repeat every ~6 minutes, so a vessel sitting in
-                    # the box lost its position over and over. Measured before this fix:
-                    # 25% of the vessels in the labelled conversations had no position at
-                    # all, which is the failure that made distance data unusable.
-                    existing = _vessel_cache.get(name.upper())
-                    if existing is not None:
-                        existing.update(entry)
-                        entry = existing
-                    else:
-                        _vessel_cache[name.upper()] = entry
-                    if callsign:
-                        _callsign_cache[callsign.upper()] = entry
+            ship = msg.get("Message", {}).get("ShipStaticData", {})
+            dim  = ship.get("Dimension", {})
+            record({
+                "mmsi": mmsi,
+                "name": (ship.get("Name") or meta.get("ShipName") or "").strip(),
+                "callsign": ship.get("CallSign", "").strip(),
+                "type": ship.get("Type"),
+                "imo": ship.get("ImoNumber"),
+                "length": (dim.get("A", 0) + dim.get("B", 0)) or None,
+                "beam": (dim.get("C", 0) + dim.get("D", 0)) or None,
+                "draught": ship.get("MaximumStaticDraught"),
+                "destination": _clean_destination(ship.get("Destination", "")),
+            }, source="aisstream")
 
         elif msg_type == "PositionReport":
-            name = meta.get("ShipName", "").strip()
-            if name:
-                key = name.upper()
-                pos = msg.get("Message", {}).get("PositionReport", {})
-                lat = pos.get("Latitude")
-                lon = pos.get("Longitude")
-                sog = pos.get("Sog")
-                cog = pos.get("Cog")
-                heading = pos.get("TrueHeading")
-                with _cache_lock:
-                    if key not in _vessel_cache:
-                        _vessel_cache[key] = {"name": name, "callsign": "", "mmsi": mmsi,
-                                              "type": None, "imo": None, "length": None, "beam": None,
-                                              "latitude": lat, "longitude": lon, "sog": sog,
-                                              "cog": cog, "heading": heading,
-                                              "last_seen": _now()}
-                    else:
-                        e = _vessel_cache[key]
-                        e["latitude"] = lat; e["longitude"] = lon
-                        e["sog"] = sog; e["cog"] = cog; e["heading"] = heading
-                        e["last_seen"] = _now()
+            pos = msg.get("Message", {}).get("PositionReport", {})
+            record({
+                "mmsi": mmsi,
+                "name": meta.get("ShipName", "").strip(),
+                "latitude": pos.get("Latitude"),
+                "longitude": pos.get("Longitude"),
+                "sog": pos.get("Sog"),
+                "cog": pos.get("Cog"),
+                "heading": pos.get("TrueHeading"),
+            }, source="aisstream")
     except Exception as exc:
         print(f"[AIS] process error: {exc}", flush=True)
 
