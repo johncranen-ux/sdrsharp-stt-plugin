@@ -1,6 +1,9 @@
+import copy
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -192,3 +195,95 @@ def test_the_poll_interval_cannot_be_configured_below_the_rate_limit(monkeypatch
 def test_the_poll_interval_honours_a_legal_setting(monkeypatch):
     monkeypatch.setenv("AISHUB_POLL_SEC", "900")
     assert aishub._resolve_poll_sec() == 900
+
+
+def test_a_poll_that_fails_after_parsing_leaves_the_cache_and_the_scope_alone(monkeypatch):
+    """Distinct from test_a_failed_poll_leaves_the_cache_and_the_scope_alone above: that one
+    raises inside parse_response, BEFORE poll_once has touched any shared state, so it would
+    pass even if poll_once wrote records as it went. This uses a body that parses fine but
+    carries a malformed ship element, so the failure happens partway through poll_once's own
+    loop -- the case that actually exercises "validated and parsed before anything is
+    touched." Uses copy.deepcopy for the before-snapshot because _vessel_cache entries are
+    shared dict references: a shallow copy would not catch an in-place mutation.
+    """
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_in_scope", set())
+
+    aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
+    before_cache = copy.deepcopy(ais._vessel_cache)
+    before_scope = set(ais.get_in_scope())
+
+    malformed = _envelope([{**SHIP, "MMSI": 999, "NAME": "SECOND"}, "not-a-dict"])
+    with pytest.raises(aishub.AisHubError):
+        aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: malformed)
+
+    assert ais._vessel_cache == before_cache
+    assert ais.get_in_scope() == before_scope
+
+
+def test_poll_once_converts_a_urlopen_failure_and_changes_nothing(monkeypatch):
+    """Exercises the real `_fetch`, not a stub -- `_fetch`'s conversion of
+    urllib.error.URLError (and OSError, which HTTPError/BadGzipFile subclass) into
+    AisHubError was previously verified only by inspection.
+    """
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_in_scope", set())
+
+    aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
+    before_cache = copy.deepcopy(ais._vessel_cache)
+    before_scope = set(ais.get_in_scope())
+
+    def _boom(request, timeout=None):
+        raise urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+
+    with pytest.raises(aishub.AisHubError):
+        aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0))
+
+    assert ais._vessel_cache == before_cache
+    assert ais.get_in_scope() == before_scope
+
+
+def test_poll_once_propagates_a_malformed_body_and_changes_nothing(monkeypatch):
+    """The unparseable-body path, previously only exercised against parse_response directly
+    and never end-to-end through poll_once.
+    """
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_vessel_cache", {})
+    monkeypatch.setattr(ais, "_callsign_cache", {})
+    monkeypatch.setattr(ais, "_mmsi_index", {})
+    monkeypatch.setattr(ais, "_pending", {})
+    monkeypatch.setattr(ais, "_in_scope", set())
+
+    aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0), fetch=lambda url: _envelope([SHIP]))
+    before_cache = copy.deepcopy(ais._vessel_cache)
+    before_scope = set(ais.get_in_scope())
+
+    with pytest.raises(aishub.AisHubError):
+        aishub.poll_once("U", (51.0, 53.2, 2.0, 6.0),
+                         fetch=lambda url: b"<html>502 Bad Gateway</html>")
+
+    assert ais._vessel_cache == before_cache
+    assert ais.get_in_scope() == before_scope
+
+
+def test_get_in_scope_returns_a_copy_of_the_set(monkeypatch):
+    """A reviewer mutated get_in_scope to `return _in_scope` with no lock and every existing
+    test still passed -- this pins the copy so that regression cannot recur silently.
+    """
+    from stt_proxy import ais
+    monkeypatch.setattr(ais, "_in_scope", {"1", "2"})
+
+    result = ais.get_in_scope()
+    result.add("3")
+
+    assert ais.get_in_scope() == {"1", "2"}

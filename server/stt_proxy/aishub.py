@@ -177,23 +177,31 @@ def _fetch(url: str) -> bytes:
 def poll_once(username: str, bbox, fetch=None) -> int:
     """One poll. Returns vessels recorded, or raises AisHubError having changed nothing.
 
-    The cache is only touched once the whole response has been validated and parsed, so a
-    failure part-way through cannot leave a half-updated scope set.
+    Every ship in the response is validated and mapped to a (fields, observed_at) pair in a
+    first pass, entirely before the second pass writes anything to the cache. A malformed
+    element anywhere in the list -- `parse_response` checks that `body[1]` is a list but not
+    that its elements are dicts -- therefore raises AisHubError with the cache and the
+    in-scope set exactly as they were, the same guarantee the ERROR-flag case already gave.
+    Splitting validation from writing is what makes that true rather than merely documented.
     """
     ships = parse_response((fetch or _fetch)(build_url(username, bbox)))
 
+    to_record: list[tuple[dict, float | None]] = []
     seen: set[str] = set()
-    recorded = 0
     for ship in ships:
+        if not isinstance(ship, dict):
+            raise AisHubError(f"malformed ship record: {type(ship).__name__}")
         fields = map_ship(ship)
         if fields is None:
             continue
+        to_record.append((fields, parse_time(ship.get("TIME", ""))))
         seen.add(fields["mmsi"])
-        ais.record(fields, source="aishub", observed_at=parse_time(ship.get("TIME", "")))
-        recorded += 1
+
+    for fields, observed_at in to_record:
+        ais.record(fields, source="aishub", observed_at=observed_at)
 
     ais.set_in_scope(seen)
-    return recorded
+    return len(to_record)
 
 
 def poll_loop(username: str) -> None:
