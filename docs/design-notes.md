@@ -213,6 +213,63 @@ shipped prompt even though its overall score is better:
   whichever arm hallucinates it. All nine have since been re-transcribed by ear and
   corrected; the table above is the post-correction measurement.
 
+### A prompt cannot absorb the phrases it is meant to fix (2026-08-17)
+
+The user reported residual errors on standard phraseology — pilot ladder, pilot boarding,
+"stand by zero one, one six", starboard side, "two metres above the waterline" — and asked
+whether anything was left worth doing. Measurement first said: not much. Of 516 error
+operations over the 235 verified English clips of 2026-08-14, **vessel names are 49.6% of all
+errors but only 8.5% of the corpus, while formulaic phrases are 9.9% of errors and 1.7% of the
+corpus.** Perfect phrase handling was therefore worth at most ~1.7 points of pooled WER.
+
+Some of those errors were nonetheless *caused by the shipped prompt*, which writes `portside`
+as one word and pairs "Maas Approach" with "Maas Aanloop" in a single breath. Measured
+consequences: `side`→`portside` ×2, `port`→`portside` ×1, `side`→**`starportside`** ×1 (a blend
+of the spoken "starboard side" with the prompt's spelling), and `approach`→`aanloop` ×6.
+
+`v3_phrases` (in `bench.py`) fixed all of that, with every addition derived from n-gram counts
+over the verified references rather than invented — `"Maas Approach, Maas Approach"` is the most
+common trigram in real traffic (30×), `"pilot boarding time"` 10×, `"stand by zero one"` 9×.
+
+**It still lost, and was rejected.**
+
+| Arm | Pooled WER | Macro | Exact | Δ | 95% CI on Δ | Sign test |
+|---|---|---|---|---|---|---|
+| shipped | **17.14%** | 25.0% | 30.2% | — | — | — |
+| `v3_phrases` | 18.66% | 29.1% | 26.8% | +1.53 | [+0.04%, +3.00%] | 34 better / 51 worse / 150 tied, p=0.082 |
+
+Every targeted substitution improved (`approach`→`aanloop` 6→1, all three `portside` variants
+→0; errors in clips saying "pilot boarding" 55→42, "starboard/port side" 32→20, "above the
+water" 22→14). The regression came from somewhere else entirely:
+
+> **A phrase in the initial prompt can silence a clip whose entire content is that phrase.**
+
+Five clips went newly empty — 0045 `"Understood, proceed, standby two one."` (the shipped
+prompt transcribed it perfectly), 0105, 0163, 0164, 0201 — contributing **+25 of the +46 net
+error words**. All five are 5–7 reference words against a corpus median of 10, and all five
+closely match sentences added to the prompt. This is what made "errors in clips saying channel
+numbers" go 38→57: not hallucinated numbers, silence.
+
+On a channel where much of the traffic is five-word acknowledgements, that caps how much
+phraseology a prompt can usefully absorb — and it is the opposite of the failure mode the
+prompt-echo filter was built for.
+
+The trade runs both ways, which is why the prompt is kept rather than deleted: `v3_phrases`
+also **fixed three of the four empty outputs** the shipped prompt produced (0196, 0238, 0271),
+two of them call-ups carrying a vessel name. Net empties 4 → 6.
+
+Indicated but never run: a v4 keeping only `starboard side` and the doubled call-up, dropping
+the "stand by zero one, one six" sentence that collides with acknowledgement traffic. Expected
+value is low — roughly 11 error words of 516, about 0.3 points.
+
+**Groq determinism, re-measured:** two runs of the identical prompt gave byte-identical text on
+278 of 280 clips (99.3%), consistent with the 242/243 figure above and much better than the
+10-of-61 in the Groq caveat. But **the aggregate WER matching to three decimals was luck**: both
+differing clips happened to be unscored ones carrying no reference. Do not read an identical
+aggregate as proof of determinism. One of the two differences was itself a verbatim prompt echo
+(`"…ETA at the Maas Center buoy one four four five, over."`), the other the classic
+`"U.S. Department of Defense"` hallucination.
+
 ### Finding contaminated ground truth (2026-08-06)
 
 Three screens found all nine, and only the last needed a human:

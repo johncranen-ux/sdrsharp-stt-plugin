@@ -81,12 +81,75 @@ NO_NAMES_PROMPT = (
     "Rotterdam VTS, be advised we are standing by on channel one six, over."
 )
 
+# Candidate v3: the shipped prompt with its standard-phraseology gaps filled, derived from
+# n-gram counts over the 235 verified English clips of 2026-08-14 -- not invented. Still
+# carries NO vessel name, for the reason V2 removed them.
+#
+# Three changes, each with evidence behind it:
+#
+#  1. "portside" -> "starboard side". The shipped prompt writes portside as ONE word, and it
+#     bleeds: measured on 08-14, side->portside x2, port->portside x1, and side->"starportside"
+#     x1 -- that last a blend of the spoken "starboard side" with the prompt's spelling.
+#     "starboard side two metres" is the 8th most common trigram in real traffic; "portside"
+#     never appears in it at all.
+#  2. The doubled call-up. "Maas Approach, Maas Approach" is the single most common trigram in
+#     the corpus (30x); the shipped prompt instead pairs Approach with Aanloop in one breath,
+#     and approach->aanloop x6 plus center->aanloop x1 are the result. Aanloop is KEPT, because
+#     Dutch speakers really do say it and dropping it would only invert the error -- but it is
+#     moved into its own sentence so the two stop being taught as a collocation.
+#  3. Pilot-boarding phraseology, absent from the shipped prompt despite being the commonest
+#     formulaic exchange on the channel: "pilot boarding time" 10x, "stand by zero one" 9x,
+#     "zero one one six" 12x, "two metres above the water" 7x.
+#
+# MEASURED 2026-08-17 AND REJECTED. Kept, like LEGACY_BENCH_PROMPT above, because a rejected
+# prompt that has been deleted cannot have its comparison re-run. Paired A/B on the 235
+# verified English clips of 08-14, both arms back to back through the deployed path:
+#
+#     shipped     pooled 17.14%   macro 25.0%   exact 30.2%
+#     v3_phrases  pooled 18.66%   macro 29.1%   exact 26.8%
+#     delta +1.53 points; bootstrap 95% CI [+0.04%, +3.00%]; sign test 34 better / 51 worse
+#     / 150 tied, p=0.082
+#
+# Every targeted substitution DID improve (approach->aanloop 6->1, side->portside 2->0,
+# port->portside 1->0, side->"starportside" 1->0; errors in clips saying "pilot boarding"
+# 55->42, "starboard/port side" 32->20, "above the water" 22->14). It lost anyway, on one
+# mechanism worth remembering:
+#
+#   A phrase in the initial prompt can SILENCE a clip whose whole content is that phrase.
+#
+# Five clips went newly empty -- 0045 "Understood, proceed, standby two one." (shipped
+# transcribed it perfectly), 0105, 0163, 0164, 0201 -- contributing +25 of the +46 net error
+# words. All five are 5-7 reference words against a corpus median of 10, and all five closely
+# match sentences added here. On a channel where much of the traffic is five-word
+# acknowledgements, that caps how much phraseology a prompt can absorb.
+#
+# The trade runs both ways: this prompt also FIXED three of the four empty outputs the shipped
+# prompt produced (0196, 0238, 0271), two of them call-ups carrying a vessel name. Net 4 -> 6.
+#
+# Indicated but never run: a v4 keeping only "starboard side" and the doubled call-up, dropping
+# the "stand by zero one, one six" sentence that collides with acknowledgement traffic.
+V3_PHRASES_PROMPT = (
+    "Maas Approach, Maas Approach, this is the inbound motortanker, requesting "
+    "permission to enter the Botlek, over. "
+    "Maas Approach, roger, proceed to VHF channel six one, out. "
+    "Rotterdam VTS, be advised we are standing by on channel one six, over. "
+    "Good afternoon sir, did you receive pilot boarding information for your vessel, over. "
+    "Negative, there is no pilot boarding time yet, stand by zero one, one six. "
+    "Pilot Maas, we are outbound from Europoort past the Maasvlakte, pilot ladder "
+    "starboard side, two metres above the waterline, our draught is eleven metres "
+    "twenty, over. "
+    "Maas Approach, my intention is to proceed for East Anchorage, crossing the "
+    "Deepwater route, ETA at the Maas Center buoy one four four five, over. "
+    "Maas Aanloop, understood, shall we change to channel seven seven, over."
+)
+
 # Selectable by name from the command line (bench.py --prompt, bench_stt.py --prompt).
 PROMPTS: dict[str, str] = {
     "shipped": MARITIME_PROMPT,      # what the proxy sends today
     "v1_names": V1_NAMES_PROMPT,     # what it sent until 2026-08-06
     "legacy": LEGACY_BENCH_PROMPT,   # bench.py's drifted copy, older still
     "no_names": NO_NAMES_PROMPT,     # v1 minus the invented name; measured as a wash
+    "v3_phrases": V3_PHRASES_PROMPT, # standard phraseology filled in; MEASURED WORSE, rejected
 }
 
 CONFIGS: dict[str, dict[str, Any]] = {
