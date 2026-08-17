@@ -34,7 +34,10 @@ debug_chunk.wav
 # records -- the same class of leak that put three reference files on the remote.
 ais_cache*.json
 identified_vessels.html
-conversations.json
+# Globbed for the same reason as ais_cache*.json above: the exact name missed dated
+# snapshots. The store holds full transcripts of real traffic, so a snapshot leaks as
+# much as the live file.
+conversations*.json
 # ais_station_count.py output: per-hour MMSI observations from the local receiver, i.e. a
 # record of which vessels were where and when. Unanchored, like the patterns below, because
 # the anchored form is exactly what let three reference files reach the remote.
