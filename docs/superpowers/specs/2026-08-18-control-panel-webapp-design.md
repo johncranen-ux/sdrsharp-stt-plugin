@@ -1,7 +1,7 @@
 # Control panel web app — design
 
-**Status:** revised 2026-08-18 for a networked deployment. Awaiting answers to the open
-questions before an implementation plan.
+**Status:** agreed. Revised twice on 2026-08-18 — first for a networked miniPC deployment,
+then with all six open questions answered. Ready for an implementation plan.
 
 ## History of this document
 
@@ -66,18 +66,16 @@ The move is a **host migration, not a rearchitecture**: the same package, the sa
 if any path, port or working directory is implicit, the migration turns into a debugging
 session.
 
-### The consequence nobody has costed yet: STT
+### STT: cloud, and the local GPU path is kept for others (decided)
 
-The GPU is in *this* PC. A miniPC chosen for low power and silence will not run whisper
-large-v3. `STT_BACKEND` is currently `groq`, so today this is free — but it means the target
-deployment is **committed to cloud STT**, and the local-GPU path becomes unreachable from the
-miniPC unless the whisper server keeps running on this PC and the miniPC points at it over the
-LAN. That is a supported configuration (`WHISPER_BACKEND_PORT` already exists and the backend
-is selected by setting), but it means this PC stays on for transcription, which defeats part of
-the purpose.
+The GPU is in *this* PC and a silent miniPC will not run whisper large-v3. **The target
+deployment uses Groq**, which is already the default and has proven itself in service. That
+severs the miniPC's dependence on this machine entirely — after the move, this PC can be off.
 
-This is flagged as an open question rather than decided, because it changes what "24/7 on a
-silent miniPC" actually buys.
+`STT_BACKEND=whisper_cpp` is **not** removed. It stays a fully supported, tested option for
+anyone running this repository with their own GPU once it is public, and the settings schema
+must present it as a first-class choice rather than a legacy path. What changes is only which
+option *this* deployment uses.
 
 ### The other consequence: SDR# is a desktop application
 
@@ -85,19 +83,25 @@ SDR# is a Windows GUI app, and the plugin runs inside it. It cannot be supervise
 console process can: it needs an interactive desktop session, so `DETACHED_PROCESS` from a
 service running as `LocalSystem` will start a process that never renders and may not work.
 
-Practical resolutions, in the order I would try them:
+**Decided: SDR# is monitored, never managed.** Launching the executable is not enough — the
+receiver only starts when the *play* button is pressed, and the plugin's checkboxes cannot be
+set from outside the GUI. A supervisor that could start the process but not make it receive
+would be worse than nothing: the dashboard would report SDR# "running" while no audio flowed.
 
-1. Run the web app **as a scheduled task at user logon**, with the miniPC set to auto-login.
-   Everything then lives in one interactive session and SDR# behaves normally. Simplest, and
-   the usual answer for unattended Windows SDR boxes.
-2. Run the web app as a **Windows service** and leave SDR# outside its control — started by
-   the same logon task, monitored but not managed.
-3. Do not manage SDR# at all; monitor it only (is the process alive, is the plugin posting
-   chunks).
+So the operator starts SDR# by hand, logging in locally or over RDP. The panel's job is to say
+plainly whether it is *working*, which is a different question from whether it is running.
 
-This is an open question because it decides how much of "start/stop remotely" is actually
-deliverable for SDR# specifically. The proxy, the counter and AIS-catcher are all console
-processes and are unaffected.
+**The health signal is chunk arrival, not process liveness.** The proxy already knows when it
+last received a transmission; that is what distinguishes "SDR# is up and receiving" from "SDR#
+is up with the play button unpressed". The Dashboard shows time-since-last-chunk for exactly
+this reason, and a process-alive check alone would be actively misleading.
+
+**RDP hazard worth recording.** Connecting at a different resolution has previously stranded
+the plugin's floating panel off-screen — the plugin appears checked in the menu with no visible
+frame. Dock the panel rather than leaving it floating. Related: `tasklist` has been observed
+reporting stale entries, so any liveness check uses the equivalent of `Get-Process`.
+
+The proxy, the counter and AIS-catcher are console processes and are fully managed as designed.
 
 ## Section 1 — architecture and process model
 
@@ -105,6 +109,14 @@ A `server/webapp/` package, uvicorn, and a **process registry rather than hardco
 Each managed process declares how to build its command line from config, its working directory,
 pid file, log file, and optionally the port it should be listening on. Proxy, counter and now
 AIS-catcher are the entries.
+
+**Every entry carries an `enabled` flag**, because the counter is expected to become
+unnecessary once the AIS receiver has proven stable. Disabled means "not started, not shown as
+failed" — distinct from stopped, which is a running process the operator turned off. Should the
+counter ever fold into the proxy instead, its output goes to **its own log file**, never
+interleaved with the proxy's; the proxy log is read to answer questions about transcription and
+identification, and per-hour MMSI counts scrolling through it would cost more than the separate
+process does.
 
 Three details drawn from failures this project has already had:
 
@@ -138,25 +150,42 @@ reasoning, why the east edge is 4.25, the rollback lines, the AISHub rate-limit 
 are some of the best documentation in the project and regenerating the batch file would destroy
 them. In the schema they become help text beside the control they explain.
 
-### The inventory is twice what was assumed, and the batch file is the wrong source
+### Scope: the settings `start-all.bat` exposes, and only those (decided)
 
-Counted 2026-08-18:
+The proxy reads **65** distinct environment variables. The panel exposes the **22** that
+`start-all.bat` already names — 12 active `set` lines plus 10 commented-out rollback switches,
+which exist precisely to be turned on and are therefore settable in every sense that matters.
+The remaining 43 stay as code defaults.
 
-| | count |
+| group | settings |
 |---|---|
-| active `set` lines in `start-all.bat` | 12 |
-| commented-out rollback `set` lines | 10 |
-| **distinct env vars actually read by the proxy** | **65** |
-| **read in code but absent from `start-all.bat`** | **45** |
+| Secrets | `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `AISSTREAM_API_KEY`, `AISSTREAM_API_KEY2`, `AISHUB_USERNAME` |
+| STT | `STT_BACKEND`, `GROQ_MODEL`, `WHISPER_BACKEND_PORT` |
+| AIS source | `AIS_SOURCE`, `AISHUB_BBOX`, `AISHUB_POLL_SEC`, `AIS_SILENCE_WARN_SEC` |
+| Identification | `AIS_HINT_FILTER`, `AIS_NAME_FILTER`, `AIS_PARTIAL_CALLSIGN`, `RESOLVER_LIVE_CANDIDATES`, `CONVERSATION_RESOLVER`, `PROMPT_ECHO_FILTER` |
+| Paths and ports | `PROXY_PORT`, plus the new path settings below |
 
-The 45 include `AIS_LIVE_MATCH_MAX_AGE_MIN`, all five `AIS_SUGGEST_*`,
-`AIS_CALLSIGN_SUFFIX_FALLBACK`, `AIS_HINT_MIN_SCORE`, the `WHISPER_VAD_*` group and every
-`CONVERSATION_CORRECT_*` — essentially everything tuned this month. Importing from the batch
-file alone would silently omit them.
+`SCRIPT_DIR` and `PROXY_SCRIPT` are batch-file plumbing, not settings, and are replaced by the
+path settings rather than carried across.
+
+**This makes `start-all.bat` the curated operator surface, which is a useful principle to
+adopt deliberately:** a setting becomes operator-facing by being added to that file, with the
+prose comment explaining it. It keeps one list rather than two, and it means the schema
+inherits the file's documentation instead of competing with it.
+
+It also exposes a gap. The flags shipped on 2026-08-18 — `AIS_LIVE_MATCH_MAX_AGE_MIN`,
+`AIS_CALLSIGN_SUFFIX_FALLBACK`, `AIS_SUGGEST` and its four companions, `AIS_SUGGEST_TIEBREAK` —
+are **absent from `start-all.bat`**, so under this rule they would not appear in the panel. Two
+of them are documented as "the first thing to switch off if identification regresses", which is
+exactly a control an operator wants. Adding them to the batch file as commented rollback lines,
+matching the existing convention, is a small separate change and is listed as a follow-up
+below.
 
 **Two settings carry documented footguns and their descriptions must say so**, because the
 schema is what the operator reads: `WHISPER_PROMPT` (a plugin-side override cost ~11 WER points
 on 2026-08-07) and `AIS_HINT_MIN_SCORE` (relaxing it cost 11 precision points on 2026-08-12).
+Neither is in the exposed 22 — which is itself the safest outcome — but if either is ever
+promoted, it arrives with its history attached.
 
 ### Host-portable by construction (new)
 
@@ -191,18 +220,19 @@ from a network, it is the most sensitive thing in the project.
 
 ### External access: terminate it outside this app
 
-**Recommendation:** for access from outside the LAN, use a private overlay network
-(Tailscale/WireGuard) or an authenticating reverse proxy that terminates TLS, and keep this app
-bound to loopback or the overlay interface. Do not put it directly on the public internet.
+**Decided: Tailscale.** External access is terminated outside this app, on a private overlay
+network. The app is never put directly on the public internet, and there is no public listener
+in it to maintain.
 
-The reasoning is proportion: a home-built auth layer on a box that can execute processes and
-holds five API keys is a much larger security commitment than a hobby control panel warrants,
-and it is one that has to stay correct forever. "Prepare for external access" is therefore
-interpreted as **make nothing assume localhost** — configurable bind, correct cookie flags,
-no mixed content, no hardcoded `127.0.0.1` in the frontend, honour `X-Forwarded-Proto` so it
-sits correctly behind a TLS terminator — rather than *build an internet-facing service*.
+"Prepare for external access" therefore means **make nothing assume localhost**: a configurable
+bind address, correct cookie flags, no mixed content, no hardcoded `127.0.0.1` in the frontend,
+and honouring `X-Forwarded-Proto` so it sits correctly behind a TLS terminator if one is ever
+added. It does not mean building an internet-facing service.
 
-This is an open question, since it is a recommendation rather than an agreed decision.
+**Application auth is still required, and Tailscale does not replace it.** The first topology is
+the home LAN, where every device is already "inside"; and an overlay is network-level access
+control, not a per-request identity. Defence in depth on a box that executes processes is
+cheap here — one password and a session cookie.
 
 ## Section 4 — the UI
 
@@ -210,8 +240,9 @@ Five tabs:
 
 - **Dashboard** — a card per process (state, uptime, pid, port check, start/stop/restart, last
   ~50 log lines), plus a health strip: STT backend, AIS cache size, time since the last AISHub
-  poll, conversations stored, and — new, because the box is now unattended — whether each
-  configured path resolves.
+  poll, conversations stored, whether each configured path resolves, and **time since the last
+  transmission arrived** — the one signal that distinguishes "SDR# is receiving" from "SDR# is
+  open with the play button unpressed" (Section 0).
 - **Conversations** — see Section 5.
 - **Vessels** — the identified-vessels log plus a searchable AIS cache. That search earns its
   keep: "is this vessel in the cache and when was it last seen" came up repeatedly through
@@ -293,31 +324,29 @@ Four phases now, each independently useful and testable.
 Phase 2 must not be rushed. Every failure named in Section 1 — zombie listeners, pid reuse,
 lost console output — is one this project has already had.
 
+## Decisions taken 2026-08-18 (round two)
+
+| question | answer |
+|---|---|
+| miniPC OS | **Windows 11**, same as this PC — the supervisor stays Windows-specific |
+| SDR# | **monitored, never managed**; started by hand, locally or over RDP |
+| STT after the move | **Groq**; `whisper_cpp` kept as a first-class option for others running the repo |
+| external access | **Tailscale**; no public listener in the app, app auth retained regardless |
+| settings scope | **only what `start-all.bat` exposes** — 22, not 65 |
+| the counter | **stays a separate process**, with an `enabled` flag so it can be retired |
+
+## Follow-ups this raises
+
+1. **Add today's flags to `start-all.bat`** as commented rollback lines, matching the existing
+   convention, so they become operator-facing under the curation rule above:
+   `AIS_LIVE_MATCH_MAX_AGE_MIN`, `AIS_CALLSIGN_SUFFIX_FALLBACK`, `AIS_SUGGEST` and companions.
+   Two of them are documented as the first thing to switch off if identification regresses.
+   Small, separate, and worth doing before the schema is written so it is imported rather than
+   retrofitted.
+
+2. **Win11 Pro on the miniPC** is what makes RDP available, and RDP is now the only way to
+   press *play*. Worth confirming before buying — Home does not include the RDP host.
+
 ## Open questions
 
-1. **What OS will the miniPC run?** Assumed Windows, since SDR# and the plugin are Windows
-   .NET. If so the supervisor stays Windows-specific (`DETACHED_PROCESS`, `taskkill`,
-   `netstat`) and that is fine. If anything other than Windows is on the table, say so now —
-   it changes the supervisor, and SDR# itself would have to be reconsidered.
-
-2. **How is SDR# managed?** Auto-login plus a logon-scheduled task (everything in one
-   interactive session, SDR# fully managed) — or is SDR# started independently and only
-   *monitored*? See Section 0. This decides how much of "start/stop remotely" applies to SDR#.
-
-3. **Where does STT run after the move?** Cloud (Groq, current default and the simple answer),
-   or keep whisper.cpp on this PC and have the miniPC reach it over the LAN — which keeps a
-   power-hungry machine running and undercuts the reason for the miniPC. This is the question
-   with the largest practical consequence.
-
-4. **Is the external-access recommendation accepted?** Overlay network or authenticating
-   reverse proxy, with this app never directly public (Section 3) — versus building a
-   public-facing listener in the app itself. My recommendation is the former, strongly.
-
-5. **Does Settings cover all 65 settings** (Advanced group collapsed), or only the ~20 that
-   `start-all.bat` mentions? Carried over from the previous revision, still unanswered. The
-   settings that mattered most this month are precisely the invisible ones.
-
-6. **Does the counter stay a separate process?** `ais_station_count.py` currently polls the AIS
-   station on its own. If AIS-catcher moves onto the same box, is the counter still a distinct
-   managed process, or does it fold into the proxy? Affects the registry's contents, not its
-   shape.
+None outstanding. The design is ready to become an implementation plan.
