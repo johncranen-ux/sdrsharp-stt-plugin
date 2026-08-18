@@ -1,0 +1,336 @@
+/* Night bridge.
+ *
+ * A ship's bridge at night runs its instrument lighting dimmed and warm so it does not ruin
+ * the watchkeeper's night vision. That is the whole direction: a deep hull-blue ground, chart-
+ * paper text, and one warm radio-dial amber reserved for live readings. Navigation-light red
+ * and green appear ONLY where they carry their real meaning -- a process running or failed --
+ * so a coloured dot on this page is always a fact, never decoration.
+ *
+ * Personality comes from treatment rather than a downloaded typeface: engraved silkscreen
+ * legends (uppercase, wide-tracked, small) over system faces. Nothing is fetched from a CDN,
+ * because the machine this runs on may have no internet at all.
+ *
+ * One animation exists: the watch pulse, at the rate of a slow heartbeat, and it stops for
+ * anyone who asked for reduced motion.
+ */
+
+:root {
+  --sea-900: #0b1620;
+  --sea-850: #0f1d28;
+  --sea-800: #12212d;
+  --sea-700: #1c303e;
+  --sea-600: #294454;
+  --chart: #e8e2d2;
+  --fog: #85a0b2;
+  --dial: #e9a13b;
+  --starboard: #35b37e;
+  --port: #e0574a;
+
+  --ui: ui-sans-serif, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+
+  --step: 8px;
+  --radius: 3px;
+}
+
+* { box-sizing: border-box; }
+
+/* An author `display` rule beats the UA stylesheet's [hidden] { display: none }, so .gate's
+ * own `display: grid` kept the sign-in card on screen with the panel stacked below it. Any
+ * element this file gives a display to needs this, and every view here is toggled by [hidden]. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--sea-900);
+  color: var(--chart);
+  font-family: var(--ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Engraved legends: the silkscreen printing beside a real instrument. */
+.legend {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fog);
+  margin: 0;
+}
+
+.prose { color: var(--chart); margin: calc(var(--step) * 1.5) 0; max-width: 46ch; }
+.note { margin: 0; padding: var(--step) calc(var(--step) * 2); font-size: 14px; }
+.note-port { color: var(--port); }
+
+/* -- sign in ------------------------------------------------------------ */
+
+.gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: calc(var(--step) * 3);
+}
+
+.gate-card {
+  width: min(420px, 100%);
+  background: var(--sea-800);
+  border: 1px solid var(--sea-700);
+  border-radius: var(--radius);
+  padding: calc(var(--step) * 4);
+}
+
+.gate-title {
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 4px 0 calc(var(--step) * 3);
+}
+
+.field { display: block; margin-bottom: calc(var(--step) * 2); }
+.field input, .field select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: var(--sea-900);
+  border: 1px solid var(--sea-600);
+  border-radius: var(--radius);
+  color: var(--chart);
+  font: inherit;
+}
+.field-inline { display: inline-block; width: auto; margin-bottom: 0; }
+.field-inline input, .field-inline select { min-width: 180px; }
+
+.command {
+  background: var(--sea-900);
+  border-left: 2px solid var(--dial);
+  padding: var(--step) calc(var(--step) * 1.5);
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow-x: auto;
+}
+
+/* -- controls ----------------------------------------------------------- */
+
+.button {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--sea-600);
+  background: var(--sea-700);
+  color: var(--chart);
+  cursor: pointer;
+}
+.button:hover:not(:disabled) { border-color: var(--fog); }
+.button:disabled { opacity: 0.4; cursor: not-allowed; }
+.button-primary { background: var(--dial); border-color: var(--dial); color: #17110a; font-weight: 600; }
+.button-quiet { background: transparent; }
+
+:focus-visible { outline: 2px solid var(--dial); outline-offset: 2px; }
+
+/* -- top bar ------------------------------------------------------------ */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 3);
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--sea-700);
+  background: var(--sea-850);
+}
+.brand-name { font-size: 18px; letter-spacing: 0.02em; }
+.tabs { display: flex; gap: 4px; margin-left: auto; }
+.tab {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fog);
+  cursor: pointer;
+}
+.tab[aria-selected="true"] { color: var(--chart); border-bottom-color: var(--dial); }
+
+/* -- the watch ---------------------------------------------------------- */
+
+.watch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: calc(var(--step) * 4);
+  padding: calc(var(--step) * 3);
+  border-bottom: 1px solid var(--sea-700);
+  background: linear-gradient(180deg, var(--sea-850), var(--sea-900));
+}
+.watch-main { min-width: 240px; }
+.watch-reading { display: flex; align-items: baseline; gap: 12px; }
+.watch-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 40px;
+  line-height: 1.1;
+  color: var(--dial);
+}
+.watch-note { font-size: 13px; color: var(--fog); }
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  background: var(--fog);
+}
+.dot-live { background: var(--starboard); animation: pulse 2.4s ease-in-out infinite; }
+.dot-stale { background: var(--dial); }
+.dot-down { background: var(--port); }
+.dot-idle { background: var(--sea-600); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(53, 179, 126, 0.5); }
+  50% { opacity: 0.65; box-shadow: 0 0 0 6px rgba(53, 179, 126, 0); }
+}
+
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: calc(var(--step) * 2) calc(var(--step) * 3);
+  flex: 1 1 420px;
+  margin: 0;
+}
+.gauge dt { margin-bottom: 2px; }
+.gauge dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 17px;
+}
+
+/* -- views -------------------------------------------------------------- */
+
+.view { padding: calc(var(--step) * 3); }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: calc(var(--step) * 2);
+}
+
+.card {
+  background: var(--sea-800);
+  border: 1px solid var(--sea-700);
+  border-radius: var(--radius);
+  padding: calc(var(--step) * 2);
+}
+.card-head { display: flex; align-items: center; gap: 10px; }
+.card-name { font-size: 17px; font-weight: 600; margin: 0; }
+.card-state {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.state-running { color: var(--starboard); }
+.state-stopped { color: var(--fog); }
+.state-disabled { color: var(--sea-600); }
+
+.card-note { color: var(--fog); font-size: 13px; margin: 6px 0 var(--step); }
+
+.readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: var(--step);
+  margin: 0 0 calc(var(--step) * 2);
+  padding: var(--step) 0;
+  border-top: 1px solid var(--sea-700);
+  border-bottom: 1px solid var(--sea-700);
+}
+.readout dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+.readout-warn dd { color: var(--port); }
+
+.card-actions { display: flex; gap: var(--step); flex-wrap: wrap; }
+
+.card-log {
+  margin: calc(var(--step) * 2) 0 0;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.paths { margin-top: calc(var(--step) * 4); }
+.path-list { list-style: none; margin: var(--step) 0 0; padding: 0; }
+.path-item {
+  display: flex;
+  gap: var(--step);
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--sea-800);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.path-key { color: var(--fog); min-width: 190px; }
+.path-mark { flex: none; }
+.path-ok .path-mark { color: var(--starboard); }
+.path-bad .path-mark { color: var(--port); }
+.path-bad .path-value { color: var(--port); }
+.path-value { overflow-wrap: anywhere; }
+
+/* -- logs --------------------------------------------------------------- */
+
+.log-controls {
+  display: flex;
+  gap: calc(var(--step) * 2);
+  align-items: end;
+  flex-wrap: wrap;
+  margin-bottom: calc(var(--step) * 2);
+}
+.check { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+
+.log, .card-log {
+  background: var(--sea-850);
+  border: 1px solid var(--sea-700);
+  border-radius: var(--radius);
+  padding: var(--step) calc(var(--step) * 1.5);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.log {
+  height: calc(100vh - 320px);
+  min-height: 240px;
+  overflow: auto;
+  margin: 0;
+}
+.log-empty { color: var(--fog); }
+.log-rotated { color: var(--dial); }
+
+/* -- small screens: "is it still running?" gets asked from a phone ------- */
+
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: var(--step); padding: var(--step) calc(var(--step) * 2); }
+  .tabs { margin-left: 0; order: 3; width: 100%; }
+  .tab { flex: 1; }
+  .watch { padding: calc(var(--step) * 2); gap: calc(var(--step) * 2); }
+  .watch-value { font-size: 32px; }
+  .view { padding: calc(var(--step) * 2); }
+  .cards { grid-template-columns: 1fr; }
+  .card-actions .button { flex: 1; padding: 12px 14px; }
+  .path-key { min-width: 0; }
+  .path-item { flex-wrap: wrap; }
+  .log { height: 50vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-live { animation: none; }
+}

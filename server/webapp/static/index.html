@@ -1,2 +1,94 @@
-<h1>SDR# control panel</h1>
-<p>The interface lands in the next commit.</p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Watch — SDR# control panel</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- Sign in ------------------------------------------------------------- -->
+<main id="login" class="gate" hidden>
+  <form id="login-form" class="gate-card" autocomplete="off">
+    <p class="legend">SDR# control panel</p>
+    <h1 class="gate-title">Watch</h1>
+    <label class="field">
+      <span class="legend">Password</span>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button id="login-button" class="button button-primary" type="submit">Sign in</button>
+    <p id="login-error" class="note note-port" hidden></p>
+  </form>
+
+  <div id="no-password" class="gate-card" hidden>
+    <p class="legend">No password set</p>
+    <h1 class="gate-title">Set one first</h1>
+    <p class="prose">This panel starts processes and holds API keys, so it will not sign
+      anyone in until a password exists. Run this on the machine itself:</p>
+    <pre class="command">cd server
+py -m webapp.set_password</pre>
+    <p class="prose">Then reload this page.</p>
+  </div>
+</main>
+
+<!-- Panel --------------------------------------------------------------- -->
+<div id="panel" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="legend">SDR# control panel</span>
+      <strong class="brand-name">Watch</strong>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
+      <button class="tab" role="tab" data-tab="logs" aria-selected="false">Logs</button>
+    </nav>
+    <button id="signout" class="button button-quiet" type="button">Sign out</button>
+  </header>
+
+  <p id="banner" class="note note-port" hidden></p>
+
+  <!-- The signature instrument: the one number that says whether audio is arriving. -->
+  <section class="watch" aria-label="Time since the last transmission">
+    <div class="watch-main">
+      <span class="legend">Last transmission</span>
+      <div class="watch-reading">
+        <span id="watch-dot" class="dot dot-idle" aria-hidden="true"></span>
+        <span id="watch-value" class="watch-value">—</span>
+      </div>
+      <span id="watch-note" class="watch-note">waiting for the proxy</span>
+    </div>
+    <dl class="gauges" id="gauges"></dl>
+  </section>
+
+  <main id="dashboard" class="view">
+    <div id="cards" class="cards"></div>
+    <section class="paths">
+      <h2 class="legend">Paths on this machine</h2>
+      <ul id="paths" class="path-list"></ul>
+    </section>
+  </main>
+
+  <main id="logs" class="view" hidden>
+    <div class="log-controls">
+      <label class="field field-inline">
+        <span class="legend">Process</span>
+        <select id="log-process"></select>
+      </label>
+      <label class="field field-inline">
+        <span class="legend">Filter</span>
+        <input id="log-filter" type="search" placeholder="substring">
+      </label>
+      <label class="check">
+        <input id="log-follow" type="checkbox" checked>
+        <span>Follow</span>
+      </label>
+    </div>
+    <pre id="log-view" class="log" tabindex="0"></pre>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
