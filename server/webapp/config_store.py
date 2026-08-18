@@ -21,12 +21,17 @@ class UnknownSetting(ValueError):
     """A key that is not in the catalogue. The catalogue is the whole surface."""
 
 
-def load(path: Path) -> dict[str, str]:
-    """Every catalogue key, stored value where there is one, default otherwise.
+class ConfigUnreadable(RuntimeError):
+    """config.json exists but could not be parsed. Refused, never overwritten by save()."""
 
-    Complete by construction so a caller building an environment never has to ask whether a
-    key exists. Unknown keys already in the file are ignored rather than raising: a config
-    written by a newer version must not stop an older one from starting.
+
+def _read_stored(path: Path) -> tuple[dict[str, str], bool]:
+    """(raw stored values, whether the file was readable).
+
+    Readable is False only when the file EXISTS and could not be parsed -- a missing file is
+    a clean empty start, not a failure. save() needs this distinction: merging over the
+    defaults that load() substitutes for an unparseable file would write those defaults
+    permanently, destroying every value the caller did not send.
     """
     stored: dict[str, str] = {}
     try:
@@ -37,13 +42,20 @@ def load(path: Path) -> dict[str, str]:
         pass
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming explicitly.
-        # A config.json that is not valid UTF-8 must fall back to defaults like any other
-        # unreadable file -- crashing here would take the whole server down at startup.
         # Name the path and the exception CLASS only -- exc's message can echo file content,
         # which may be a secret.
         print(f"[config] could not read {path} ({type(exc).__name__}); using defaults",
               file=sys.stderr)
+        return {}, False
+    return stored, True
 
+
+def _validated(stored: dict[str, str], path: Path) -> dict[str, str]:
+    """Every catalogue key: stored value where it validates, default otherwise.
+
+    Shared by load() (over a possibly-empty `stored`, when the file was unreadable) and
+    save() (over `stored` from a file already confirmed readable) so the two never drift.
+    """
     out: dict[str, str] = {}
     for spec in SETTINGS:
         if spec.key not in stored:
@@ -59,6 +71,19 @@ def load(path: Path) -> dict[str, str]:
     return out
 
 
+def load(path: Path) -> dict[str, str]:
+    """Every catalogue key, stored value where there is one, default otherwise.
+
+    Complete by construction so a caller building an environment never has to ask whether a
+    key exists. Unknown keys already in the file are ignored rather than raising: a config
+    written by a newer version must not stop an older one from starting. A config that fails
+    to parse falls back to defaults like any other unreadable file -- crashing here would take
+    the whole server down at startup. (save() is stricter -- see ConfigUnreadable.)
+    """
+    stored, _readable = _read_stored(path)
+    return _validated(stored, path)
+
+
 def save(path: Path, values: dict[str, str]) -> None:
     """Validate and write atomically. Values MERGE over what is already stored.
 
@@ -70,7 +95,14 @@ def save(path: Path, values: dict[str, str]) -> None:
     if unknown:
         raise UnknownSetting(f"not settings: {', '.join(unknown)}")
 
-    merged = load(path)
+    stored, readable = _read_stored(path)
+    if not readable:
+        raise ConfigUnreadable(
+            f"{path} exists but could not be parsed; refusing to save over it. "
+            f"Fix or delete the file first -- merging would overwrite every setting "
+            f"it still contains.")
+
+    merged = _validated(stored, path)
     for key, value in values.items():
         # A secret rendered as the mask means "unchanged": the browser is handed MASK for
         # every set secret, and would otherwise post it straight back over the real key.

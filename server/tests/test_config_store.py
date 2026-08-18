@@ -129,3 +129,31 @@ def test_saving_the_mask_for_a_set_secret_leaves_it_unchanged(tmp_path):
     values = config_store.load(path)
     assert values["GROQ_API_KEY"] == fixture_key
     assert values["AISHUB_POLL_SEC"] == "1800"
+
+
+def test_saving_over_a_valid_config_leaves_every_other_key_intact(tmp_path):
+    """The normal path: a caller that posts only the field it changed must not disturb any
+    of the other 25 already on disk."""
+    path = tmp_path / "config.json"
+    config_store.save(path, {"AISHUB_POLL_SEC": "1800", "AIS_SUGGEST_N": "5"})
+    before = config_store.load(path)
+    config_store.save(path, {"AIS_SUGGEST_TIEBREAK": "on"})
+    after = config_store.load(path)
+    assert after["AIS_SUGGEST_TIEBREAK"] == "on"
+    for key, value in before.items():
+        if key != "AIS_SUGGEST_TIEBREAK":
+            assert after[key] == value, key
+
+
+def test_saving_over_an_unparseable_config_refuses_rather_than_destroying_it(tmp_path):
+    """The failure this whole merge exists to prevent, arriving by a different door: a
+    hand-edit typo plus one ordinary partial save would otherwise replace every value the
+    caller did not send -- including the API keys -- with catalogue defaults, atomically and
+    irreversibly."""
+    path = tmp_path / "config.json"
+    path.write_text('{"AISHUB_POLL_SEC": "1800", "GROQ_API_KEY": "gsk_fixture_not_real",}',
+                    encoding="utf-8")   # trailing comma: invalid JSON
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(config_store.ConfigUnreadable):
+        config_store.save(path, {"AIS_SUGGEST_N": "5"})
+    assert path.read_text(encoding="utf-8") == before, "the unparseable file must be untouched"
