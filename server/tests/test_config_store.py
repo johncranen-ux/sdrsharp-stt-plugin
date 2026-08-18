@@ -75,3 +75,11 @@ def test_an_unset_secret_reads_as_empty_not_as_masked(tmp_path):
 def test_redaction_leaves_non_secrets_alone(tmp_path):
     values = config_store.load(tmp_path / "config.json")
     assert config_store.redacted_values(values)["AISHUB_POLL_SEC"] == "900"
+
+
+def test_a_config_that_is_not_valid_utf8_falls_back_to_defaults(tmp_path):
+    """load() runs at server startup. UnicodeDecodeError subclasses ValueError rather than
+    OSError, so it escapes an except clause that looks like it covers unreadable files."""
+    path = tmp_path / "config.json"
+    path.write_bytes(b"\xff\xfe\x00\x01not utf-8 at all \x80\x81")
+    assert config_store.load(path)["AISHUB_POLL_SEC"] == "900"

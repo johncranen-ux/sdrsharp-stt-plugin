@@ -34,7 +34,10 @@ def load(path: Path) -> dict[str, str]:
             stored = {k: str(v) for k, v in raw.items()}
     except FileNotFoundError:
         pass
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming explicitly.
+        # A config.json that is not valid UTF-8 must fall back to defaults like any other
+        # unreadable file -- crashing here would take the whole server down at startup.
         pass
     return {s.key: stored.get(s.key, s.default) for s in SETTINGS}
 
