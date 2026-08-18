@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from webapp.secure_file import restrict
 from webapp.settings_schema import BY_KEY, SETTINGS, SettingType, validate_value
 
 MASK = "●●●●"
@@ -121,6 +122,9 @@ def save(path: Path, values: dict[str, str]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(clean, handle, indent=1, sort_keys=True)
         os.replace(tmp, path)
+        # Best effort, deliberately unchecked: this file holds six API keys, and an ACL that
+        # could not be tightened is not a reason to refuse a save the caller already made.
+        restrict(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
