@@ -2334,7 +2334,6 @@ _SHORT_CALL = ("Maas Approach, this is motortanker, Aslamu Shulte, "
 def short_callsign_caches(monkeypatch):
     monkeypatch.setattr(ais, "_callsign_cache", {"V7B2710": _CLAMOR})
     monkeypatch.setattr(ais, "_vessel_cache", {"CLAMOR SCHULTE": _CLAMOR})
-    monkeypatch.setattr(conversations, "CALLSIGN_SUFFIX_FALLBACK", True)
     return _CLAMOR
 
 
@@ -2359,8 +2358,19 @@ def test_an_ambiguous_tail_identifies_nobody(short_callsign_caches, monkeypatch)
     assert proxy._resolver_candidates([_chunk(30, _SHORT_CALL, cid=1)]) == []
 
 
-def test_the_short_callsign_path_is_off_until_it_has_been_measured():
-    assert conversations.CALLSIGN_SUFFIX_FALLBACK is False
+def test_the_short_callsign_path_is_on_by_default():
+    """ON since 2026-08-18, by decision rather than by measurement -- recorded as such.
+
+    Its one bench arm was INVALID, not negative: all four transmissions it moved were the
+    ATLANTIC PRESTIGE conversation, whose label named a ship two vessels share, so the arm
+    scored it against the 2 m barge while the fallback picked the 200 m ship that had just
+    spelled out V7A6052 on air. What evidence exists is favourable -- over the 300 stored
+    conversations it fires on 4, agreeing with the stored verdict on 3 and supplying CLAMOR
+    SCHULTE on the fourth -- but that is candidate inspection, which has misled here before.
+
+    ROLLBACK: AIS_CALLSIGN_SUFFIX_FALLBACK=off.
+    """
+    assert conversations.CALLSIGN_SUFFIX_FALLBACK is True
 
 
 def test_partial_callsign_is_refused_when_no_name_corroborates(partial_caches):

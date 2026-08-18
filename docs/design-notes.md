@@ -1948,10 +1948,21 @@ lookup's job"; and `match_by_callsign_suffix`, which resolves `7B2710` to exactl
 vessel, is reachable only *through* that pattern. Each path defers to the other and nobody
 tries the tail. Its draught, 6.1 m, matched the spoken "six decimal one zero" exactly.
 
-The fallback is built and tested behind both existing gates (unique tail, plus a name
-resembling that vessel spoken in the window). Over the 300 stored conversations it fires on
-4, agreeing with the stored verdict on 3 and supplying CLAMOR SCHULTE on the 4th. It stays
-**off** until the label ambiguity above is fixed and the arm can be scored.
+The fallback runs behind both existing gates: the tail must fit exactly one cached callsign,
+and a name resembling that vessel must be spoken somewhere in the window. Over the 300 stored
+conversations it fires on 4, agreeing with the stored verdict on 3 and supplying CLAMOR
+SCHULTE on the 4th.
+
+**On by default since 2026-08-18, by decision rather than by measurement.** Worth flagging,
+because everything else here is the other way round. Its one arm read −0.9 precision and was
+*invalid* rather than negative — all four transmissions it moved were the ATLANTIC PRESTIGE
+conversation, scored against a barge because the label named a ship two vessels share. The
+favourable evidence is candidate inspection, which is the weaker instrument: relaxing
+`AIS_HINT_MIN_SCORE` also looked good by candidate recall and then cost 11 precision points.
+
+The arm is re-runnable now that ambiguous labels are skipped, since the conversation that
+invalidated it is excluded. Until someone runs it, this is the first setting to switch off if
+identification regresses.
 
 ## Testing
 

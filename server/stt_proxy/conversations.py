@@ -381,12 +381,25 @@ PARTIAL_CALLSIGN_MIN_NAME_SCORE = int(os.environ.get("PARTIAL_CALLSIGN_MIN_NAME_
 # path defers to the other; the ship goes unidentified with its callsign on the air.
 #
 # Both existing gates still apply: the tail must fit exactly one cached callsign, and a name
-# resembling that vessel must be spoken somewhere in the window. Measured over the 300
-# stored conversations it fires on 4, agreeing with the stored verdict on 3 and supplying
-# CLAMOR SCHULTE on the fourth -- no new wrong answers. Off until that is confirmed
-# end-to-end rather than by candidate inspection, which has misled here before.
+# resembling that vessel must be spoken somewhere in the window. Over the 300 stored
+# conversations it fires on 4, agreeing with the stored verdict on 3 and supplying CLAMOR
+# SCHULTE on the fourth -- no new wrong answers.
+#
+# ON by default since 2026-08-18, BY DECISION RATHER THAN BY MEASUREMENT. Recording that
+# plainly because everything else here is the other way round. Its one bench arm read -0.9
+# precision and was INVALID rather than negative: all four transmissions it moved were the
+# ATLANTIC PRESTIGE conversation, whose label named a ship two vessels share, so the arm
+# scored the fallback against a 2 m inland barge while the fallback had picked the 200 m
+# ship that spelled out V7A6052 on air. The favourable evidence above is candidate
+# inspection, which is a weaker instrument than an end-to-end arm and has misled here
+# before -- relaxing AIS_HINT_MIN_SCORE also looked good by candidate recall and then cost
+# 11 precision points.
+#
+# That arm IS re-runnable now: ambiguous labels stopped being scored in the same session, so
+# the conversation that invalidated it is excluded. If identification regresses, this is the
+# first thing to switch off. ROLLBACK: AIS_CALLSIGN_SUFFIX_FALLBACK=off.
 CALLSIGN_SUFFIX_FALLBACK        = os.environ.get(
-    "AIS_CALLSIGN_SUFFIX_FALLBACK", "off").strip().lower() == "on"
+    "AIS_CALLSIGN_SUFFIX_FALLBACK", "on").strip().lower() == "on"
 
 
 def _name_corroborates(vessel_name: str, chunks: list[dict]) -> bool:
