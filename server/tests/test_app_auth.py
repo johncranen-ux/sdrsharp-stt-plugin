@@ -1,5 +1,6 @@
 """The test that keeps Section 3 true as routes are added: every mutating route, enumerated
 from the app itself, must reject a request that carries no session."""
+import socket
 import sys
 from pathlib import Path
 
@@ -9,16 +10,33 @@ from fastapi.testclient import TestClient
 _SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SERVER_DIR))
 
-from webapp import credentials  # noqa: E402
+from webapp import config_store, credentials  # noqa: E402
 from webapp.app import create_app  # noqa: E402
 from webapp.auth import COOKIE_NAME, CSRF_HEADER  # noqa: E402
 
 PASSWORD = "a long enough password"
 
 
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 @pytest.fixture
 def client(tmp_path):
+    """An app that cannot reach anything real.
+
+    The config is WRITTEN, not merely named. Naming a file that does not exist leaves every
+    setting at its default -- LOG_DIR the real server/logs and PROXY_PORT 9000 -- which gave
+    this fixture a supervisor over the live pid files. The CSRF test below posts a real stop
+    with a real token, and on 2026-08-18 that killed the running proxy.
+    """
     credentials.save_password(tmp_path / "credentials.json", PASSWORD)
+    config_store.save(tmp_path / "config.json", {
+        "LOG_DIR": str(tmp_path / "logs"),
+        "PROXY_PORT": str(_free_port()),
+    })
     app = create_app(server_dir=_SERVER_DIR,
                      config_path=tmp_path / "config.json",
                      credentials_path=tmp_path / "credentials.json")
@@ -134,6 +152,7 @@ def test_repeated_wrong_passwords_are_throttled(client):
 
 
 def test_with_no_password_configured_the_panel_says_so_and_refuses_every_login(tmp_path):
+    config_store.save(tmp_path / "config.json", {"LOG_DIR": str(tmp_path / "logs")})
     app = create_app(server_dir=_SERVER_DIR, config_path=tmp_path / "config.json",
                      credentials_path=tmp_path / "credentials.json")
     with TestClient(app) as client:

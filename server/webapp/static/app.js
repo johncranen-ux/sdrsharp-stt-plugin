@@ -138,12 +138,6 @@ function renderPaths(health) {
 
 /* -- process cards -------------------------------------------------------- */
 
-function readout(label, reading, warn) {
-  const cell = element("div", warn ? "readout readout-warn" : "readout");
-  cell.append(element("dt", "legend", label), element("dd", null, reading));
-  return cell;
-}
-
 async function act(name, action, button) {
   const card = button.closest(".card");
   for (const control of card.querySelectorAll("button")) control.disabled = true;
@@ -157,45 +151,86 @@ async function act(name, action, button) {
   }
 }
 
-function renderCard(process, logText) {
-  const card = element("article", "card");
-  const head = element("div", "card-head");
-  head.append(
-    element("span", `dot ${process.state === "running" ? "dot-live" : "dot-idle"}`),
-    element("h2", "card-name", process.label),
-    element("span", `card-state state-${process.state}`, process.state));
-  card.append(head, element("p", "card-note", process.description));
+/* Cards are built once and then updated in place.
+ *
+ * The first version rebuilt both cards on every poll, which threw away the scroll position
+ * inside each log pane three seconds later: a reader scrolling down through the proxy's output
+ * was thrown back to the top, over and over. Rebuilding also discarded text selections and
+ * button focus. Nothing here replaces a node that is already on the page. */
+const cardViews = new Map();
 
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
+}
+
+function buildCard(process) {
+  const root = element("article", "card");
+  const head = element("div", "card-head");
+  const dot = element("span", "dot dot-idle");
+  const stateLabel = element("span", "card-state");
+  head.append(dot, element("h2", "card-name", process.label), stateLabel);
+  root.append(head, element("p", "card-note", process.description));
+
+  // Every readout exists from the start, including "Holding port", so that a process starting
+  // or stopping changes text rather than adding and removing cells under the reader.
   const readouts = element("dl", "readouts");
-  readouts.append(
-    readout("Uptime", process.state === "running" ? elapsed(process.uptime_sec) : "—"),
-    readout("PID", process.pid === null ? "—" : String(process.pid)),
-    readout("Port", process.port === null ? "n/a" : String(process.port)));
-  if (process.port !== null && process.state === "running") {
-    readouts.append(readout("Holding port", process.port_ok ? "yes" : "no", !process.port_ok));
+  const cells = {};
+  for (const [key, label] of [["uptime", "Uptime"], ["pid", "PID"],
+                              ["port", "Port"], ["portOk", "Holding port"]]) {
+    const cell = element("div", "readout");
+    const value = element("dd", null, "—");
+    cell.append(element("dt", "legend", label), value);
+    cells[key] = { cell, value };
+    readouts.append(cell);
   }
-  card.append(readouts);
+  root.append(readouts);
 
   const actions = element("div", "card-actions");
-  const running = process.state === "running";
-  const buttons = [
-    ["Start", "start", process.state === "disabled" || running],
-    ["Stop", "stop", !running],
-    ["Restart", "restart", process.state === "disabled"],
-  ];
-  for (const [label, action, disabled] of buttons) {
+  const buttons = {};
+  for (const [label, action] of [["Start", "start"], ["Stop", "stop"], ["Restart", "restart"]]) {
     const button = element("button", "button", label);
     button.type = "button";
-    button.disabled = disabled;
     button.addEventListener("click", () => act(process.name, action, button));
+    buttons[action] = button;
     actions.append(button);
   }
-  card.append(actions);
+  root.append(actions);
 
-  const log = element("pre", "card-log", logText || "No log yet. Start it and output appears here.");
-  if (!logText) log.classList.add("log-empty");
-  card.append(log);
-  return card;
+  const log = element("pre", "card-log");
+  root.append(log);
+  return { root, dot, stateLabel, cells, buttons, log };
+}
+
+function updateCard(view, process, logText) {
+  const running = process.state === "running";
+  view.dot.className = `dot ${running ? "dot-live" : "dot-idle"}`;
+  view.stateLabel.className = `card-state state-${process.state}`;
+  setText(view.stateLabel, process.state);
+
+  setText(view.cells.uptime.value, running ? elapsed(process.uptime_sec) : "—");
+  setText(view.cells.pid.value, process.pid === null ? "—" : String(process.pid));
+  setText(view.cells.port.value, process.port === null ? "n/a" : String(process.port));
+  const holding = process.port === null ? "n/a"
+    : running ? (process.port_ok ? "yes" : "no") : "—";
+  setText(view.cells.portOk.value, holding);
+  view.cells.portOk.cell.className =
+    running && process.port !== null && !process.port_ok ? "readout readout-warn" : "readout";
+
+  view.buttons.start.disabled = running || process.state === "disabled";
+  view.buttons.stop.disabled = !running;
+  view.buttons.restart.disabled = process.state === "disabled";
+
+  const text = logText || "No log yet. Start it and output appears here.";
+  view.log.classList.toggle("log-empty", !logText);
+  if (view.log.textContent !== text) {
+    // A pane sitting at the bottom follows the newest line; a pane the reader has scrolled
+    // stays exactly where they left it. atBottom is true for content that does not overflow,
+    // so a card's first fill lands at the bottom, which is where a tail is read from.
+    const follow = atBottom(view.log);
+    const previous = view.log.scrollTop;
+    view.log.textContent = text;
+    view.log.scrollTop = follow ? view.log.scrollHeight : previous;
+  }
 }
 
 async function refreshDashboard() {
@@ -213,8 +248,23 @@ async function refreshDashboard() {
       .catch(() => "")));
 
   const cards = $("cards");
-  cards.replaceChildren();
-  processes.processes.forEach((process, index) => cards.append(renderCard(process, tails[index])));
+  const seen = new Set();
+  processes.processes.forEach((process, index) => {
+    let view = cardViews.get(process.name);
+    if (!view) {
+      view = buildCard(process);
+      cardViews.set(process.name, view);
+      cards.append(view.root);
+    }
+    updateCard(view, process, tails[index]);
+    seen.add(process.name);
+  });
+  for (const [name, view] of cardViews) {
+    if (!seen.has(name)) {
+      view.root.remove();
+      cardViews.delete(name);
+    }
+  }
 
   const picker = $("log-process");
   if (picker.options.length !== processes.processes.length) {
@@ -245,6 +295,7 @@ function renderLog() {
   const view = $("log-view");
   const filter = $("log-filter").value.trim();
   const stick = $("log-follow").checked && atBottom(view);
+  const previous = view.scrollTop;
   const text = filter
     ? state.logText.split("\n").filter((line) => line.includes(filter)).join("\n")
     : state.logText;
@@ -259,7 +310,9 @@ function renderLog() {
     view.append(element("span", "log-empty",
       filter ? "No lines match that filter." : "Nothing logged yet."));
   }
-  if (stick) view.scrollTop = view.scrollHeight;
+  // Restoring `previous` is the half that was missing: sticking to the bottom was handled, but
+  // a reader who had scrolled anywhere else was returned to the top on the next poll.
+  view.scrollTop = stick ? view.scrollHeight : previous;
 }
 
 async function refreshLog() {
@@ -277,7 +330,9 @@ async function refreshLog() {
       state.logText = state.logText.slice(-LOG_BUFFER_MAX / 2);
     }
     state.logOffset = tail.next_offset;
-    renderLog();
+    // Only when something actually arrived: an unconditional re-render every two seconds would
+    // wipe out a text selection the reader was making.
+    if (tail.text || tail.restarted) renderLog();
   } finally {
     state.logBusy = false;
   }

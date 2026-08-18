@@ -128,8 +128,10 @@ def test_startup_refuses_a_wide_bind_with_no_password_and_never_builds_the_app(t
 def test_startup_builds_an_app_on_loopback_without_a_password(tmp_path):
     from pathlib import Path as _Path
 
-    from webapp import startup
+    from webapp import config_store, startup
 
+    # LOG_DIR under tmp_path, or the app it builds gets a supervisor over the live pid files.
+    config_store.save(tmp_path / "config.json", {"LOG_DIR": str(tmp_path / "logs")})
     app, host, port = startup.build(server_dir=_Path(__file__).resolve().parent.parent,
                                     config_path=tmp_path / "config.json",
                                     credentials_path=tmp_path / "credentials.json")
