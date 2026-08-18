@@ -43,11 +43,23 @@ def test_the_counter_is_pointed_at_the_configured_station():
     assert Path(argv[argv.index("--log") + 1]).parent == paths.log_dir
 
 
-def test_the_proxy_declares_the_port_it_must_own_and_the_counter_does_not():
-    """The counter connects out; it listens on nothing, so clearing a port for it would be
-    both meaningless and dangerous."""
+def test_both_processes_declare_the_port_they_must_own():
+    """The counter listens too -- AIS-catcher is pointed at it and pushes. Declaring no port
+    for it on 2026-08-18 meant no port was cleared before a start, and since
+    ais_station_count.py sets SO_REUSEADDR a second counter bound alongside a hand-started
+    one and silently took the station's connection over."""
     assert registry.port_for(registry.BY_NAME["proxy"], _values(PROXY_PORT="9001")) == 9001
-    assert registry.port_for(registry.BY_NAME["counter"], _values()) is None
+    assert registry.port_for(registry.BY_NAME["counter"],
+                             _values(AIS_STATION_NMEA_PORT="10222")) == 10222
+
+
+def test_the_counters_declared_port_is_the_one_its_command_line_listens_on():
+    """The two must agree, or clearing frees a port the child then does not take."""
+    values = _values(AIS_STATION_NMEA_PORT="10222")
+    paths = registry.resolve_paths(values, _SERVER_DIR)
+    argv = registry.argv_for(registry.BY_NAME["counter"], values, paths)
+    listening_on = argv[argv.index("--port") + 1]
+    assert int(listening_on) == registry.port_for(registry.BY_NAME["counter"], values)
 
 
 def test_a_disabled_process_reports_itself_disabled():

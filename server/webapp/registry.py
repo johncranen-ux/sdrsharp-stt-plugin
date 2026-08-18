@@ -70,9 +70,16 @@ PROCESSES: tuple[ProcessSpec, ...] = (
     ProcessSpec(
         name="counter", label="AIS station counter", log_prefix="counter",
         image_name=Path(sys.executable).name, enabled_key="COUNTER_ENABLED",
-        port_key=None, build_argv=_counter_argv,
-        description="Counts distinct vessels per hour from the local AIS receiver. It "
-                    "connects out and listens on nothing.",
+        # The counter LISTENS on this port -- AIS-catcher is pointed at it with `-P <ip> 10111`
+        # and pushes. It was first written here as "connects out and listens on nothing", which
+        # was wrong and had a consequence: with no port declared, nothing was cleared before a
+        # start, and ais_station_count.py sets SO_REUSEADDR. On 2026-08-18 a second counter
+        # bound alongside a hand-started one, took the station's connection over, and left the
+        # original alive but starved -- the exact zombie-listener failure this project has had
+        # before, reproduced by the one entry that opted out of the fix.
+        port_key="AIS_STATION_NMEA_PORT", build_argv=_counter_argv,
+        description="Counts distinct vessels per hour. It listens for AIS-catcher to connect "
+                    "and push NMEA, and polls the station's web UI for a range map.",
     ),
 )
 
