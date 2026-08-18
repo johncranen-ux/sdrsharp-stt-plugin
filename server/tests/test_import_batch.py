@@ -5,6 +5,8 @@ from pathlib import Path
 _SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SERVER_DIR))
 
+import pytest  # noqa: E402
+
 from webapp import config_store  # noqa: E402
 from webapp.import_batch import import_into, parse_batch  # noqa: E402
 
@@ -55,9 +57,36 @@ def test_importing_the_real_batch_file_produces_a_valid_config(tmp_path):
     that catches a value the schema rejects -- e.g. a bbox the validator will not accept."""
     real = _SERVER_DIR / "start-all.bat"
     if not real.exists():
-        import pytest
         pytest.skip("start-all.bat is gitignored; present only on a configured machine")
     config = tmp_path / "config.json"
     values = import_into(real, config)
     assert values["STT_BACKEND"] in ("groq", "whisper_cpp")
     assert config_store.load(config)["AISHUB_BBOX"].count(",") == 3
+
+
+@pytest.mark.parametrize("line", [
+    "SET STT_BACKEND=groq",
+    "Set STT_BACKEND=groq",
+    "  set STT_BACKEND=groq",
+    "\tset STT_BACKEND=groq",
+])
+def test_cmd_honours_these_so_the_importer_must_too(line):
+    """cmd.exe treats SET, Set and set identically and allows leading whitespace. Dropping
+    such a line is silent and looks exactly like a correctly-excluded comment."""
+    assert parse_batch(line)["STT_BACKEND"] == "groq"
+
+
+@pytest.mark.parametrize("line", [
+    ":: set STT_BACKEND=groq",
+    "  :: set STT_BACKEND=groq",
+    "REM set STT_BACKEND=groq",
+    "rem set STT_BACKEND=groq",
+])
+def test_a_commented_line_stays_excluded_however_it_is_written(line):
+    """The guard that matters: relaxing the anchor must not start importing rollbacks."""
+    assert parse_batch(line) == {}
+
+
+def test_a_value_containing_equals_survives():
+    """The capture group must take the whole remainder of the line, not stop at the first =."""
+    assert parse_batch("set GROQ_MODEL=whisper=large=v3")["GROQ_MODEL"] == "whisper=large=v3"
