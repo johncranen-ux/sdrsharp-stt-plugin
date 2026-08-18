@@ -72,6 +72,11 @@ _LINE_RE = re.compile(rf"^({_TS_RE})[ \t]+({_TS_RE})[ \t]+(.+)$")
 # Labels
 # ---------------------------------------------------------------------------
 
+# Returned by _resolve_expected for a name two or more ships share. Distinct from None,
+# which is a real answer meaning "nobody was identifiable" and IS scored.
+_AMBIGUOUS = object()
+
+
 @dataclass(frozen=True)
 class Label:
     start: datetime.datetime
@@ -99,7 +104,36 @@ def _resolve_expected(value: str, lookup: dict | None, where: str) -> str | None
     if lookup is None:
         raise ValueError(f"{where}: {value!r} is a vessel name, which needs the AIS cache to "
                          f"resolve -- run bench_identify.py rather than calling parse_labels bare")
-    mmsi = lookup.get(value.upper())
+    # A scalar is the unambiguous case; a list carries every ship of that name.
+    found = lookup.get(value.upper())
+    mmsis = [found] if isinstance(found, str) else list(found or [])
+
+    # A name two ships share is not ground truth, and picking one is worse than refusing --
+    # it yields a number that looks like evidence. ATLANTIC PRESTIGE, 2026-08-18: the cache
+    # held 538010447 (V7A6052, draught 10.1) and 244700991 (PB8309, draught 2.0, an inland
+    # barge). Resolution ran through a dict holding one entry per name, so the truth silently
+    # became the barge, and a change that picked the ship which had just spelled out V7A6052
+    # on air was scored as -0.9 precision for it.
+    if len(mmsis) > 1:
+        # Skipped rather than fatal. A hard error would kill a whole file of good labels to
+        # protect a handful of lines, and those lines often cannot be repaired later at all:
+        # disambiguating two ships of one name means checking what the vessel SAID about
+        # itself -- "passing the reporting line", "at Anchorage South position Lima", "on our
+        # way to the pilot station" -- against where each candidate actually was, and the
+        # cache keeps only the latest fix. Days on, the ships have moved and the evidence is
+        # gone. Recording the candidates' positions at resolve time is what makes it
+        # answerable in future; see _CANDIDATE_FACTS in conversations.py.
+        #
+        # This is the file's own stated policy: an unlabelled conversation is simply not
+        # scored, while a guessed one corrupts every number computed from the file. Loud,
+        # because dropping a line quietly would shrink the corpus and flatter every score.
+        print(f"warning: {where}: {value!r} is carried by {len(mmsis)} vessels "
+              f"({', '.join(sorted(mmsis))}) -- NOT SCORED. A name cannot say which ship "
+              f"was speaking; put an MMSI in field 3 to score this conversation.",
+              file=sys.stderr)
+        return _AMBIGUOUS
+
+    mmsi = mmsis[0] if mmsis else None
     if not mmsi:
         # Much the commonest cause: a note left on the line without a tab in front of it, so
         # it got read as part of the ship's name. Say so before blaming the spelling.
@@ -137,6 +171,8 @@ def parse_labels(path, lookup: dict | None = None) -> list[Label]:
         except ValueError as exc:
             raise ValueError(f"{path}:{lineno}: {exc}") from exc
         mmsi = _resolve_expected(expected_s.strip(), lookup, f"{path}:{lineno}")
+        if mmsi is _AMBIGUOUS:
+            continue
         note = note.strip()
         labels.append(Label(start, end, mmsi, note))
     return labels
@@ -497,6 +533,8 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
 
     out: list[dict] = []
     seq = 0
+    from stt_proxy import ais
+
     for label in labels:
         window: list[dict] = []
         for ex in exchanges:
@@ -507,6 +545,16 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
                 seq += len(ex.get("turns") or [])
         if not window:
             continue
+        # Any age bound is measured against the LAST GOOD POLL, which in production is
+        # roughly now and in a bench is whenever this conversation happened -- not the wall
+        # clock, days later, against which every entry in a frozen cache is stale and any
+        # bound excludes the whole cache. Inert unless an arm sets a bound, since both
+        # AIS_MAX_AGE_MIN and AIS_LIVE_MATCH_MAX_AGE_MIN default to 0.
+        #
+        # The frozen cache keeps only each vessel's LATEST last_seen, so a ship that was
+        # stale at the time but seen again later reads as fresh here. That biases towards
+        # finding no effect, which is the safe direction for an arm arguing to exclude.
+        ais.set_poll_reference(label.start)
         window.sort(key=lambda c: c["time"])
         by_id = {c["id"]: c for c in window}
         for ex in resolve_conversation(window):
@@ -522,6 +570,68 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
                            "text": t.get("corrected") or t["text"]} for t in turns],
             })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Scoring the shortlist, which is a different question from scoring identification
+# ---------------------------------------------------------------------------
+#
+# The suggestion block only appears where the resolver named nobody, and it never asserts
+# anything, so precision and recall do not describe it. The question it answers is "when the
+# system gives up, does the right ship appear in the two or three names it offers anyway?"
+# -- so the metric is a hit rate over exactly the conversations that resolved to nobody.
+#
+# Free to run: no API calls, no resolver. Only the AIS cache and the stored text.
+
+def score_suggestions(labels: list[Label], exchanges: list[dict], n: int = 3) -> dict:
+    """Hit rate of the sub-cutoff shortlist over conversations that resolved to nobody."""
+    from stt_proxy import ais
+    from stt_proxy import conversations as conv
+
+    corpus = list(exchanges)
+    probe_filter = conv._boilerplate_filter(corpus)
+
+    scored, hits, rows = 0, 0, []
+    for label in labels:
+        turns, predicted = [], set()
+        for ex in exchanges:
+            if ex.get("channel", "160,650") != label.channel:
+                continue
+            for when, turn in zip(_turn_times(ex), ex.get("turns") or []):
+                if label.start <= when <= label.end:
+                    turns.append(turn)
+                    predicted.add(ex.get("mmsi"))
+        # Only conversations the resolver left unnamed AND that a real vessel was speaking
+        # in: a shortlist under "nobody was identifiable" has no right answer to contain.
+        if not turns or {p for p in predicted if p} or not label.identifiable:
+            continue
+        scored += 1
+        text = " ".join((t.get("conv") or t.get("text") or "") for t in turns)
+        ais.set_poll_reference(label.start)
+        found = ais.suggest_vessels(text, probe_filter=probe_filter, n=n)
+        rank = next((i for i, s in enumerate(found, 1) if s["mmsi"] == label.mmsi), None)
+        if rank:
+            hits += 1
+        rows.append({"conversation": label.start.strftime(_TS_FMT), "label": label.mmsi,
+                     "rank": rank,
+                     "shortlist": [{"name": s["name"], "mmsi": s["mmsi"],
+                                    "score": s["score"], "heard": s["heard"]} for s in found]})
+    return {"unidentified_conversations": scored, "hits": hits,
+            "hit_rate": (hits / scored) if scored else None, "n": n, "rows": rows}
+
+
+def print_suggestion_report(result: dict) -> None:
+    scored = result["unidentified_conversations"]
+    print(f"\nShortlist over the {scored} conversations that resolved to nobody")
+    print(f"  right ship in the top {result['n']}   {result['hits']}/{scored}"
+          f"   {_pct(result['hit_rate'])}")
+    shown = [r for r in result["rows"] if r["rank"]]
+    if shown:
+        print("\n  recovered:")
+        for row in shown:
+            top = row["shortlist"][row["rank"] - 1]
+            print(f"    {row['conversation']}  rank {row['rank']}  "
+                  f"{top['name']} ({top['score']:.0f}) heard {top['heard']!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +716,10 @@ def main(argv: list[str] | None = None) -> int:
                          "temperature 0, so a single run cannot tell a real change from "
                          "that noise. Costs N times the API calls; 3 is usually enough")
     ap.add_argument("--out-json", help="write the scores as JSON, for comparing two runs")
+    ap.add_argument("--suggest", action="store_true",
+                    help="score the sub-cutoff shortlist instead of identification: how "
+                         "often the right ship appears in the names offered on a "
+                         "conversation that resolved to nobody. Free -- no API calls")
     ap.add_argument("--find", metavar="NAME",
                     help="look a vessel up in the AIS cache and exit, to get the spelling "
                          "field 3 needs. Fuzzy, so a misheard name still finds it")
@@ -658,7 +772,15 @@ def main(argv: list[str] | None = None) -> int:
     # Labels may name a vessel rather than an MMSI, which needs the cache to resolve.
     from stt_proxy import ais
     ais._load_cache()
-    lookup = {name: entry.get("mmsi") for name, entry in ais._vessel_cache.items()}
+    # Built from _mmsi_index, not _vessel_cache: the latter holds ONE entry per name, so a
+    # name two ships share resolves to whichever happens to be there and the ambiguity is
+    # invisible. Keyed on each entry's CURRENT name, the same rule candidates_for_name uses,
+    # so a renamed vessel does not leave a ghost under its old name.
+    lookup: dict[str, list[str]] = {}
+    for mmsi, entry in ais._mmsi_index.items():
+        key = (entry.get("name") or "").strip().upper()
+        if key:
+            lookup.setdefault(key, []).append(str(mmsi))
     try:
         labels = parse_labels(args.labels, lookup=lookup)
     except ValueError as exc:
@@ -667,6 +789,15 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(str(exc))
     if not labels:
         return _fail(f"no labels in {args.labels}")
+
+    if args.suggest:
+        from stt_proxy import ais
+        ais._load_cache()
+        result = score_suggestions(labels, exchanges)
+        print_suggestion_report(result)
+        if args.out_json:
+            Path(args.out_json).write_text(json.dumps(result, indent=1), encoding="utf-8")
+        return 0
 
     result = score(labels, exchanges)
     print_report(result, f"STORED VERDICTS  ({args.conversations})")

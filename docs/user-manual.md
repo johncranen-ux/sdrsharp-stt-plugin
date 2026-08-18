@@ -358,6 +358,31 @@ When a heard name fits more than one ship, `/conversations` lists the candidates
 VesselFinder links instead of choosing. Pick the one that fits what was said — a vessel already
 inside the harbour is not dropping anchor at Echo 3.
 
+### Possible matches, when nobody was identified
+
+A conversation that resolved to nobody gets a second, greyer block: the best three vessel
+names found **below** the identification cutoff, each with the fragment it matched.
+
+```
+Possible matches — these scored below the identification cutoff, so nobody was named.
+Unconfirmed:
+  1  MELTEMI I   76   heard "Meld Them In"
+  2  HEIN        73   heard "Them In"
+  3  THEMHOF     73   heard "Them"
+```
+
+These are **not** identifications and the system will never act on them. They are there
+because you can settle by ear what the matcher cannot: "Meld Them In" for MELTEMI I is
+obvious to someone who heard the transmission and invisible to an edit-distance score.
+
+Expect to be right about a quarter of the time — measured on hand-labelled traffic, the
+correct ship is in the three 9 times out of 35. The other three-quarters are near-misses
+worth a glance and nothing more. The block never appears beside a conversation that *was*
+identified, and never in the first 30 conversations after a fresh start, because it needs a
+corpus to learn which words are the shore station rather than a ship.
+
+Turn it off with `AIS_SUGGEST=off`. `AIS_SUGGEST_N` changes how many are listed.
+
 ### Conversation resolution
 
 | Variable | Default | Meaning |
@@ -366,6 +391,14 @@ inside the harbour is not dropping anchor at Echo 3.
 | `RESOLVER_LIVE_CANDIDATES` | `on` | Offers the resolver the vessel the live pass already matched |
 | `CONVERSATION_GAP_S` | `60` | Silence that closes a window |
 | `CONVERSATION_MAX_CHUNKS` | `40` | Hard cap on window size |
+| `AIS_SUGGEST` | `on` | The sub-cutoff "possible matches" block on unidentified conversations |
+| `AIS_SUGGEST_N` | `3` | How many possible matches to list |
+| `AIS_SUGGEST_FLOOR` | `55` | Name-similarity score below which nothing is suggested |
+| `AIS_SUGGEST_DF_MAX` | `0.05` | A word span heard in more than this share of stored conversations is treated as shore-station procedure, not a name |
+| `AIS_SUGGEST_MIN_DOCS` | `30` | Stored conversations needed before suggestions appear at all |
+| `AIS_LIVE_MATCH_MAX_AGE_MIN` | `360` | A vessel the live pass matched is only re-offered to the resolver if its AIS fix is newer than this. Age counts from the last **successful** AIS poll, so a stalled feed does not age every ship out at once. Measured 2026-08-18: +1.2 precision, 6 false positives removed, no correct identification lost. `0` disables it |
+| `AIS_CALLSIGN_SUFFIX_FALLBACK` | `off` | Try the tail of a spelled-out callsign that decoded cleanly but short (heard "call **Sun**victor seven" → `7B2710` for `V7B2710`). Built and tested; off until it can be scored — see design-notes |
+| `AIS_SUGGEST_TIEBREAK` | `off` | Rank equally-scoring suggestions by plausibility. Off; not yet measurable — see design-notes |
 | `ANTHROPIC_API_KEY` | — | Unset disables identification entirely |
 | `AISSTREAM_API_KEY` | — | Unset disables AIS matching |
 | `AIS_SILENCE_WARN_SEC` | `0` (off) | Warns when a *connected* AIS feed stops delivering — the failure that otherwise looks identical to a quiet channel. Muted by default since 2026-08-11 because aisstream has delivered nothing since 08-05 and it fired every 60 s. **Set it to `60` the moment the feed recovers**; it is the only thing that catches a relapse |

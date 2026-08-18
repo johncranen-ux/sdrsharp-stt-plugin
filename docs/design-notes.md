@@ -1701,6 +1701,258 @@ failing *again* after it recovers — and this feed has already changed failure 
 mid-outage. Restore with `AIS_SILENCE_WARN_SEC=60`; there is a commented line in
 `start-all.bat` saying to do so the moment the feed returns.
 
+## Offering the near misses instead of asserting them (2026-08-18)
+
+`/conversations` now shows, under a conversation nobody was identified in, the best three
+vessel names found *below* the identification cutoff, labelled as unconfirmed. It never
+names anyone: `vessel` and `mmsi` stay null, and nothing reads the block back.
+
+This is not "lower the cutoff", which was measured on 2026-08-12 and cost **11 precision
+points** — fourteen correctly-unnamed conversations became confident misidentifications.
+That result stands. The difference is that a suggestion is not an assertion, so the
+precision the cutoff protects is untouched by construction.
+
+**Measured on the 35 unidentified conversations of the 08-13/14 labels:**
+
+| retrieval | truth in top 1 | top 3 | top 5 | anywhere |
+|---|---|---|---|---|
+| live hints, cutoff 85 (unchanged, for reference) | — | 2 | 2 | 2 |
+| global rank, no probe filter | 0 | 3 | 7 | 22 |
+| **global rank + document-frequency filter (shipped)** | **4** | **9** | 12 | 22 |
+
+Two findings behind those rows.
+
+**The live retrieval cannot be relaxed into a shortlist.** `_find_ais_hints` runs
+`extractOne` per probe and stops at *n* slots, so as the cutoff falls the wrong ships arrive
+first, fill the slots and bury the right one — reachability is non-monotonic, going
+35 → 38 → 35 → 29 → 24 as the cutoff drops 85 → 80 → 76 → 70 → 65. `suggest_vessels` scores
+every (probe, name) pair and ranks globally, so there are no slots to fill.
+
+**Most of the shortlist was the shore station.** Two real cargo ships are named MAAS and
+MAS, and "Maas Approach" opens nearly every call, so they took **56 of the 105 top-three
+slots** — which is the whole gap between 3 and 9 above. They are removed by document
+frequency rather than a hand-written place list: a probe heard in more than
+`AIS_SUGGEST_DF_MAX` of stored conversations is procedure, not a name (MAAS is in 93%,
+MAAS APPROACH in 91%, while a vessel calls once or twice). That re-learns whatever station
+is on air, which matters for the Aviation band. Below `AIS_SUGGEST_MIN_DOCS` stored
+conversations the table cannot tell a ship from the station, so nothing is shown at all.
+
+Gating on score buys nothing — the hit rate is flat at 23–26% whether the block is shown
+always or only when its best candidate clears 85. So it is shown whenever it has anything.
+
+**9/35 is an upper bound.** The pool was the frozen 08-15 cache, a superset of what was live
+when each conversation resolved; candidate lists are not persisted, so the real figure
+cannot be recovered. `last_seen` stores only the maximum, so it cannot discriminate either.
+
+The value is not the rank. `heard "Meld Them In"` beside MELTEMI I is something a reader who
+heard the audio settles instantly and no edit-distance scorer can: the block turns an
+unanswerable question into an adjudicable one.
+
+Knobs: `AIS_SUGGEST` (on), `AIS_SUGGEST_N` (3), `AIS_SUGGEST_FLOOR` (55),
+`AIS_SUGGEST_DF_MAX` (0.05), `AIS_SUGGEST_MIN_DOCS` (30). Cost is ~53 ms per unidentified
+conversation, against a resolver pass that takes seconds.
+
+**The constraint that keeps this safe**: suggestions are computed in `_store_resolved`,
+*after* identity is final and after the correction pass has run, and are read only by
+`_format_suggestions`. They reach neither the vessel log, nor the resolver's candidate list,
+nor the conversation-correction pass. `tests/test_suggestions.py` asserts each of those.
+That feedback path is exactly how a sub-cutoff match once rewrote "motor vessel to Leland"
+into "motor vessel Vlieland" and named the wrong ship.
+
+## "The name arrived intact and we still missed it" is 2 of 35 (2026-08-18)
+
+Prompted by three shortlist entries where a full vessel name had been spoken plainly on a
+conversation that resolved to nobody: CIELO DI ULSAN, MSC SAUDI ARABIA, BORIS SOKOLOV.
+
+Measured properly, the class is small. Scoring what the **live pass extracted** against
+ground truth — a cleaner instrument than raw n-grams, because it is the model's own reading
+of the name — over the 35 unidentified conversations in the 08-13/14 labels:
+
+    name arrived at or above the 76 matcher cutoff    2
+    never arrived that intact                        33
+
+The closest of the other 33 are `Baltic`/BALTICBORG (75), `Hammerstar`/AMUR STAR (74),
+`Amundsen`/MARAN AMUNDSEN (73) — the same cluster pressed under the threshold already
+recorded. This corroborates "the name never arrives" rather than overturning it.
+
+**A measurement trap avoided.** Asking instead "would the heard name match *something* in
+today's cache" gives 20 of 50 and is worthless: the matches are `Maranamest` → AMUSE where
+the truth is MARAN AMUNDSEN, and `Free North` → NORAH where the truth is MELTEMI I. Matching
+something is not matching the right thing. Same shape as the candidate-recall trap of
+2026-08-12; always score against labels.
+
+The two real cases have **opposite** causes, which is the whole reason the instrumentation
+below now exists:
+
+- **BORIS SOKOLOV** — heard as `Boris Sokolov`, title case. That casing is the tell:
+  `enrich_with_ais` returns the result untouched when AIS matches nothing, so a title-case
+  `live_vessel` means the model heard the name and AIS had no such ship. `live_mmsi` was
+  never set, `_live_match_candidates` keys on `live_mmsi`, so the vessel never reached the
+  candidate list and the resolver correctly refused an off-list name. *Why* AIS had no
+  match could not be determined — the cache state at that instant is not recorded.
+- **SEA BANCKERT** — heard as `SEA BANCKERT`, uppercase, i.e. the AIS spelling written back
+  by enrichment. AIS *did* match, the ship *was* offered, and the resolver rejected it:
+  *"SEA BANCKERT is phonetically similar but the callsign PEER does not appear."* The shore
+  station had repeated the name clearly. Prompt rules 3-5 all elevate callsigns while rule 6
+  demotes the live-pass candidate to "a lead, not evidence", and between them a good name
+  match lost to a callsign a 12-second check-in was never going to contain.
+
+**The prompt was NOT changed.** Across the 19 stored conversations where the live pass had
+an AIS match and the resolver still named nobody, the live match is the *wrong* ship in
+almost all of them (WESTZEE, GEORGIA, HOUSTON, MULSANNE, OLSKE) and refusing was correct.
+SEA BANCKERT is n=1, prompt changes here have cost 11 WER points before, and any change
+needs `bench_identify --resolve --repeats 3` against a 2.9-point noise floor to mean
+anything. Label more callsign-absent rejections before touching it.
+
+### What was changed: two fields, so the next one is diagnosable
+
+`live_mmsi` is now stored beside `live_vessel` on every turn, and the candidate list the
+resolver saw is stored on every row it produces as `resolver_candidates` (name, MMSI, and
+which pass put it there — no positions or particulars). Together they separate the two
+causes above, which the store previously could not:
+
+| stored | means |
+|---|---|
+| `live_vessel` set, `live_mmsi` null | the name was heard; AIS had no such ship |
+| both set | AIS matched; the ship reached the candidate list |
+| truth absent from `resolver_candidates` | never offered — a cache-membership problem |
+| truth present, row unnamed | offered and rejected — a resolver-judgement problem |
+
+Recorded on the resolver-error path too, so "never ran" and "ran and found nobody" stay
+distinguishable. Costs about 1.1 KB per row, taking the 300-row store from ~595 KB to
+~900 KB. This gap has now blocked two post-hoc investigations; that is what it buys.
+
+### And one incidental defect
+
+`_null_out_placeholders` coerced the bare words `null`, `none`, `n/a`, `unknown`, `-` but
+not the schema placeholder itself, so the literal string `<name or null>` was journalled
+once as the vessel of a real transmission. Now nulled when a value is *wrapped* in angle
+brackets — wrapped, not merely containing one, because AIS 6-bit decode artefacts arrive as
+names like `CGAS TIGET<<` and those are a bad cache entry to be seen, not a placeholder to
+be hidden. One occurrence in ~1,400 turns.
+
+## A five-day-stale barge outranked a ship 12 km away (2026-08-18)
+
+BELLONA — 135×12 m inland barge, draught 1.5 m, bound for Antwerp, 72.5 km from Maas Center,
+last AIS fix **122 hours** old — was named with high confidence over GT VELA, which was
+12.8 km away and had reported its position **seven minutes** before the call.
+
+Neither ship cleared the 85 hint cutoff (GT VELA peaked at 80.0, BELLONA at 83.3). BELLONA
+reached the resolver entirely through `_live_match_candidates`, which re-resolves `live_mmsi`
+through `match_by_mmsi` — and that reads `_mmsi_index` directly, so `AIS_MAX_AGE_MIN` never
+applied to it. Roughly half of a real candidate list arrives by that route: one live capture
+showed 14 candidates, 6 of them live matches. It was the largest ungated path in the system.
+
+Then the correction pass, told the vessel was BELLONA, rewrote `"GT, rella"` to
+`"GD Bellona"` and `"GD Bella, Mard Brennan"` to `"GD Bellona, Maas Approach"` — so the
+displayed page no longer contained the "GT" that would have shown the error. The raw text is
+stored, which is the only reason this was reconstructable.
+
+### The fix, and what was measured
+
+`AIS_LIVE_MATCH_MAX_AGE_MIN` bounds the age of a live-match candidate; **360 minutes, on by
+default**. `bench_identify --resolve --repeats 3` over the 08-13/14 labels, only this varied:
+
+| | off (0) | 360 min | |
+|---|---|---|---|
+| precision | 87.1% | **88.3%** | +1.2 |
+| recall | 65.6% | **66.3%** | +0.7 |
+| correct | 386 | 386 | unchanged |
+| wrong | 57 | **51** | −6 |
+| missed | 145 | 145 | unchanged |
+
+Spread **0.0** on every metric across three runs per arm, so this is signal rather than the
+~2.9 points of resolver sampling noise. Nothing was lost — not one correct identification
+became a miss. All six transmissions that moved are one conversation where nobody was
+identifiable and PRESTO, 29 hours stale, was being named across all six.
+
+The contrast between removing and adding candidates is now measured from both ends:
+relaxing `AIS_HINT_MIN_SCORE` **added** candidates and cost 11 precision points; this
+**removes** them and gains 1.2.
+
+### Age is measured from the last good poll, not the wall clock
+
+`ais._reference_now()` returns the last successful poll time, falling back to the wall clock
+before any poll. During a feed outage the wall clock ages every vessel out together, so "the
+estuary emptied" and "the feed died" become indistinguishable and the filter would destroy
+identification exactly when it is already broken — this project has already lost six days to
+a feed that failed quietly. Freezing the reference means a stalled feed changes nothing.
+
+It is also what makes the filter measurable at all: a bench runs against a frozen cache days
+later, where every entry is stale by wall clock and any bound excludes the whole cache.
+`ais.set_poll_reference()` lets the bench say when each conversation happened, and
+`bench_identify` sets it per conversation. Every entry in both real caches carries
+`last_seen`, so the "unknown age is not fresh" rule costs nothing in production.
+
+### Two arms that could NOT be measured, and why
+
+Both looked like regressions and neither is. Recording this so the numbers are not re-derived
+and believed.
+
+- **Proximity tie-break on the shortlist** (`AIS_SUGGEST_TIEBREAK`, off): 9/35 → 8/35. The
+  one conversation that flipped, NOORDBORG, was ranked out for being 101.6 km away — but
+  that is where the ship was in the 08-15 snapshot, a day after it called. A frozen cache
+  keeps only each vessel's LATEST fix, so proximity-at-conversation-time does not survive in
+  it. The arm scored where ships ended up, not where they were on the radio.
+- **Callsign suffix fallback** (`AIS_CALLSIGN_SUFFIX_FALLBACK`, off): −0.9 precision, all
+  four flips in one conversation. The vessel spelled out *"Victory seven alpha six zero five
+  two"* = V7A6052, the callsign of ATLANTIC PRESTIGE **538010447**, and the fallback picked
+  exactly that ship. The label says ATLANTIC PRESTIGE by NAME, two ships carry it, and
+  `_resolve_expected` resolves a name through `_vessel_cache` — one entry per name — so the
+  truth silently became **244700991**, a 2 m-draught barge. The benchmark was wrong, not the
+  change. This is the label artifact already recorded as worth ~7 precision points.
+
+### A label naming a ship two vessels share is now NOT SCORED
+
+`_resolve_expected` used to resolve a label name through `_vessel_cache`, which holds one
+entry per name — so a shared name silently became whichever ship happened to be there, and
+the ambiguity was invisible by construction. The lookup is now built from `_mmsi_index`,
+keyed on each entry's current name, so it carries every ship of that name.
+
+An ambiguous line is **skipped with a loud warning**, not fatal. A hard error was written
+first and was wrong: it kills a whole file of good labels to protect a handful of lines. This
+is the file's own stated policy — *an unlabelled conversation is simply not scored; a guessed
+one corrupts every number computed from this file.*
+
+Seven of the 122 lines in `identification-labels-2026-08-13_14.txt` are affected: MAATJE (3
+ships), ATLANTIC PRESTIGE (2), MARJATTA ×2 (2), CONDOR ×3 (3). **Every identification number
+measured before 2026-08-18 inherited them.** Excluding them, stored-verdict precision on that
+corpus reads 89.8% rather than 84.1% and recall 67.9% rather than 64.2% — so the artifact was
+worth about 5.7 precision points, close to the ~7 estimated when it was first noticed.
+
+### Why they cannot be relabelled afterwards
+
+Disambiguating two ships of one name is done by matching what the vessel **said about itself**
+against where each candidate actually was — "passing the reporting line", "at Anchorage South
+position Lima", "on our way to the pilot station". That works only while the fixes are fresh.
+The cache keeps just the latest position per vessel, so days later the ships have moved and
+the evidence is gone; the audio still says "position Lima" but there is nothing left to check
+it against.
+
+This is the same lesson as `_CANDIDATE_FACTS`, from the other end: **a vessel's position is
+only knowable at the moment it is used.** Recording candidate positions at resolve time is
+what makes these lines answerable in future. The seven above are lost, and are simply not
+scored.
+
+Only one was settleable from the transcript: ATLANTIC PRESTIGE spelled out *"Victory seven
+alpha six zero five two"* — V7A6052, i.e. 538010447, the 200 m ship rather than the 135 m
+barge. The other six carry no spoken callsign or draught to discriminate on.
+
+### The gap the suffix fallback exists to close
+
+CLAMOR SCHULTE (V7B2710) spelled its callsign out and went unidentified. `_spelled_out_runs`
+produced `7B2710` — complete but for the leading V, swallowed before the spelling began
+("call **Sun**victor seven") rather than garbled within it. `match_by_callsign` cannot match
+a short run; `_partial_callsign_pattern` declines a span with no garble as "the exact
+lookup's job"; and `match_by_callsign_suffix`, which resolves `7B2710` to exactly one cached
+vessel, is reachable only *through* that pattern. Each path defers to the other and nobody
+tries the tail. Its draught, 6.1 m, matched the spoken "six decimal one zero" exactly.
+
+The fallback is built and tested behind both existing gates (unique tail, plus a name
+resembling that vessel spoken in the window). Over the 300 stored conversations it fires on
+4, agreeing with the stored verdict on 3 and supplying CLAMOR SCHULTE on the 4th. It stays
+**off** until the label ambiguity above is fixed and the arm can be scored.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`

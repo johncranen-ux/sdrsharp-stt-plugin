@@ -38,6 +38,13 @@ identified_vessels.html
 # snapshots. The store holds full transcripts of real traffic, so a snapshot leaks as
 # much as the live file.
 conversations*.json
+# ...and the timestamped backups a backfill leaves beside it, which the pattern above misses
+# because the name does not end in .json. Same transcripts, same leak.
+conversations.json.bak-*
+# bench_identify --suggest output. Unlike the other bench-*.json, which carry only
+# timestamps, MMSIs and outcomes, each shortlist row quotes the FRAGMENT that matched
+# ("heard": "MELD THEM IN") -- words actually spoken on air, against a time and a ship.
+suggest-*.json
 # ais_station_count.py output: per-hour MMSI observations from the local receiver, i.e. a
 # record of which vessels were where and when. Unanchored, like the patterns below, because
 # the anchored form is exactly what let three reference files reach the remote.

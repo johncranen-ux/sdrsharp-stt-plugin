@@ -146,6 +146,58 @@ def test_a_note_run_into_the_vessel_says_so(tmp_path):
             lookup={"MISTRAL": "1"})
 
 
+# A name two ships share cannot be ground truth
+#
+# ATLANTIC PRESTIGE, 2026-08-18: the cache held two of them -- 538010447 (callsign V7A6052,
+# draught 10.1) and 244700991 (PB8309, draught 2.0, an inland barge). The label said the
+# NAME, and resolution went through a dict holding one entry per name, so the truth silently
+# became the barge. A candidate change was then scored as -0.9 precision for picking the
+# ship that had just spelled out V7A6052 on air. The benchmark was wrong, not the change.
+#
+# A label that cannot distinguish two ships is not ground truth, and guessing between them
+# is worse than refusing: it produces a number that looks like evidence.
+
+_TWINS = {"ATLANTIC PRESTIGE": ["538010447", "244700991"], "THULELAND": "266248000"}
+
+
+def test_a_name_carried_by_two_ships_is_not_scored(tmp_path):
+    """Skipped, not resolved by guess. The file's own instructions set this policy: "an
+    unlabelled conversation is simply not scored; a guessed one corrupts every number
+    computed from this file"."""
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-13 19:36:22\t2026-08-13 19:36:46\tATLANTIC PRESTIGE\tx\n"
+                         "2026-08-04 13:58:14\t2026-08-04 13:59:08\tTHULELAND\ty\n"),
+        lookup=_TWINS)
+    assert [l.mmsi for l in labels] == ["266248000"], "the rest of the file must still parse"
+
+
+def test_skipping_an_ambiguous_label_is_loud(tmp_path, capsys):
+    """Dropping a line silently would shrink the corpus and flatter every score computed
+    from it -- the same reason a malformed line raises rather than being skipped."""
+    bi.parse_labels(
+        _write(tmp_path, "2026-08-13 19:36:22\t2026-08-13 19:36:46\tATLANTIC PRESTIGE\tx\n"),
+        lookup=_TWINS)
+    warned = capsys.readouterr().err
+    assert "ATLANTIC PRESTIGE" in warned
+    assert "538010447" in warned and "244700991" in warned, "say which ships, so it is fixable"
+    assert "NOT SCORED" in warned, "the consequence has to be unmissable"
+
+
+def test_an_mmsi_is_still_accepted_for_a_shared_name(tmp_path):
+    """The fix the error asks for: name the ship by the one identifier that distinguishes."""
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-13 19:36:22\t2026-08-13 19:36:46\t538010447\tx\n"),
+        lookup=_TWINS)
+    assert labels[0].mmsi == "538010447"
+
+
+def test_a_name_carried_by_exactly_one_ship_still_resolves(tmp_path):
+    labels = bi.parse_labels(
+        _write(tmp_path, "2026-08-04 13:58:14\t2026-08-04 13:59:08\tTHULELAND\tx\n"),
+        lookup={"THULELAND": ["266248000"]})
+    assert labels[0].mmsi == "266248000"
+
+
 def test_a_name_without_a_lookup_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="AIS cache"):
         bi.parse_labels(

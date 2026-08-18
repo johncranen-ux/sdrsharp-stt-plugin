@@ -23,7 +23,8 @@ from rapidfuzz import fuzz as rf_fuzz
 
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes, _km_from_maas,
                            match_by_callsign, match_by_callsign_pattern,
-                           match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates)
+                           match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates,
+                           is_recent, suggest_vessels)
 from stt_proxy.claude import _get_claude
 from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
@@ -286,6 +287,43 @@ Rules:
 RESOLVER_LIVE_CANDIDATES = os.environ.get("RESOLVER_LIVE_CANDIDATES", "on").strip().lower() != "off"
 
 
+# An age bound on the live-match path specifically.
+#
+# BELLONA, 2026-08-18: a 135x12 m inland barge drawing 1.5 m, bound for Antwerp, 72 km from
+# Maas Center, whose last AIS fix was 122 HOURS old, was named with high confidence over
+# GT VELA -- 12.8 km away and reporting seven minutes earlier. It reached the resolver
+# entirely through this function: match_by_mmsi reads _mmsi_index directly, so AIS_MAX_AGE_MIN
+# never applied here, and roughly half a real candidate list arrives by this route.
+#
+# Kept separate from AIS_MAX_AGE_MIN rather than folded into it: that setting bounds what can
+# be FOUND by name across every matcher, and turning it on is a much larger change than
+# declining to re-offer a vessel last heard from days ago.
+#
+# ON by default since 2026-08-18, on measurement. bench_identify --resolve --repeats 3 over
+# the 08-13/14 labels, only this bound varied:
+#
+#                    off (0)   360 min
+#     precision       87.1%     88.3%    +1.2
+#     recall          65.6%     66.3%    +0.7
+#     correct           386       386     unchanged
+#     wrong              57        51     -6
+#     missed            145       145     unchanged
+#
+# Spread 0.0 on every metric across three runs per arm, so this is signal and not the ~2.9
+# points of resolver sampling noise. Nothing was lost: not one correct identification became
+# a miss. All six transmissions that moved are a single conversation where nobody was
+# identifiable and PRESTO -- last heard from 29 hours earlier -- was named across all six.
+#
+# This is a REMOVING-wrong-candidates change, and the contrast with adding is now measured
+# from both ends: relaxing AIS_HINT_MIN_SCORE on 2026-08-12 added candidates and cost 11
+# precision points; this removes them and gains 1.2.
+#
+# Six hours because a ship quiet through a couple of 900 s polls should still be offered,
+# while yesterday's traffic should not. Only this value was measured -- there is no sweep
+# behind it. ROLLBACK: AIS_LIVE_MATCH_MAX_AGE_MIN=0 restores the old behaviour exactly.
+LIVE_MATCH_MAX_AGE_MIN = int(os.environ.get("AIS_LIVE_MATCH_MAX_AGE_MIN", "360"))
+
+
 def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
     """Vessels the per-transmission pass already matched against AIS in this window."""
     found: dict[str, dict] = {}
@@ -297,6 +335,8 @@ def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
             continue
         entry = match_by_mmsi(mmsi)
         if not entry:
+            continue
+        if not is_recent(entry, LIVE_MATCH_MAX_AGE_MIN):
             continue
         marked = dict(entry)
         marked["via_live_match"] = True
@@ -330,6 +370,24 @@ AIS_PARTIAL_CALLSIGN            = os.environ.get("AIS_PARTIAL_CALLSIGN", "on").s
 AIS_PHONETIC_CALLSIGN           = os.environ.get("AIS_PHONETIC_CALLSIGN", "on").strip().lower() != "off"
 PARTIAL_CALLSIGN_MIN_NAME_SCORE = int(os.environ.get("PARTIAL_CALLSIGN_MIN_NAME_SCORE", "60"))
 
+# Trying the TAIL of a callsign that decoded cleanly but short.
+#
+# CLAMOR SCHULTE, 2026-08-18, callsign V7B2710: the decoder produced "7B2710", complete but
+# for the leading V, which was swallowed before the spelling began ("call SUNvictor seven")
+# rather than garbled within it. match_by_callsign_suffix resolves that run to exactly one
+# cached vessel -- and was never asked, because it is reachable only through
+# _partial_callsign_pattern, which declines a span containing no garble as the exact
+# lookup's job. The exact lookup then cannot match a run that is a character short. Each
+# path defers to the other; the ship goes unidentified with its callsign on the air.
+#
+# Both existing gates still apply: the tail must fit exactly one cached callsign, and a name
+# resembling that vessel must be spoken somewhere in the window. Measured over the 300
+# stored conversations it fires on 4, agreeing with the stored verdict on 3 and supplying
+# CLAMOR SCHULTE on the fourth -- no new wrong answers. Off until that is confirmed
+# end-to-end rather than by candidate inspection, which has misled here before.
+CALLSIGN_SUFFIX_FALLBACK        = os.environ.get(
+    "AIS_CALLSIGN_SUFFIX_FALLBACK", "off").strip().lower() == "on"
+
 
 def _name_corroborates(vessel_name: str, chunks: list[dict]) -> bool:
     """True when some name spoken anywhere in the window resembles `vessel_name`.
@@ -361,6 +419,14 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
             probes.append(("pattern", decoded[0]))
         if AIS_PHONETIC_CALLSIGN:
             probes += [("suffix", run) for run in _phonetic_callsign_probes(text)]
+        if CALLSIGN_SUFFIX_FALLBACK:
+            # A run that decoded CLEANLY but came out short. Nothing in it is garbled, so
+            # _partial_callsign_pattern declines it as the exact lookup's job -- and the
+            # exact lookup cannot match a callsign missing a character. Without this the
+            # two paths hand it back and forth and the tail is never tried.
+            probes += [("suffix", run) for run in _spelled_out_runs(text)
+                       if len(run) >= CALLSIGN_RUN_MIN_LEN and not run.isdigit()
+                       and not match_by_callsign(run)]
 
         for kind, probe in probes:
             entry = (match_by_callsign_pattern(probe) if kind == "pattern"
@@ -483,6 +549,44 @@ def _render_resolver_input(chunks: list[dict], candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# What the resolver was offered, recorded on every row it produces
+#
+# "not in the candidate list" is far and away the commonest reason a conversation resolves
+# to nobody -- it is the stated reason in almost every unidentified row -- and until now the
+# list itself was discarded the moment the call returned. That left no way to separate the
+# two cases behind that sentence: a vessel that was never offered (a cache-membership
+# problem) from one that was offered and rejected (a resolver-judgement problem). They need
+# opposite fixes, and both BORIS SOKOLOV and SEA BANCKERT were undiagnosable without it.
+#
+# Name, MMSI, how each candidate got on the list, and the four facts that judge whether it
+# was PLAUSIBLE -- where it was, how deep it sat, where it was going, and when it was last
+# heard from. Not every AIS field: imo, sog and cog judge nothing here and this is written
+# three hundred times over.
+#
+# Position and the rest were left out at first, on the argument that they answered no
+# question this record existed to answer. Two measurements then failed for want of exactly
+# them. A vessel's position is only knowable at the moment it is used: a frozen cache keeps
+# only each ship's LATEST fix, so NOORDBORG reads as 101.6 km away in a snapshot taken a day
+# after it called, and any retrospective proximity question scores where the ship ended up
+# rather than where it was on the radio. And BELLONA -- the misidentification that prompted
+# all of this -- was recognisable as wrong precisely by draught 1.5 m and destination
+# ANTWERPEN on a Rotterdam approach channel, plus a fix 122 hours old.
+#
+# Not recording these does not defer those questions. It destroys them.
+_CANDIDATE_MARKS = ("via_callsign", "via_live_match", "via_partial_callsign")
+_CANDIDATE_FACTS = ("latitude", "longitude", "draught", "destination", "last_seen")
+
+
+def _record_candidates(rows: list[dict], candidates: list[dict]) -> list[dict]:
+    compact = [{"name": c.get("name"), "mmsi": c.get("mmsi"),
+                **{mark: bool(c.get(mark)) for mark in _CANDIDATE_MARKS},
+                **{fact: c.get(fact) for fact in _CANDIDATE_FACTS}}
+               for c in candidates]
+    for row in rows:
+        row["resolver_candidates"] = compact
+    return rows
+
+
 def resolve_conversation(chunks: list[dict]) -> list[dict]:
     """Segment a closed window into exchanges and identify each. Never returns text."""
     if not chunks:
@@ -516,9 +620,12 @@ def resolve_conversation(chunks: list[dict]) -> list[dict]:
         exchanges = json.loads(content).get("exchanges", [])
     except Exception as exc:
         print(f"  [resolve error] {exc}", flush=True)
-        return _unresolved(chunks)
+        # Recorded on this path too: "the resolver never ran" and "the resolver ran and
+        # found nobody" look identical in the store otherwise, and only one of them is a
+        # reason to go looking at the candidate list.
+        return _record_candidates(_unresolved(chunks), candidates)
 
-    return _validate_exchanges(exchanges, chunks, by_name)
+    return _record_candidates(_validate_exchanges(exchanges, chunks, by_name), candidates)
 
 
 def _unresolved(chunks: list[dict]) -> list[dict]:
@@ -593,6 +700,98 @@ def _format_candidates(row: dict) -> str:
     return (f'<div class="cands"><span class="clabel">{len(candidates)} candidates '
             f'&mdash; pick the one that fits what was said:</span>'
             f'<ul>{"".join(items)}</ul></div>')
+
+
+# ---------------------------------------------------------------------------
+# Suggestions for a conversation nobody was identified in
+# ---------------------------------------------------------------------------
+#
+# When the resolver names nobody, the page offers the closest names anyway, below the
+# cutoff, for the reader to judge by ear. Measured on the 08-13/14 labels: of the 35
+# conversations left unidentified, a three-item shortlist holds the right ship 9 times.
+#
+# Display only. Nothing here reaches `vessel`, `mmsi`, the vessel log, the resolver's
+# candidate list or the conversation-correction pass -- the shortlist is computed after the
+# identity is already final, and is never read back. That separation is the whole safety
+# argument: it is why this cannot repeat THULELAND, where a sub-cutoff match rewrote
+# "motor vessel to Leland" into "motor vessel Vlieland" and named the wrong ship.
+SUGGEST           = os.environ.get("AIS_SUGGEST", "on").strip().lower() != "off"
+SUGGEST_N         = int(os.environ.get("AIS_SUGGEST_N", "3"))
+SUGGEST_DF_MAX    = float(os.environ.get("AIS_SUGGEST_DF_MAX", "0.05"))
+# Below this many stored conversations the frequency table cannot tell a ship from the
+# station, so the shortlist would be MAAS, MAS, MAAS on every row. Show nothing instead.
+SUGGEST_MIN_DOCS  = int(os.environ.get("AIS_SUGGEST_MIN_DOCS", "30"))
+
+
+def _boilerplate_filter(rows: list[dict]):
+    """A predicate: is this word span specific enough to be worth looking up as a name?
+
+    Vessel names are rare -- a ship calls once or twice and is gone. Procedure is not: on
+    this channel "MAAS" appears in 93% of stored conversations and "MAAS APPROACH" in 91%,
+    because that is how every call opens. Two real cargo ships carry those names, and they
+    took 56 of the 105 top-three shortlist slots before this filter existed.
+
+    Document frequency rather than a hand-written place list, so it re-learns whatever
+    station is on air -- point the receiver at the Aviation band and it adapts by itself.
+    """
+    counts: dict[str, int] = {}
+    docs = 0
+    for row in rows:
+        # The page shows corrected text where there is any, so count the same words the
+        # reader sees -- otherwise a probe can be boilerplate on screen and rare in here.
+        text = " ".join((t.get("conv") or t.get("text") or "") for t in row.get("turns") or [])
+        if not text.strip():
+            continue
+        docs += 1
+        for probe in set(_hint_probes(text)):
+            counts[probe] = counts.get(probe, 0) + 1
+    if not docs:
+        return lambda probe: True
+    return lambda probe: counts.get(probe, 0) / docs <= SUGGEST_DF_MAX
+
+
+def _attach_suggestions(row: dict) -> None:
+    """Add `row["suggestions"]` when, and only when, the conversation named nobody.
+
+    Mutates in place and leaves `vessel` and `mmsi` alone -- see the note above. Attached to
+    the stored row so the page needs no extra lookup, the same way `candidates` is, and
+    absent entirely when there is nothing to offer: an empty block would train the reader
+    to skip the one that matters.
+    """
+    if not SUGGEST or row.get("vessel"):
+        return
+    with _resolved_lock:
+        corpus = list(_resolved)
+    if len(corpus) < SUGGEST_MIN_DOCS:
+        return
+    text = " ".join((t.get("conv") or t.get("text") or "") for t in row.get("turns") or [])
+    found = suggest_vessels(text, probe_filter=_boilerplate_filter(corpus), n=SUGGEST_N)
+    if found:
+        row["suggestions"] = found
+
+
+def _format_suggestions(row: dict) -> str:
+    """The shortlist for an unidentified conversation, or "" when there is none.
+
+    The remark is not a caption -- it is what separates this block from an identification.
+    Every row stored before this feature existed simply lacks the key.
+    """
+    suggestions = row.get("suggestions") or []
+    if not suggestions:
+        return ""
+
+    items = []
+    for i, s in enumerate(suggestions, 1):
+        items.append(
+            f'<li><span class="srank">{i}</span>'
+            f'{_vessel_link(s.get("name", "?"), s.get("mmsi"))} '
+            f'<span class="sscore">{float(s.get("score", 0)):.0f}</span> '
+            f'<span class="sheard">heard &ldquo;{_html_escape(str(s.get("heard", "")).title())}'
+            f'&rdquo;</span></li>')
+
+    return ('<div class="suggest"><span class="slabel">Possible matches &mdash; these scored '
+            '<em>below the identification cutoff</em>, so nobody was named. Unconfirmed:'
+            f'</span><ol>{"".join(items)}</ol></div>')
 
 
 def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
@@ -704,7 +903,15 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
             row = {"time": t["time"].strftime("%H:%M:%S"),
                    "text": t.get("corrected") or t.get("text", ""),
                    "raw": t.get("text", ""),
-                   "live_vessel": t.get("live_vessel")}
+                   "live_vessel": t.get("live_vessel"),
+                   # Stored beside the name because the name alone is ambiguous:
+                   # enrich_with_ais returns the result untouched when AIS matches nothing,
+                   # so live_vessel can mean either "AIS matched this ship" or "the model
+                   # heard this name and AIS had no such ship". Those have opposite causes
+                   # -- a matcher problem versus a cache-membership problem -- and only the
+                   # MMSI separates them. Its absence blocked the BORIS SOKOLOV diagnosis
+                   # on 2026-08-13 and the same question again five days later.
+                   "live_mmsi": t.get("live_mmsi")}
             fix = corrections.get(t["id"])
             # Absent rather than equal-to-text when nothing was corrected, so the page can
             # tell "not corrected" from "corrected to the same thing".
@@ -721,6 +928,10 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
         })
     if not rows:
         return
+    # Before the rows join the corpus, so a conversation cannot vote on what counts as
+    # boilerplate in its own shortlist.
+    for row in rows:
+        _attach_suggestions(row)
     with _resolved_lock:
         _resolved.extend(rows)
         del _resolved[:-CONVERSATIONS_KEEP]
@@ -805,7 +1016,7 @@ def render_conversations_page(rows: list[dict]) -> str:
         # and the rows stored before these fields existed, have nothing to say here.
         particulars = _format_particulars(row)
         ais_line = f'\n      <div class="ais">{particulars}</div>' if particulars else ""
-        cand_block = _format_candidates(row)
+        cand_block = _format_candidates(row) + _format_suggestions(row)
 
         blocks.append(f"""
     <div class="conv {'named' if vessel else 'unnamed'}">
@@ -860,6 +1071,14 @@ def render_conversations_page(rows: list[dict]) -> str:
  .cands .clabel{{font-size:.85em;color:#8a6d00}}
  .cands ul{{margin:.3em 0 0 0;padding-left:1.2em}}
  .cands .cmeta{{color:#666;font-size:.85em}}
+ .suggest{{margin:.4em 0 .2em 0;padding:.4em .6em;border-left:3px solid #7f8c8d;background:#f0f2f3}}
+ .suggest .slabel{{font-size:.85em;color:#555}} .suggest .slabel em{{color:#c0392b;font-style:normal}}
+ .suggest ol{{margin:.3em 0 0 0;padding-left:0;list-style:none}}
+ .suggest li{{padding:1px 0}}
+ .srank{{color:#888;font-family:monospace;font-size:.85em;margin-right:.5em}}
+ .sscore{{color:#666;font-family:monospace;font-size:.8em;border:1px solid #ccc;
+          border-radius:2px;padding:0 .3em}}
+ .sheard{{color:#666;font-size:.85em;font-style:italic}}
 </style></head><body>
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>
