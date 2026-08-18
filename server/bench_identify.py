@@ -72,6 +72,11 @@ _LINE_RE = re.compile(rf"^({_TS_RE})[ \t]+({_TS_RE})[ \t]+(.+)$")
 # Labels
 # ---------------------------------------------------------------------------
 
+# Returned by _resolve_expected for a name two or more ships share. Distinct from None,
+# which is a real answer meaning "nobody was identifiable" and IS scored.
+_AMBIGUOUS = object()
+
+
 @dataclass(frozen=True)
 class Label:
     start: datetime.datetime
@@ -99,7 +104,36 @@ def _resolve_expected(value: str, lookup: dict | None, where: str) -> str | None
     if lookup is None:
         raise ValueError(f"{where}: {value!r} is a vessel name, which needs the AIS cache to "
                          f"resolve -- run bench_identify.py rather than calling parse_labels bare")
-    mmsi = lookup.get(value.upper())
+    # A scalar is the unambiguous case; a list carries every ship of that name.
+    found = lookup.get(value.upper())
+    mmsis = [found] if isinstance(found, str) else list(found or [])
+
+    # A name two ships share is not ground truth, and picking one is worse than refusing --
+    # it yields a number that looks like evidence. ATLANTIC PRESTIGE, 2026-08-18: the cache
+    # held 538010447 (V7A6052, draught 10.1) and 244700991 (PB8309, draught 2.0, an inland
+    # barge). Resolution ran through a dict holding one entry per name, so the truth silently
+    # became the barge, and a change that picked the ship which had just spelled out V7A6052
+    # on air was scored as -0.9 precision for it.
+    if len(mmsis) > 1:
+        # Skipped rather than fatal. A hard error would kill a whole file of good labels to
+        # protect a handful of lines, and those lines often cannot be repaired later at all:
+        # disambiguating two ships of one name means checking what the vessel SAID about
+        # itself -- "passing the reporting line", "at Anchorage South position Lima", "on our
+        # way to the pilot station" -- against where each candidate actually was, and the
+        # cache keeps only the latest fix. Days on, the ships have moved and the evidence is
+        # gone. Recording the candidates' positions at resolve time is what makes it
+        # answerable in future; see _CANDIDATE_FACTS in conversations.py.
+        #
+        # This is the file's own stated policy: an unlabelled conversation is simply not
+        # scored, while a guessed one corrupts every number computed from the file. Loud,
+        # because dropping a line quietly would shrink the corpus and flatter every score.
+        print(f"warning: {where}: {value!r} is carried by {len(mmsis)} vessels "
+              f"({', '.join(sorted(mmsis))}) -- NOT SCORED. A name cannot say which ship "
+              f"was speaking; put an MMSI in field 3 to score this conversation.",
+              file=sys.stderr)
+        return _AMBIGUOUS
+
+    mmsi = mmsis[0] if mmsis else None
     if not mmsi:
         # Much the commonest cause: a note left on the line without a tab in front of it, so
         # it got read as part of the ship's name. Say so before blaming the spelling.
@@ -137,6 +171,8 @@ def parse_labels(path, lookup: dict | None = None) -> list[Label]:
         except ValueError as exc:
             raise ValueError(f"{path}:{lineno}: {exc}") from exc
         mmsi = _resolve_expected(expected_s.strip(), lookup, f"{path}:{lineno}")
+        if mmsi is _AMBIGUOUS:
+            continue
         note = note.strip()
         labels.append(Label(start, end, mmsi, note))
     return labels
@@ -736,7 +772,15 @@ def main(argv: list[str] | None = None) -> int:
     # Labels may name a vessel rather than an MMSI, which needs the cache to resolve.
     from stt_proxy import ais
     ais._load_cache()
-    lookup = {name: entry.get("mmsi") for name, entry in ais._vessel_cache.items()}
+    # Built from _mmsi_index, not _vessel_cache: the latter holds ONE entry per name, so a
+    # name two ships share resolves to whichever happens to be there and the ambiguity is
+    # invisible. Keyed on each entry's CURRENT name, the same rule candidates_for_name uses,
+    # so a renamed vessel does not leave a ghost under its old name.
+    lookup: dict[str, list[str]] = {}
+    for mmsi, entry in ais._mmsi_index.items():
+        key = (entry.get("name") or "").strip().upper()
+        if key:
+            lookup.setdefault(key, []).append(str(mmsi))
     try:
         labels = parse_labels(args.labels, lookup=lookup)
     except ValueError as exc:

@@ -1902,9 +1902,41 @@ and believed.
   truth silently became **244700991**, a 2 m-draught barge. The benchmark was wrong, not the
   change. This is the label artifact already recorded as worth ~7 precision points.
 
-**`_resolve_expected` should refuse a label name carried by more than one MMSI** rather than
-silently picking one; `_name_index` already knows there are two. Until it does, any arm that
-moves a shared-name conversation is unscoreable. Not yet done.
+### A label naming a ship two vessels share is now NOT SCORED
+
+`_resolve_expected` used to resolve a label name through `_vessel_cache`, which holds one
+entry per name — so a shared name silently became whichever ship happened to be there, and
+the ambiguity was invisible by construction. The lookup is now built from `_mmsi_index`,
+keyed on each entry's current name, so it carries every ship of that name.
+
+An ambiguous line is **skipped with a loud warning**, not fatal. A hard error was written
+first and was wrong: it kills a whole file of good labels to protect a handful of lines. This
+is the file's own stated policy — *an unlabelled conversation is simply not scored; a guessed
+one corrupts every number computed from this file.*
+
+Seven of the 122 lines in `identification-labels-2026-08-13_14.txt` are affected: MAATJE (3
+ships), ATLANTIC PRESTIGE (2), MARJATTA ×2 (2), CONDOR ×3 (3). **Every identification number
+measured before 2026-08-18 inherited them.** Excluding them, stored-verdict precision on that
+corpus reads 89.8% rather than 84.1% and recall 67.9% rather than 64.2% — so the artifact was
+worth about 5.7 precision points, close to the ~7 estimated when it was first noticed.
+
+### Why they cannot be relabelled afterwards
+
+Disambiguating two ships of one name is done by matching what the vessel **said about itself**
+against where each candidate actually was — "passing the reporting line", "at Anchorage South
+position Lima", "on our way to the pilot station". That works only while the fixes are fresh.
+The cache keeps just the latest position per vessel, so days later the ships have moved and
+the evidence is gone; the audio still says "position Lima" but there is nothing left to check
+it against.
+
+This is the same lesson as `_CANDIDATE_FACTS`, from the other end: **a vessel's position is
+only knowable at the moment it is used.** Recording candidate positions at resolve time is
+what makes these lines answerable in future. The seven above are lost, and are simply not
+scored.
+
+Only one was settleable from the transcript: ATLANTIC PRESTIGE spelled out *"Victory seven
+alpha six zero five two"* — V7A6052, i.e. 538010447, the 200 m ship rather than the 135 m
+barge. The other six carry no spoken callsign or draught to discriminate on.
 
 ### The gap the suffix fallback exists to close
 
