@@ -54,7 +54,7 @@ import anthropic
 
 
 PROXY_PORT   = int(os.environ.get("PROXY_PORT", "9000"))
-BACKEND_HOST = "localhost"
+BACKEND_HOST = os.environ.get("WHISPER_BACKEND_HOST", "localhost").strip() or "localhost"
 BACKEND_PORT = int(os.environ.get("WHISPER_BACKEND_PORT", "8080"))
 
 # Which STT backend transcribes audio. "groq" (default) calls Groq's hosted Whisper
@@ -90,6 +90,13 @@ ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
 AIS_CACHE_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ais_cache.json")
 VESSELS_LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identified_vessels.html")
 AIS_SAVE_INTERVAL   = 300
+
+# When the plugin last posted audio, and when this process started. Both epoch seconds.
+# Chunk arrival -- not process liveness -- is what tells the control panel SDR# is actually
+# receiving: SDR# can sit open with the play button unpressed and nothing would ever arrive,
+# which a process-alive check would report as healthy.
+_last_chunk_at: float | None = None
+_STARTED_AT = time.time()
 
 # ---------------------------------------------------------------------------
 # Recent-traffic memory and retrospective conversation resolution
@@ -278,6 +285,30 @@ PATH_MAP = frozenset({
 })
 
 
+def _status_payload() -> dict:
+    """What the control panel needs, and nothing else.
+
+    Every field here reaches a browser over a network, so the key set is pinned by a test.
+    Read through the modules rather than the re-exports: the feed thread rebinds
+    ais._vessel_cache, so an imported name would freeze a snapshot.
+    """
+    with ais._cache_lock:
+        cache_size = len(ais._vessel_cache)
+    with conversations._resolved_lock:
+        stored = len(conversations._resolved)
+    last_poll = ais._last_poll_at
+    return {
+        "stt_backend": STT_BACKEND,
+        "ais_source": os.environ.get("AIS_SOURCE", "aishub").strip().lower(),
+        "ais_cache_size": cache_size,
+        "ais_last_poll_at": last_poll.timestamp() if last_poll else None,
+        "conversations": stored,
+        "last_chunk_at": _last_chunk_at,
+        "started_at": _STARTED_AT,
+        "now": time.time(),
+    }
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # Everything served here is live state that changes second to second, and none of it was
@@ -346,6 +377,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error(500, str(exc))
             return
 
+        if self.path == "/api/status":
+            try:
+                data = json.dumps(_status_payload()).encode("utf-8")
+                self.send_response(200)
+                self._send_live_headers("application/json", len(data), cors=True)
+                self.wfile.write(data)
+            except Exception as exc:
+                self.send_error(500, str(exc))
+            return
+
         self.send_response(404)
         self.end_headers()
 
@@ -370,6 +411,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+
+        # A chunk arrived, so SDR# is open AND playing. The dashboard reads this.
+        global _last_chunk_at
+        _last_chunk_at = time.time()
 
         # Keep only the audio file and the client's optional language/prompt overrides.
         # Every other decoder param is server-owned (see _build_whisper_params) so tuning

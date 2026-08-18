@@ -4036,3 +4036,63 @@ def test_rows_stored_before_candidates_existed_still_render():
         "turns": [{"time": "10:00:00", "text": "hello"}],
     }])
     assert "OLD ROW" in html
+
+
+# ---------------------------------------------------------------------------
+# /api/status -- what the control panel asks the proxy about itself
+# ---------------------------------------------------------------------------
+
+def test_status_payload_reports_what_the_dashboard_needs(monkeypatch):
+    """Everything the health strip shows, from the process that actually knows it."""
+    monkeypatch.setattr(proxy, "_last_chunk_at", 1_755_500_000.0, raising=False)
+    monkeypatch.setattr(ais, "_vessel_cache", {"1": {}, "2": {}}, raising=False)
+    monkeypatch.setattr(ais, "_last_poll_at",
+                        datetime.datetime(2026, 8, 18, 12, 0, 0), raising=False)
+    monkeypatch.setattr(conversations, "_resolved", [{}, {}, {}], raising=False)
+
+    payload = proxy._status_payload()
+
+    assert payload["ais_cache_size"] == 2
+    assert payload["conversations"] == 3
+    assert payload["last_chunk_at"] == 1_755_500_000.0
+    assert payload["ais_last_poll_at"] == datetime.datetime(2026, 8, 18, 12, 0, 0).timestamp()
+    assert payload["now"] >= payload["started_at"]
+
+
+def test_status_payload_carries_no_secret():
+    """This payload crosses a network to a browser. The key set is pinned so that adding a
+    field is a deliberate act -- one os.environ.get too many would publish an API key."""
+    assert set(proxy._status_payload()) == {
+        "stt_backend", "ais_source", "ais_cache_size", "ais_last_poll_at",
+        "conversations", "last_chunk_at", "started_at", "now",
+    }
+
+
+def test_last_chunk_at_is_none_or_a_time_never_a_missing_key():
+    """Null means 'nothing yet', which the dashboard must show differently from 'long ago'."""
+    value = proxy._status_payload()["last_chunk_at"]
+    assert value is None or isinstance(value, float)
+
+
+def test_conversations_file_honours_its_environment_override(monkeypatch, tmp_path):
+    """Hardcoded until now, unlike AIS_CACHE_FILE -- which made the end-to-end test only
+    incidentally safe: it never pointed the child's conversation store anywhere private."""
+    import importlib
+    monkeypatch.setenv("CONVERSATIONS_FILE", str(tmp_path / "conv.json"))
+    reloaded = importlib.reload(conversations)
+    try:
+        assert reloaded.CONVERSATIONS_FILE == str(tmp_path / "conv.json")
+    finally:
+        monkeypatch.delenv("CONVERSATIONS_FILE")
+        importlib.reload(conversations)
+
+
+def test_vessels_log_file_honours_its_environment_override(monkeypatch, tmp_path):
+    import importlib
+    monkeypatch.setenv("VESSELS_LOG_FILE", str(tmp_path / "vessels.html"))
+    reloaded = importlib.reload(vessel_log)
+    try:
+        assert reloaded.VESSELS_LOG_FILE == str(tmp_path / "vessels.html")
+    finally:
+        monkeypatch.delenv("VESSELS_LOG_FILE")
+        importlib.reload(vessel_log)

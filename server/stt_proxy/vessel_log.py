@@ -11,9 +11,10 @@ import threading
 from stt_proxy.ais import _cache_size, _get_ship_type_name
 from stt_proxy.markup import _html_escape, _vessel_link
 
-VESSELS_LOG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "identified_vessels.html")
-VESSELS_LOG_FILE = os.path.normpath(VESSELS_LOG_FILE)
+_DEFAULT_VESSELS_LOG_FILE = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "identified_vessels.html"))
+VESSELS_LOG_FILE = os.path.normpath(
+    os.environ.get("VESSELS_LOG_FILE", "").strip() or _DEFAULT_VESSELS_LOG_FILE)
 
 
 

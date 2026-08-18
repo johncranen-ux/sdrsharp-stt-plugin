@@ -868,7 +868,12 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
     return out
 
 
-CONVERSATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conversations.json")
+_DEFAULT_CONVERSATIONS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "conversations.json")
+# Overridable like AIS_CACHE_FILE, so a test or a second deployment can point the store
+# somewhere private instead of writing beside the code.
+CONVERSATIONS_FILE = os.path.normpath(
+    os.environ.get("CONVERSATIONS_FILE", "").strip() or _DEFAULT_CONVERSATIONS_FILE)
 CONVERSATIONS_KEEP = int(os.environ.get("CONVERSATIONS_KEEP", "300"))
 
 _resolved: list[dict] = []
