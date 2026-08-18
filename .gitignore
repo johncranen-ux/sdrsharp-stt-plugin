@@ -93,6 +93,8 @@ bench-correct-cache/
 
 # Secrets — never commit API keys
 start-all.bat
+# Holds the API keys the control panel manages.
+config.json
 
 # Claude Code local settings
 .claude/
