@@ -23,7 +23,8 @@ from rapidfuzz import fuzz as rf_fuzz
 
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes, _km_from_maas,
                            match_by_callsign, match_by_callsign_pattern,
-                           match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates)
+                           match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates,
+                           suggest_vessels)
 from stt_proxy.claude import _get_claude
 from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
@@ -595,6 +596,98 @@ def _format_candidates(row: dict) -> str:
             f'<ul>{"".join(items)}</ul></div>')
 
 
+# ---------------------------------------------------------------------------
+# Suggestions for a conversation nobody was identified in
+# ---------------------------------------------------------------------------
+#
+# When the resolver names nobody, the page offers the closest names anyway, below the
+# cutoff, for the reader to judge by ear. Measured on the 08-13/14 labels: of the 35
+# conversations left unidentified, a three-item shortlist holds the right ship 9 times.
+#
+# Display only. Nothing here reaches `vessel`, `mmsi`, the vessel log, the resolver's
+# candidate list or the conversation-correction pass -- the shortlist is computed after the
+# identity is already final, and is never read back. That separation is the whole safety
+# argument: it is why this cannot repeat THULELAND, where a sub-cutoff match rewrote
+# "motor vessel to Leland" into "motor vessel Vlieland" and named the wrong ship.
+SUGGEST           = os.environ.get("AIS_SUGGEST", "on").strip().lower() != "off"
+SUGGEST_N         = int(os.environ.get("AIS_SUGGEST_N", "3"))
+SUGGEST_DF_MAX    = float(os.environ.get("AIS_SUGGEST_DF_MAX", "0.05"))
+# Below this many stored conversations the frequency table cannot tell a ship from the
+# station, so the shortlist would be MAAS, MAS, MAAS on every row. Show nothing instead.
+SUGGEST_MIN_DOCS  = int(os.environ.get("AIS_SUGGEST_MIN_DOCS", "30"))
+
+
+def _boilerplate_filter(rows: list[dict]):
+    """A predicate: is this word span specific enough to be worth looking up as a name?
+
+    Vessel names are rare -- a ship calls once or twice and is gone. Procedure is not: on
+    this channel "MAAS" appears in 93% of stored conversations and "MAAS APPROACH" in 91%,
+    because that is how every call opens. Two real cargo ships carry those names, and they
+    took 56 of the 105 top-three shortlist slots before this filter existed.
+
+    Document frequency rather than a hand-written place list, so it re-learns whatever
+    station is on air -- point the receiver at the Aviation band and it adapts by itself.
+    """
+    counts: dict[str, int] = {}
+    docs = 0
+    for row in rows:
+        # The page shows corrected text where there is any, so count the same words the
+        # reader sees -- otherwise a probe can be boilerplate on screen and rare in here.
+        text = " ".join((t.get("conv") or t.get("text") or "") for t in row.get("turns") or [])
+        if not text.strip():
+            continue
+        docs += 1
+        for probe in set(_hint_probes(text)):
+            counts[probe] = counts.get(probe, 0) + 1
+    if not docs:
+        return lambda probe: True
+    return lambda probe: counts.get(probe, 0) / docs <= SUGGEST_DF_MAX
+
+
+def _attach_suggestions(row: dict) -> None:
+    """Add `row["suggestions"]` when, and only when, the conversation named nobody.
+
+    Mutates in place and leaves `vessel` and `mmsi` alone -- see the note above. Attached to
+    the stored row so the page needs no extra lookup, the same way `candidates` is, and
+    absent entirely when there is nothing to offer: an empty block would train the reader
+    to skip the one that matters.
+    """
+    if not SUGGEST or row.get("vessel"):
+        return
+    with _resolved_lock:
+        corpus = list(_resolved)
+    if len(corpus) < SUGGEST_MIN_DOCS:
+        return
+    text = " ".join((t.get("conv") or t.get("text") or "") for t in row.get("turns") or [])
+    found = suggest_vessels(text, probe_filter=_boilerplate_filter(corpus), n=SUGGEST_N)
+    if found:
+        row["suggestions"] = found
+
+
+def _format_suggestions(row: dict) -> str:
+    """The shortlist for an unidentified conversation, or "" when there is none.
+
+    The remark is not a caption -- it is what separates this block from an identification.
+    Every row stored before this feature existed simply lacks the key.
+    """
+    suggestions = row.get("suggestions") or []
+    if not suggestions:
+        return ""
+
+    items = []
+    for i, s in enumerate(suggestions, 1):
+        items.append(
+            f'<li><span class="srank">{i}</span>'
+            f'{_vessel_link(s.get("name", "?"), s.get("mmsi"))} '
+            f'<span class="sscore">{float(s.get("score", 0)):.0f}</span> '
+            f'<span class="sheard">heard &ldquo;{_html_escape(str(s.get("heard", "")).title())}'
+            f'&rdquo;</span></li>')
+
+    return ('<div class="suggest"><span class="slabel">Possible matches &mdash; these scored '
+            '<em>below the identification cutoff</em>, so nobody was named. Unconfirmed:'
+            f'</span><ol>{"".join(items)}</ol></div>')
+
+
 def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
     """Keep the model inside the candidate list and account for every transmission.
 
@@ -721,6 +814,10 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
         })
     if not rows:
         return
+    # Before the rows join the corpus, so a conversation cannot vote on what counts as
+    # boilerplate in its own shortlist.
+    for row in rows:
+        _attach_suggestions(row)
     with _resolved_lock:
         _resolved.extend(rows)
         del _resolved[:-CONVERSATIONS_KEEP]
@@ -805,7 +902,7 @@ def render_conversations_page(rows: list[dict]) -> str:
         # and the rows stored before these fields existed, have nothing to say here.
         particulars = _format_particulars(row)
         ais_line = f'\n      <div class="ais">{particulars}</div>' if particulars else ""
-        cand_block = _format_candidates(row)
+        cand_block = _format_candidates(row) + _format_suggestions(row)
 
         blocks.append(f"""
     <div class="conv {'named' if vessel else 'unnamed'}">
@@ -860,6 +957,14 @@ def render_conversations_page(rows: list[dict]) -> str:
  .cands .clabel{{font-size:.85em;color:#8a6d00}}
  .cands ul{{margin:.3em 0 0 0;padding-left:1.2em}}
  .cands .cmeta{{color:#666;font-size:.85em}}
+ .suggest{{margin:.4em 0 .2em 0;padding:.4em .6em;border-left:3px solid #7f8c8d;background:#f0f2f3}}
+ .suggest .slabel{{font-size:.85em;color:#555}} .suggest .slabel em{{color:#c0392b;font-style:normal}}
+ .suggest ol{{margin:.3em 0 0 0;padding-left:0;list-style:none}}
+ .suggest li{{padding:1px 0}}
+ .srank{{color:#888;font-family:monospace;font-size:.85em;margin-right:.5em}}
+ .sscore{{color:#666;font-family:monospace;font-size:.8em;border:1px solid #ccc;
+          border-radius:2px;padding:0 .3em}}
+ .sheard{{color:#666;font-size:.85em;font-style:italic}}
 </style></head><body>
 <h1>Resolved Conversations</h1>
 <p><a href="/identified-vessels">Identified vessels log</a> &middot; {len(rows)} exchanges &middot; auto-refresh 30s</p>

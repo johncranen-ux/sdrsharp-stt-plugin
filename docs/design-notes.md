@@ -1701,6 +1701,64 @@ failing *again* after it recovers — and this feed has already changed failure 
 mid-outage. Restore with `AIS_SILENCE_WARN_SEC=60`; there is a commented line in
 `start-all.bat` saying to do so the moment the feed returns.
 
+## Offering the near misses instead of asserting them (2026-08-18)
+
+`/conversations` now shows, under a conversation nobody was identified in, the best three
+vessel names found *below* the identification cutoff, labelled as unconfirmed. It never
+names anyone: `vessel` and `mmsi` stay null, and nothing reads the block back.
+
+This is not "lower the cutoff", which was measured on 2026-08-12 and cost **11 precision
+points** — fourteen correctly-unnamed conversations became confident misidentifications.
+That result stands. The difference is that a suggestion is not an assertion, so the
+precision the cutoff protects is untouched by construction.
+
+**Measured on the 35 unidentified conversations of the 08-13/14 labels:**
+
+| retrieval | truth in top 1 | top 3 | top 5 | anywhere |
+|---|---|---|---|---|
+| live hints, cutoff 85 (unchanged, for reference) | — | 2 | 2 | 2 |
+| global rank, no probe filter | 0 | 3 | 7 | 22 |
+| **global rank + document-frequency filter (shipped)** | **4** | **9** | 12 | 22 |
+
+Two findings behind those rows.
+
+**The live retrieval cannot be relaxed into a shortlist.** `_find_ais_hints` runs
+`extractOne` per probe and stops at *n* slots, so as the cutoff falls the wrong ships arrive
+first, fill the slots and bury the right one — reachability is non-monotonic, going
+35 → 38 → 35 → 29 → 24 as the cutoff drops 85 → 80 → 76 → 70 → 65. `suggest_vessels` scores
+every (probe, name) pair and ranks globally, so there are no slots to fill.
+
+**Most of the shortlist was the shore station.** Two real cargo ships are named MAAS and
+MAS, and "Maas Approach" opens nearly every call, so they took **56 of the 105 top-three
+slots** — which is the whole gap between 3 and 9 above. They are removed by document
+frequency rather than a hand-written place list: a probe heard in more than
+`AIS_SUGGEST_DF_MAX` of stored conversations is procedure, not a name (MAAS is in 93%,
+MAAS APPROACH in 91%, while a vessel calls once or twice). That re-learns whatever station
+is on air, which matters for the Aviation band. Below `AIS_SUGGEST_MIN_DOCS` stored
+conversations the table cannot tell a ship from the station, so nothing is shown at all.
+
+Gating on score buys nothing — the hit rate is flat at 23–26% whether the block is shown
+always or only when its best candidate clears 85. So it is shown whenever it has anything.
+
+**9/35 is an upper bound.** The pool was the frozen 08-15 cache, a superset of what was live
+when each conversation resolved; candidate lists are not persisted, so the real figure
+cannot be recovered. `last_seen` stores only the maximum, so it cannot discriminate either.
+
+The value is not the rank. `heard "Meld Them In"` beside MELTEMI I is something a reader who
+heard the audio settles instantly and no edit-distance scorer can: the block turns an
+unanswerable question into an adjudicable one.
+
+Knobs: `AIS_SUGGEST` (on), `AIS_SUGGEST_N` (3), `AIS_SUGGEST_FLOOR` (55),
+`AIS_SUGGEST_DF_MAX` (0.05), `AIS_SUGGEST_MIN_DOCS` (30). Cost is ~53 ms per unidentified
+conversation, against a resolver pass that takes seconds.
+
+**The constraint that keeps this safe**: suggestions are computed in `_store_resolved`,
+*after* identity is final and after the correction pass has run, and are read only by
+`_format_suggestions`. They reach neither the vessel log, nor the resolver's candidate list,
+nor the conversation-correction pass. `tests/test_suggestions.py` asserts each of those.
+That feedback path is exactly how a sub-cutoff match once rewrote "motor vessel to Leland"
+into "motor vessel Vlieland" and named the wrong ship.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`

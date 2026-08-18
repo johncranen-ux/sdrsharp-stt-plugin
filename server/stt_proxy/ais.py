@@ -1337,3 +1337,75 @@ def _find_ais_hints(text: str, n: int = 5) -> list[dict]:
                 if len(results) >= n:
                     break
     return results
+
+
+# ---------------------------------------------------------------------------
+# The near misses, offered rather than asserted
+# ---------------------------------------------------------------------------
+#
+# `_find_ais_hints` above answers "which vessels should the resolver be allowed to name?"
+# and is deliberately strict: relaxing its cutoff was measured end-to-end on 2026-08-12 and
+# cost 11 precision points, turning fourteen correctly-unnamed conversations into confident
+# misidentifications.
+#
+# This answers a different question -- "the resolver named nobody; what were the closest
+# names anyway?" -- for a reader to adjudicate by ear. Nothing here is ever asserted, so the
+# precision that cutoff protects is untouched by construction.
+#
+# It is a SEPARATE read rather than a relaxed reuse of the retrieval above, because that
+# retrieval cannot be relaxed into a shortlist. It runs extractOne per probe and stops at n
+# slots, so as the cutoff drops the wrong ships arrive first, fill the slots and crowd the
+# right one out -- measured, and non-monotonic: truth reachable went 35 -> 38 -> 35 -> 29
+# -> 24 as the cutoff fell 85 -> 80 -> 76 -> 70 -> 65. Scoring every name and ranking
+# globally has no slots to fill, so nothing can be buried.
+#
+# Measured on the 35 unidentified conversations of 2026-08-13/14: the right ship is in a
+# three-item shortlist 9 times here, against 3 for a globally-ranked list with no probe
+# filter and 2 for the live hints. The gap between 3 and 9 is entirely the probe filter --
+# see the caller, which supplies it.
+AIS_SUGGEST_FLOOR = int(os.environ.get("AIS_SUGGEST_FLOOR", "55"))
+
+
+def suggest_vessels(text: str, probe_filter=None, n: int = 3,
+                    floor: int | None = None) -> list[dict]:
+    """The `n` cached vessels whose names come closest to anything said, however poorly.
+
+    `probe_filter` decides which word spans are worth looking up at all; without one, every
+    span is. It exists because the single biggest occupant of this shortlist is the shore
+    station: two real cargo ships named MAAS and MAS took 56 of 105 top-three slots on the
+    measured corpus, matched against "Maas Approach" in the opening of nearly every call.
+    The caller owns that judgement -- ais.py cannot know which station is on air.
+
+    Returns dicts of {mmsi, name, score, heard}, best first. `heard` is the fragment that
+    scored, and is not decoration: a reader deciding whether MELTEMI I is right needs to see
+    that what came off the radio was "meld them in".
+    """
+    floor = AIS_SUGGEST_FLOOR if floor is None else floor
+    keys, cache = _fresh_snapshot()
+    if not text.strip() or not keys:
+        return []
+
+    probes = [p for p in _hint_probes(text) if probe_filter is None or probe_filter(p)]
+    if not probes:
+        return []
+
+    # One matrix rather than a loop of extractOne: every (probe, name) pair is scored, so a
+    # vessel is ranked on its OWN best probe. Scoring per probe and keeping that probe's
+    # winner is what produces the crowding described above.
+    scores = rf_process.cdist(probes, keys, scorer=rf_fuzz.ratio, workers=-1)
+
+    # Keyed by MMSI, not by name: two cache rows can carry the same ship, and a three-item
+    # list cannot afford to spend two slots on it.
+    best: dict[str, dict] = {}
+    for column, name in enumerate(keys):
+        score = float(scores[:, column].max())
+        if score < floor:
+            continue
+        mmsi = str(cache[name].get("mmsi") or "")
+        if not mmsi:
+            continue
+        if mmsi not in best or score > best[mmsi]["score"]:
+            best[mmsi] = {"mmsi": mmsi, "name": cache[name].get("name", name),
+                          "score": round(score, 1),
+                          "heard": probes[int(scores[:, column].argmax())]}
+    return sorted(best.values(), key=lambda s: -s["score"])[:n]
