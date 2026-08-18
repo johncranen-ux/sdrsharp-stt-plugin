@@ -107,3 +107,32 @@ def test_loopback_without_a_password_is_allowed_and_any_bind_with_one_is():
     check_bind_allowed("localhost", has_password=False)
     check_bind_allowed("::1", has_password=False)
     check_bind_allowed("0.0.0.0", has_password=True)
+
+
+def test_startup_refuses_a_wide_bind_with_no_password_and_never_builds_the_app(tmp_path):
+    """The guard runs before create_app, so an unsafe configuration never gets as far as
+    having a listening socket to close."""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from webapp import config_store, startup
+
+    config = tmp_path / "config.json"
+    config_store.save(config, {"WEBAPP_BIND_HOST": "0.0.0.0"})
+    with pytest.raises(UnsafeBind):
+        startup.build(server_dir=_Path(__file__).resolve().parent.parent,
+                      config_path=config, credentials_path=tmp_path / "credentials.json")
+
+
+def test_startup_builds_an_app_on_loopback_without_a_password(tmp_path):
+    from pathlib import Path as _Path
+
+    from webapp import startup
+
+    app, host, port = startup.build(server_dir=_Path(__file__).resolve().parent.parent,
+                                    config_path=tmp_path / "config.json",
+                                    credentials_path=tmp_path / "credentials.json")
+    assert host == "127.0.0.1"
+    assert port == 8787
+    assert app is not None
