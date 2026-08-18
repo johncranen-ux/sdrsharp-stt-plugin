@@ -46,6 +46,8 @@ def import_into(batch_path: Path, config_path: Path) -> dict[str, str]:
 
     values = {spec.key: spec.default for spec in BY_KEY.values()}
     for key, raw in imported.items():
+        # This is what makes the dict this function RETURNS normalised -- save()'s own
+        # "clean" dict never escapes, so this loop is not redundant with it.
         values[key] = validate_value(BY_KEY[key], raw)
 
     config_store.save(config_path, values)

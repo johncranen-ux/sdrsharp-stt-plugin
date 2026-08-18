@@ -39,26 +39,37 @@ class SettingSpec(BaseModel):
 BOOL_CHOICES = ("on", "off")
 
 
+def _shown(spec: SettingSpec, raw: str) -> str:
+    """The value as it may safely appear in a ValueError message.
+
+    No SECRET path raises today, but Phase 2 renders these into an HTTP response and a log,
+    and one added check on a secret would otherwise leak it.
+    """
+    return "<redacted>" if spec.type is SettingType.SECRET else repr(raw)
+
+
 def validate_value(spec: SettingSpec, raw: str) -> str:
     """Return the normalised value, or raise ValueError naming the setting."""
     value = (raw or "").strip()
 
     if spec.type is SettingType.BOOL:
         if value.lower() not in BOOL_CHOICES:
-            raise ValueError(f"{spec.key}: expected 'on' or 'off', got {raw!r}")
+            raise ValueError(f"{spec.key}: expected 'on' or 'off', got {_shown(spec, raw)}")
         return value.lower()
 
     if spec.type is SettingType.ENUM:
         if value not in (spec.choices or []):
             raise ValueError(
-                f"{spec.key}: expected one of {', '.join(spec.choices or [])}, got {raw!r}")
+                f"{spec.key}: expected one of {', '.join(spec.choices or [])}, "
+                f"got {_shown(spec, raw)}")
         return value
 
     if spec.type is SettingType.INT:
         try:
             number = int(value)
         except ValueError:
-            raise ValueError(f"{spec.key}: expected a whole number, got {raw!r}") from None
+            raise ValueError(
+                f"{spec.key}: expected a whole number, got {_shown(spec, raw)}") from None
         if spec.minimum is not None and number < spec.minimum:
             raise ValueError(f"{spec.key}: must be at least {spec.minimum}, got {number}")
         if spec.maximum is not None and number > spec.maximum:
@@ -69,20 +80,21 @@ def validate_value(spec: SettingSpec, raw: str) -> str:
         parts = [p.strip() for p in value.split(",")]
         if len(parts) != 4:
             raise ValueError(
-                f"{spec.key}: expected latmin,latmax,lonmin,lonmax, got {raw!r}")
+                f"{spec.key}: expected latmin,latmax,lonmin,lonmax, got {_shown(spec, raw)}")
         try:
             latmin, latmax, lonmin, lonmax = (float(p) for p in parts)
         except ValueError:
-            raise ValueError(f"{spec.key}: all four bounds must be numbers, got {raw!r}") from None
+            raise ValueError(
+                f"{spec.key}: all four bounds must be numbers, got {_shown(spec, raw)}") from None
         if not (-90 <= latmin <= 90 and -90 <= latmax <= 90):
-            raise ValueError(f"{spec.key}: latitude out of range in {raw!r}")
+            raise ValueError(f"{spec.key}: latitude out of range in {_shown(spec, raw)}")
         if not (-180 <= lonmin <= 180 and -180 <= lonmax <= 180):
-            raise ValueError(f"{spec.key}: longitude out of range in {raw!r}")
+            raise ValueError(f"{spec.key}: longitude out of range in {_shown(spec, raw)}")
         # Inverted bounds return an empty vessel box, which looks exactly like a dead feed.
         if latmin >= latmax:
-            raise ValueError(f"{spec.key}: latmin must be below latmax, got {raw!r}")
+            raise ValueError(f"{spec.key}: latmin must be below latmax, got {_shown(spec, raw)}")
         if lonmin >= lonmax:
-            raise ValueError(f"{spec.key}: lonmin must be below lonmax, got {raw!r}")
+            raise ValueError(f"{spec.key}: lonmin must be below lonmax, got {_shown(spec, raw)}")
         return ",".join(parts)
 
     return value
@@ -111,7 +123,7 @@ SETTINGS: list[SettingSpec] = [
                 description="groq is Groq's hosted Whisper API, no GPU involved, and is what "
                             "this deployment uses. whisper_cpp is a local whisper.cpp server "
                             "on an AMD GPU under WSL2 -- fully supported for anyone running "
-                            "this with their own hardware. Changing this needs a restart."),
+                            "this with their own hardware."),
     SettingSpec(key="GROQ_MODEL", type=SettingType.TEXT, default="whisper-large-v3", group="STT",
                 description="Groq's Whisper model. large-v3 measured 17.1% pooled WER on "
                             "235 English clips."),

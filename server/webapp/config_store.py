@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -34,23 +35,52 @@ def load(path: Path) -> dict[str, str]:
             stored = {k: str(v) for k, v in raw.items()}
     except FileNotFoundError:
         pass
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming explicitly.
         # A config.json that is not valid UTF-8 must fall back to defaults like any other
         # unreadable file -- crashing here would take the whole server down at startup.
-        pass
-    return {s.key: stored.get(s.key, s.default) for s in SETTINGS}
+        # Name the path and the exception CLASS only -- exc's message can echo file content,
+        # which may be a secret.
+        print(f"[config] could not read {path} ({type(exc).__name__}); using defaults",
+              file=sys.stderr)
+
+    out: dict[str, str] = {}
+    for spec in SETTINGS:
+        if spec.key not in stored:
+            out[spec.key] = spec.default
+            continue
+        try:
+            out[spec.key] = validate_value(spec, stored[spec.key])
+        except ValueError:
+            # Key only. The value may be an API key, and this string reaches a log.
+            print(f"[config] {spec.key} in {path} is not valid; using the default",
+                  file=sys.stderr)
+            out[spec.key] = spec.default
+    return out
 
 
 def save(path: Path, values: dict[str, str]) -> None:
-    """Validate everything, then write atomically. Refuses unknown keys."""
+    """Validate and write atomically. Values MERGE over what is already stored.
+
+    Merging rather than replacing because a caller that posts only the fields it changed --
+    which is the natural shape of a settings form -- would otherwise silently drop every key
+    it did not send, taking the six API keys with it.
+    """
     unknown = sorted(set(values) - set(BY_KEY))
     if unknown:
         raise UnknownSetting(f"not settings: {', '.join(unknown)}")
 
-    # Validate the whole batch BEFORE touching the file, so a bad value cannot leave a
+    merged = load(path)
+    for key, value in values.items():
+        # A secret rendered as the mask means "unchanged": the browser is handed MASK for
+        # every set secret, and would otherwise post it straight back over the real key.
+        if BY_KEY[key].type is SettingType.SECRET and value == MASK:
+            continue
+        merged[key] = value
+
+    # Validate the whole merged config BEFORE touching the file, so a bad value cannot leave a
     # half-applied config behind.
-    clean = {key: validate_value(BY_KEY[key], value) for key, value in values.items()}
+    clean = {key: validate_value(BY_KEY[key], value) for key, value in merged.items()}
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

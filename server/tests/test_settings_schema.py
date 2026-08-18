@@ -85,3 +85,17 @@ def test_the_ais_feed_can_be_switched_off():
     """whisper-proxy.py falls through to "AIS feed: disabled" on any value that is not
     aishub or aisstream, so a two-choice enum would remove the only way to turn it off."""
     assert validate_value(BY_KEY["AIS_SOURCE"], "off") == "off"
+
+
+def test_every_default_is_valid_against_its_own_spec():
+    """A default that its own validator rejects would fail on first save, not at edit time."""
+    for spec in SETTINGS:
+        validate_value(spec, spec.default)
+
+
+def test_every_enum_offers_choices_and_every_range_is_ordered():
+    for spec in SETTINGS:
+        if spec.type is SettingType.ENUM:
+            assert spec.choices, f"{spec.key} is an enum with no choices"
+        if spec.minimum is not None and spec.maximum is not None:
+            assert spec.minimum <= spec.maximum, f"{spec.key} has minimum above maximum"

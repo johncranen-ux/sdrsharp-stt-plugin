@@ -18,8 +18,9 @@ def build_env(values: dict[str, str], base: dict[str, str] | None = None) -> dic
     for key, value in values.items():
         if key not in BY_KEY:
             continue
-        if (value or "").strip():
-            env[key] = value
+        stripped = (value or "").strip()
+        if stripped:
+            env[key] = stripped
         else:
             env.pop(key, None)
     return env

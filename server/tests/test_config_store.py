@@ -83,3 +83,49 @@ def test_a_config_that_is_not_valid_utf8_falls_back_to_defaults(tmp_path):
     path = tmp_path / "config.json"
     path.write_bytes(b"\xff\xfe\x00\x01not utf-8 at all \x80\x81")
     assert config_store.load(path)["AISHUB_POLL_SEC"] == "900"
+
+
+def test_load_ignores_an_unknown_key_present_in_the_file(tmp_path):
+    """A config written by a newer version must not stop an older one from starting, per
+    load()'s own docstring."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"NOT_A_SETTING": "1", "AISHUB_POLL_SEC": "1800"}),
+                     encoding="utf-8")
+    values = config_store.load(path)
+    assert "NOT_A_SETTING" not in values
+    assert values["AISHUB_POLL_SEC"] == "1800"
+
+
+def test_a_hand_edited_json_bool_does_not_silently_mistype(tmp_path):
+    """A hand-edited {"AIS_CALLSIGN_SUFFIX_FALLBACK": true} used to become the Python string
+    "True" via str(v). The proxy tests == "on", so the setting silently turned off."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"AIS_CALLSIGN_SUFFIX_FALLBACK": True}), encoding="utf-8")
+    values = config_store.load(path)
+    assert values["AIS_CALLSIGN_SUFFIX_FALLBACK"] == BY_KEY["AIS_CALLSIGN_SUFFIX_FALLBACK"].default
+
+
+def test_a_stored_out_of_range_int_falls_back_to_its_default(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"AISHUB_POLL_SEC": "5"}), encoding="utf-8")
+    values = config_store.load(path)
+    assert values["AISHUB_POLL_SEC"] == BY_KEY["AISHUB_POLL_SEC"].default
+
+
+def test_saving_one_key_leaves_the_other_keys_intact(tmp_path):
+    path = tmp_path / "config.json"
+    config_store.save(path, {"AISHUB_POLL_SEC": "1800"})
+    config_store.save(path, {"AIS_SUGGEST_N": "5"})
+    values = config_store.load(path)
+    assert values["AIS_SUGGEST_N"] == "5"
+    assert values["AISHUB_POLL_SEC"] == "1800"
+
+
+def test_saving_the_mask_for_a_set_secret_leaves_it_unchanged(tmp_path):
+    path = tmp_path / "config.json"
+    fixture_key = "gsk_test_fixture_not_a_real_key"
+    config_store.save(path, {"GROQ_API_KEY": fixture_key})
+    config_store.save(path, {"GROQ_API_KEY": config_store.MASK, "AISHUB_POLL_SEC": "1800"})
+    values = config_store.load(path)
+    assert values["GROQ_API_KEY"] == fixture_key
+    assert values["AISHUB_POLL_SEC"] == "1800"

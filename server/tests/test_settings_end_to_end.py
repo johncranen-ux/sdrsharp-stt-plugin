@@ -69,14 +69,24 @@ def test_a_proxy_started_from_the_built_environment_serves_requests(tmp_path):
     # files. It is safe only incidentally: a proxy that receives no audio never mutates the
     # store it loaded, and terminate() on Windows does not run atexit handlers. Making those
     # paths configurable belongs to the phase 2 Paths group.
-    child = subprocess.Popen(
-        [sys.executable, str(_SERVER_DIR / "whisper-proxy.py")],
-        cwd=str(_SERVER_DIR), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    #
+    # stdout goes to a file rather than subprocess.PIPE: an undrained pipe blocks a child that
+    # logs enough at startup before it ever binds the port, and the failure would report
+    # "proxy never answered" -- pointing at the wrong subsystem entirely. A file in tmp_path
+    # keeps the diagnostics that DEVNULL would have discarded.
+    log_path = tmp_path / "proxy.log"
+    with open(log_path, "w", encoding="utf-8") as log:
+        child = subprocess.Popen(
+            [sys.executable, str(_SERVER_DIR / "whisper-proxy.py")],
+            cwd=str(_SERVER_DIR), env=env,
+            stdout=log, stderr=subprocess.STDOUT)
     try:
         deadline = time.time() + 30
         body = None
         while time.time() < deadline:
+            if child.poll() is not None:
+                # Notice a dead child instead of waiting out the full 30 s for it.
+                pytest.fail(f"the proxy exited early with code {child.returncode}")
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/conversations",
                                             timeout=2) as response:
@@ -103,8 +113,11 @@ def test_the_built_environment_matches_what_the_batch_file_sets(tmp_path):
     config = tmp_path / "config.json"
     import_into(_SERVER_DIR / "start-all.bat", config)
     env = build_env(config_store.load(config), base={})
-    for key, value in parse_batch((_SERVER_DIR / "start-all.bat")
-                                  .read_text(encoding="utf-8", errors="replace")).items():
+    # utf-8-sig, matching the importer: errors="replace" would corrupt the EXPECTED side of
+    # this comparison and report a false failure, rather than tolerate a genuinely bad file.
+    parsed = parse_batch((_SERVER_DIR / "start-all.bat").read_text(encoding="utf-8-sig"))
+    assert len(parsed) >= 11, "the set-line parser matched nothing; the guard below is vacuous"
+    for key, value in parsed.items():
         # pytest.fail, not a bare assert: several of these values are live API keys, and a
         # bare assert has pytest rewrite both operands' repr() into the failure output --
         # exactly the scenario this test exists to catch would leak the secret into the log.
@@ -118,7 +131,9 @@ _BATCH_PLUMBING = {"SCRIPT_DIR", "PROXY_SCRIPT"}
 # this test polices, so a renamed key would drop out of the expected and actual sides together
 # and the assertion would pass over its own blind spot. Scanning the file independently also
 # catches a NEW set line that was never catalogued, which build_env silently drops.
-_SET_LINE = re.compile(r"^set\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.IGNORECASE)
+# Also deliberately NOT character-for-character the importer's _SET_RE (which would inherit
+# its blind spots): this one additionally tolerates the `set "NAME=value"` quoting form.
+_SET_LINE = re.compile(r'^set\s+"?([A-Za-z_]\w*)=(.*)$', re.IGNORECASE)
 
 
 def _keys_the_launcher_sets(batch_path: Path) -> set[str]:
@@ -139,5 +154,8 @@ def test_every_setting_the_launcher_configures_reaches_the_child(tmp_path):
     config = tmp_path / "config.json"
     import_into(_SERVER_DIR / "start-all.bat", config)
     env = build_env(config_store.load(config), base={})
-    missing = sorted(_keys_the_launcher_sets(_SERVER_DIR / "start-all.bat") - set(env))
+    launcher_keys = _keys_the_launcher_sets(_SERVER_DIR / "start-all.bat")
+    assert len(launcher_keys) >= 11, \
+        "the set-line parser matched nothing; the guard below is vacuous"
+    missing = sorted(launcher_keys - set(env))
     assert missing == [], f"configured settings that never reached the environment: {missing}"
