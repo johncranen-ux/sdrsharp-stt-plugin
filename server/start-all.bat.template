@@ -39,6 +39,41 @@ set GROQ_MODEL=whisper-large-v3
 :: set RESOLVER_LIVE_CANDIDATES=off
 :: set PROMPT_ECHO_FILTER=off
 ::
+:: -- Shipped 2026-08-18, with their rollbacks ----------------
+:: AIS_LIVE_MATCH_MAX_AGE_MIN bounds how old a vessel's AIS fix may be for the live pass to
+:: re-offer it to the resolver. 360 minutes. Age counts from the last SUCCESSFUL AIS poll, not
+:: the wall clock, so a stalled feed freezes the cutoff instead of ageing every ship out at
+:: once -- six days were lost to a feed that failed quietly. Measured: precision 87.1 -> 88.3,
+:: six false positives removed, no correct identification lost, spread 0.0 over three runs.
+:: BELLONA is what it exists for -- a 122-hour-old inland barge 72 km away, named with high
+:: confidence over a ship 12.8 km away that had reported seven minutes earlier.
+:: ROLLBACK to the old unbounded behaviour:
+:: set AIS_LIVE_MATCH_MAX_AGE_MIN=0
+::
+:: AIS_CALLSIGN_SUFFIX_FALLBACK tries the TAIL of a spelled-out callsign that decoded cleanly
+:: but short -- "call SUNvictor seven" swallowed the V of V7B2710, leaving 7B2710, which the
+:: exact lookup cannot match and the partial-pattern path declines as "not my problem". The
+:: tail must fit exactly one cached callsign AND a resembling name must be spoken in the same
+:: conversation. On by DECISION, not by measurement: its one bench arm was invalid rather than
+:: negative. If identification regresses, THIS IS THE FIRST THING TO SWITCH OFF.
+:: set AIS_CALLSIGN_SUFFIX_FALLBACK=off
+::
+:: AIS_SUGGEST shows, under a conversation nobody was identified in, the best few vessel names
+:: found BELOW the identification cutoff, labelled unconfirmed. It never names anyone -- the
+:: block is there because a reader who heard the audio can settle what the matcher cannot
+:: ("Meld Them In" -> MELTEMI I). Right ship in the list 9 times out of 35; the other
+:: three-quarters are near misses worth a glance and nothing more.
+:: set AIS_SUGGEST=off
+:: AIS_SUGGEST_N is how many are listed. 3 by default; 5 finds 3 more of the 35 at the cost of
+:: two more wrong names to read each time.
+:: set AIS_SUGGEST_N=5
+::
+:: AIS_SUGGEST_TIEBREAK ranks equally-scoring suggestions by plausibility instead of
+:: arbitrarily. OFF: it could not be measured, because scoring proximity needs each vessel's
+:: position AT THE TIME and a frozen cache keeps only the latest fix. Do not switch it on
+:: expecting an improvement; switch it on to help measure one.
+:: set AIS_SUGGEST_TIEBREAK=on
+::
 :: CONVERSATION_RESOLVER decides vessel identity after each exchange ends, from the whole
 :: exchange, and publishes it at http://localhost:9000/conversations. It never touches the
 :: live transcript. On by default.
