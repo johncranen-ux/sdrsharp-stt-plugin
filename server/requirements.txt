@@ -6,3 +6,8 @@ pip-system-certs
 numpy
 scipy
 pydantic
+fastapi
+uvicorn[standard]
+psutil
+argon2-cffi
+httpx

@@ -16,7 +16,8 @@ def build_env(values: dict[str, str], base: dict[str, str] | None = None) -> dic
     """
     env = dict(os.environ if base is None else base)
     for key, value in values.items():
-        if key not in BY_KEY:
+        spec = BY_KEY.get(key)
+        if spec is None or not spec.exported:
             continue
         stripped = (value or "").strip()
         if stripped:

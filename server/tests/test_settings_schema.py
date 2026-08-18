@@ -99,3 +99,31 @@ def test_every_enum_offers_choices_and_every_range_is_ordered():
             assert spec.choices, f"{spec.key} is an enum with no choices"
         if spec.minimum is not None and spec.maximum is not None:
             assert spec.minimum <= spec.maximum, f"{spec.key} has minimum above maximum"
+
+
+def test_settings_the_app_keeps_for_itself_are_not_exported_to_children():
+    """A child process gets environment variables. LOG_DIR, the bind address and the
+    station's host are consumed by the web app itself; handing them to the proxy would
+    invent env vars the proxy never reads and could not act on."""
+    for key in ("LOG_DIR", "SDRSHARP_DIR", "CAPTURES_DIR", "AIS_STATION_HOST",
+                "AIS_STATION_HTTP_PORT", "AIS_STATION_NMEA_PORT", "PROXY_ENABLED",
+                "COUNTER_ENABLED", "WEBAPP_BIND_HOST", "WEBAPP_PORT"):
+        assert BY_KEY[key].exported is False, f"{key} must not reach a child environment"
+
+
+def test_settings_the_proxy_reads_are_exported():
+    for key in ("PROXY_PORT", "STT_BACKEND", "CONVERSATIONS_FILE", "VESSELS_LOG_FILE",
+                "WHISPER_BACKEND_HOST", "ANTHROPIC_API_KEY"):
+        assert BY_KEY[key].exported is True, f"{key} must reach the child environment"
+
+
+def test_the_bind_address_defaults_to_loopback():
+    """Widening it is a deliberate act, and doing so without a password refuses to start
+    (see webapp/auth.py::check_bind_allowed)."""
+    assert BY_KEY["WEBAPP_BIND_HOST"].default == "127.0.0.1"
+
+
+def test_every_new_path_setting_is_a_path_type():
+    for key in ("LOG_DIR", "SDRSHARP_DIR", "CAPTURES_DIR", "CONVERSATIONS_FILE",
+                "VESSELS_LOG_FILE"):
+        assert BY_KEY[key].type is SettingType.PATH

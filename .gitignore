@@ -95,6 +95,10 @@ bench-correct-cache/
 start-all.bat
 # Holds the API keys the control panel manages.
 config.json
+# Holds the argon2 hash of the control panel password.
+credentials.json
+# Managed-process stdout, one file per process per day. Operational, not source.
+server/logs/
 
 # Claude Code local settings
 .claude/

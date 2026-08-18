@@ -34,6 +34,10 @@ class SettingSpec(BaseModel):
     choices: list[str] | None = None
     minimum: int | None = None
     maximum: int | None = None
+    exported: bool = True
+    """False for settings the web app consumes itself. A child process is configured by
+    environment variables; a setting the proxy never reads must not appear in its
+    environment, and the app's own bind address must never be visible to a child at all."""
 
 
 BOOL_CHOICES = ("on", "off")
@@ -223,6 +227,73 @@ SETTINGS: list[SettingSpec] = [
                 minimum=1, maximum=65535,
                 description="Port the proxy listens on. The SDR# plugin must be pointed at the "
                             "same port."),
+
+    # ---- Paths ---------------------------------------------------------------
+    SettingSpec(key="CONVERSATIONS_FILE", type=SettingType.PATH, default="", group="Paths",
+                description="Where resolved conversations are stored. Empty means "
+                            "server/stt_proxy/conversations.json, next to the code. Set it to "
+                            "move the data off the install directory before a host migration."),
+    SettingSpec(key="VESSELS_LOG_FILE", type=SettingType.PATH, default="", group="Paths",
+                description="The identified-vessels HTML log the proxy writes and serves at "
+                            "/. Empty means server/identified_vessels.html."),
+    SettingSpec(key="LOG_DIR", type=SettingType.PATH, default="", group="Paths",
+                exported=False,
+                description="Where managed processes write their stdout, one file per process "
+                            "per day. Empty means server/logs. On a headless box this is the "
+                            "only record of what a process said -- today the proxy runs under "
+                            "cmd /k and its output dies with the window."),
+    SettingSpec(key="SDRSHARP_DIR", type=SettingType.PATH, default=r"D:\SDR\SDRSharp",
+                group="Paths", exported=False,
+                description="Where SDR# is installed. Monitored, never managed: SDR# needs an "
+                            "interactive desktop and its play button must be pressed by hand. "
+                            "The panel only checks that this path resolves."),
+    SettingSpec(key="CAPTURES_DIR", type=SettingType.PATH,
+                default=r"D:\SDR\SDRSharp\Plugins\SttPlugin\captures", group="Paths",
+                exported=False,
+                description="Where the plugin writes captured audio, in dated subdirectories. "
+                            "Checked for existence only; the panel never reads it."),
+    SettingSpec(key="WHISPER_BACKEND_HOST", type=SettingType.TEXT, default="localhost",
+                group="Paths",
+                description="Host of the local whisper.cpp server, used only when "
+                            "STT_BACKEND=whisper_cpp. localhost reaches WSL2 from Windows."),
+
+    # ---- The AIS station -----------------------------------------------------
+    SettingSpec(key="AIS_STATION_HOST", type=SettingType.TEXT, default="192.168.2.1",
+                group="AIS station", exported=False,
+                description="The PC running AIS-catcher. Its own box, on a DHCP reservation."),
+    SettingSpec(key="AIS_STATION_HTTP_PORT", type=SettingType.INT, default="8100",
+                group="AIS station", exported=False, minimum=1, maximum=65535,
+                description="AIS-catcher's web UI port (-N). The counter polls /ships.json "
+                            "there for its range map."),
+    SettingSpec(key="AIS_STATION_NMEA_PORT", type=SettingType.INT, default="10111",
+                group="AIS station", exported=False, minimum=1, maximum=65535,
+                description="AIS-catcher's NMEA TCP output port (-P). The counter connects to "
+                            "it to count distinct MMSIs per hour."),
+
+    # ---- Managed processes ---------------------------------------------------
+    SettingSpec(key="PROXY_ENABLED", type=SettingType.BOOL, default="on", group="Processes",
+                exported=False,
+                description="Whether the proxy appears on the dashboard as a startable "
+                            "process. Disabled is not the same as stopped: a stopped process "
+                            "is one the operator turned off and may want back."),
+    SettingSpec(key="COUNTER_ENABLED", type=SettingType.BOOL, default="on", group="Processes",
+                exported=False,
+                description="Whether the AIS station counter is startable. It exists to "
+                            "measure the local receiver's coverage and is expected to become "
+                            "unnecessary once that receiver has proven itself -- switch this "
+                            "off then rather than deleting anything."),
+
+    # ---- The web app itself --------------------------------------------------
+    SettingSpec(key="WEBAPP_BIND_HOST", type=SettingType.TEXT, default="127.0.0.1",
+                group="Web app", exported=False,
+                description="The address the control panel listens on. 127.0.0.1 means this "
+                            "machine only. Widening it to 0.0.0.0 exposes a panel that starts "
+                            "processes and holds six API keys, so with no password set the "
+                            "app refuses to start rather than opening that window."),
+    SettingSpec(key="WEBAPP_PORT", type=SettingType.INT, default="8787", group="Web app",
+                exported=False, minimum=1, maximum=65535,
+                description="The control panel's own port. Deliberately not 9000, which the "
+                            "proxy owns."),
 ]
 
 BY_KEY: dict[str, SettingSpec] = {s.key: s for s in SETTINGS}

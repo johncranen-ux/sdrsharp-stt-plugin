@@ -41,3 +41,9 @@ def test_an_empty_setting_removes_an_inherited_value():
 def test_a_key_outside_the_catalogue_is_not_exported():
     env = build_env({"NOT_A_SETTING": "1"}, base={})
     assert "NOT_A_SETTING" not in env
+
+
+def test_non_exported_settings_never_reach_the_child_environment():
+    env = build_env({"PROXY_PORT": "9000", "WEBAPP_BIND_HOST": "0.0.0.0",
+                     "LOG_DIR": r"D:\logs"}, base={})
+    assert env == {"PROXY_PORT": "9000"}
