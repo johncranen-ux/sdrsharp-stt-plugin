@@ -524,6 +524,45 @@ def _is_fresh(entry: dict, cutoff: datetime.datetime) -> bool:
         return False
 
 
+# When the last SUCCESSFUL poll happened. None until one has.
+#
+# The age filter measures against this rather than the wall clock, for the same reason
+# _in_scope is defined against the last good poll: during a feed outage the wall clock ages
+# every vessel out together, so "the estuary emptied" and "the feed died" become
+# indistinguishable and the filter destroys identification exactly when it is already
+# broken. Six days have already been lost to a feed that failed quietly. Freezing the
+# reference when the feed stops means a stalled feed changes nothing rather than everything.
+#
+# It is also what makes the filter measurable. A bench runs against a frozen cache days
+# after the fact, where every entry is stale by wall clock and any bound excludes the whole
+# cache; set_poll_reference lets it say when the snapshot was taken.
+_last_poll_at: datetime.datetime | None = None
+
+
+def _reference_now() -> datetime.datetime:
+    """The clock the age filter is measured against. See _last_poll_at."""
+    return _last_poll_at or datetime.datetime.now()
+
+
+def set_poll_reference(when: datetime.datetime | None) -> None:
+    """Pin the reference clock. For measuring against a frozen cache; production polls."""
+    global _last_poll_at
+    _last_poll_at = when
+
+
+def is_recent(entry: dict, minutes: int) -> bool:
+    """Whether this vessel was heard from within `minutes` of the last good poll.
+
+    Public because the live-match path needs the same judgement without going through
+    _fresh_snapshot: it re-resolves an MMSI through match_by_mmsi, which reads _mmsi_index
+    directly and therefore never saw the age filter at all. `minutes <= 0` means no bound,
+    matching AIS_MAX_AGE_MIN's own off switch.
+    """
+    if minutes <= 0:
+        return True
+    return _is_fresh(entry, _reference_now() - datetime.timedelta(minutes=minutes))
+
+
 def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
     """(keys, cache) for matching, honouring AIS_MAX_AGE_MIN.
 
@@ -537,7 +576,7 @@ def _fresh_snapshot() -> tuple[list[str], dict[str, dict]]:
         if AIS_MAX_AGE_MIN <= 0:
             return list(_vessel_cache.keys()), dict(_vessel_cache)
         total  = len(_vessel_cache)
-        cutoff = datetime.datetime.now() - datetime.timedelta(minutes=AIS_MAX_AGE_MIN)
+        cutoff = _reference_now() - datetime.timedelta(minutes=AIS_MAX_AGE_MIN)
         cache  = {k: v for k, v in _vessel_cache.items() if _is_fresh(v, cutoff)}
 
     if not _stale_filter_warned and total and len(cache) < total * 0.05:
@@ -592,9 +631,11 @@ def set_in_scope(mmsis: set[str]) -> None:
     get_in_scope() from in here; that reacquires the lock and deadlocks the feed thread the
     same way a `_refresh_name_view` call from inside `record()` would.
     """
-    global _in_scope
+    global _in_scope, _last_poll_at
     with _cache_lock:
         _in_scope = set(mmsis)
+        # Called only on success, which is exactly the definition the age filter needs.
+        _last_poll_at = datetime.datetime.now()
         for name in _name_index:
             _refresh_name_view(name)
 
@@ -1365,6 +1406,15 @@ def _find_ais_hints(text: str, n: int = 5) -> list[dict]:
 # see the caller, which supplies it.
 AIS_SUGGEST_FLOOR = int(os.environ.get("AIS_SUGGEST_FLOOR", "55"))
 
+# Ranking candidates the SCORE calls equal.
+#
+# GT VELA, 2026-08-18: with the stale wrong answer excluded, five candidates tied at exactly
+# 80.0 and the vessel actually calling was among them, nearest of the five at 12.8 km
+# against 21-50 km. Ordering among equals is otherwise whatever the cache iterated in, so
+# this replaces an arbitrary order with a defensible one and can cost nothing the score
+# already decided. Off until that claim has been measured rather than argued.
+SUGGEST_TIEBREAK = os.environ.get("AIS_SUGGEST_TIEBREAK", "off").strip().lower() == "on"
+
 
 def suggest_vessels(text: str, probe_filter=None, n: int = 3,
                     floor: int | None = None) -> list[dict]:
@@ -1407,5 +1457,14 @@ def suggest_vessels(text: str, probe_filter=None, n: int = 3,
         if mmsi not in best or score > best[mmsi]["score"]:
             best[mmsi] = {"mmsi": mmsi, "name": cache[name].get("name", name),
                           "score": round(score, 1),
-                          "heard": probes[int(scores[:, column].argmax())]}
-    return sorted(best.values(), key=lambda s: -s["score"])[:n]
+                          "heard": probes[int(scores[:, column].argmax())],
+                          "_entry": cache[name]}
+
+    if SUGGEST_TIEBREAK:
+        in_scope = get_in_scope()
+        # Score first, always: this ranks equals, it does not overrule the matcher.
+        ranked = sorted(best.values(),
+                        key=lambda s: (-s["score"], _candidate_sort_key(s["_entry"], in_scope)))
+    else:
+        ranked = sorted(best.values(), key=lambda s: -s["score"])
+    return [{k: v for k, v in s.items() if k != "_entry"} for s in ranked[:n]]

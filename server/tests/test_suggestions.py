@@ -89,6 +89,36 @@ def test_a_filtered_probe_cannot_produce_a_suggestion(cache):
     assert "111" not in [s["mmsi"] for s in got]
 
 
+# Breaking the ties
+#
+# GT VELA, 2026-08-18: with the stale wrong answer removed, FIVE candidates tied at exactly
+# 80.0 and the vessel actually calling was one of them. Ordering among equals is otherwise
+# whatever the cache iterated in, so ranking them by plausibility costs nothing that score
+# already decided -- it only replaces an arbitrary order with a defensible one.
+
+def test_tied_scores_are_broken_by_proximity_to_maas_center(cache, monkeypatch):
+    monkeypatch.setattr(ais, "SUGGEST_TIEBREAK", True)
+    # Both sit one substitution from "BELLA", so both score exactly 80 -- which is the
+    # premise. A name equal to the probe would win on score and test nothing.
+    cache([_v("BOLLA", "111", latitude=52.30, longitude=3.60),      # ~28 km
+           _v("BELLE", "222", latitude=52.03, longitude=3.90)])     # ~2 km
+    got = ais.suggest_vessels("motor vessel bella", n=2)
+    assert [s["score"] for s in got] == [got[0]["score"]] * 2, "the premise is a tie"
+    assert got[0]["name"] == "BELLE"
+
+
+def test_a_better_score_still_wins_over_a_nearer_ship(cache, monkeypatch):
+    """The tie-break must not become a plausibility ranking -- score decides first."""
+    monkeypatch.setattr(ais, "SUGGEST_TIEBREAK", True)
+    cache([_v("MELTEMI I", "111", latitude=53.50, longitude=2.10),  # far, but a real match
+           _v("MELD", "222", latitude=52.03, longitude=3.90)])      # near, weaker match
+    assert ais.suggest_vessels("motor vessel meltemi one", n=1)[0]["name"] == "MELTEMI I"
+
+
+def test_the_tiebreak_is_off_until_it_has_been_measured(cache):
+    assert ais.SUGGEST_TIEBREAK is False
+
+
 def test_empty_text_suggests_nothing(cache):
     cache([_v("MELTEMI I", "111")])
     assert ais.suggest_vessels("   ") == []

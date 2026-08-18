@@ -497,6 +497,8 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
 
     out: list[dict] = []
     seq = 0
+    from stt_proxy import ais
+
     for label in labels:
         window: list[dict] = []
         for ex in exchanges:
@@ -507,6 +509,16 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
                 seq += len(ex.get("turns") or [])
         if not window:
             continue
+        # Any age bound is measured against the LAST GOOD POLL, which in production is
+        # roughly now and in a bench is whenever this conversation happened -- not the wall
+        # clock, days later, against which every entry in a frozen cache is stale and any
+        # bound excludes the whole cache. Inert unless an arm sets a bound, since both
+        # AIS_MAX_AGE_MIN and AIS_LIVE_MATCH_MAX_AGE_MIN default to 0.
+        #
+        # The frozen cache keeps only each vessel's LATEST last_seen, so a ship that was
+        # stale at the time but seen again later reads as fresh here. That biases towards
+        # finding no effect, which is the safe direction for an arm arguing to exclude.
+        ais.set_poll_reference(label.start)
         window.sort(key=lambda c: c["time"])
         by_id = {c["id"]: c for c in window}
         for ex in resolve_conversation(window):
@@ -522,6 +534,68 @@ def _resolve_again(exchanges: list[dict], labels: list[Label]) -> list[dict]:
                            "text": t.get("corrected") or t["text"]} for t in turns],
             })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Scoring the shortlist, which is a different question from scoring identification
+# ---------------------------------------------------------------------------
+#
+# The suggestion block only appears where the resolver named nobody, and it never asserts
+# anything, so precision and recall do not describe it. The question it answers is "when the
+# system gives up, does the right ship appear in the two or three names it offers anyway?"
+# -- so the metric is a hit rate over exactly the conversations that resolved to nobody.
+#
+# Free to run: no API calls, no resolver. Only the AIS cache and the stored text.
+
+def score_suggestions(labels: list[Label], exchanges: list[dict], n: int = 3) -> dict:
+    """Hit rate of the sub-cutoff shortlist over conversations that resolved to nobody."""
+    from stt_proxy import ais
+    from stt_proxy import conversations as conv
+
+    corpus = list(exchanges)
+    probe_filter = conv._boilerplate_filter(corpus)
+
+    scored, hits, rows = 0, 0, []
+    for label in labels:
+        turns, predicted = [], set()
+        for ex in exchanges:
+            if ex.get("channel", "160,650") != label.channel:
+                continue
+            for when, turn in zip(_turn_times(ex), ex.get("turns") or []):
+                if label.start <= when <= label.end:
+                    turns.append(turn)
+                    predicted.add(ex.get("mmsi"))
+        # Only conversations the resolver left unnamed AND that a real vessel was speaking
+        # in: a shortlist under "nobody was identifiable" has no right answer to contain.
+        if not turns or {p for p in predicted if p} or not label.identifiable:
+            continue
+        scored += 1
+        text = " ".join((t.get("conv") or t.get("text") or "") for t in turns)
+        ais.set_poll_reference(label.start)
+        found = ais.suggest_vessels(text, probe_filter=probe_filter, n=n)
+        rank = next((i for i, s in enumerate(found, 1) if s["mmsi"] == label.mmsi), None)
+        if rank:
+            hits += 1
+        rows.append({"conversation": label.start.strftime(_TS_FMT), "label": label.mmsi,
+                     "rank": rank,
+                     "shortlist": [{"name": s["name"], "mmsi": s["mmsi"],
+                                    "score": s["score"], "heard": s["heard"]} for s in found]})
+    return {"unidentified_conversations": scored, "hits": hits,
+            "hit_rate": (hits / scored) if scored else None, "n": n, "rows": rows}
+
+
+def print_suggestion_report(result: dict) -> None:
+    scored = result["unidentified_conversations"]
+    print(f"\nShortlist over the {scored} conversations that resolved to nobody")
+    print(f"  right ship in the top {result['n']}   {result['hits']}/{scored}"
+          f"   {_pct(result['hit_rate'])}")
+    shown = [r for r in result["rows"] if r["rank"]]
+    if shown:
+        print("\n  recovered:")
+        for row in shown:
+            top = row["shortlist"][row["rank"] - 1]
+            print(f"    {row['conversation']}  rank {row['rank']}  "
+                  f"{top['name']} ({top['score']:.0f}) heard {top['heard']!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +680,10 @@ def main(argv: list[str] | None = None) -> int:
                          "temperature 0, so a single run cannot tell a real change from "
                          "that noise. Costs N times the API calls; 3 is usually enough")
     ap.add_argument("--out-json", help="write the scores as JSON, for comparing two runs")
+    ap.add_argument("--suggest", action="store_true",
+                    help="score the sub-cutoff shortlist instead of identification: how "
+                         "often the right ship appears in the names offered on a "
+                         "conversation that resolved to nobody. Free -- no API calls")
     ap.add_argument("--find", metavar="NAME",
                     help="look a vessel up in the AIS cache and exit, to get the spelling "
                          "field 3 needs. Fuzzy, so a misheard name still finds it")
@@ -667,6 +745,15 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(str(exc))
     if not labels:
         return _fail(f"no labels in {args.labels}")
+
+    if args.suggest:
+        from stt_proxy import ais
+        ais._load_cache()
+        result = score_suggestions(labels, exchanges)
+        print_suggestion_report(result)
+        if args.out_json:
+            Path(args.out_json).write_text(json.dumps(result, indent=1), encoding="utf-8")
+        return 0
 
     result = score(labels, exchanges)
     print_report(result, f"STORED VERDICTS  ({args.conversations})")

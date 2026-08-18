@@ -24,7 +24,7 @@ from rapidfuzz import fuzz as rf_fuzz
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes, _km_from_maas,
                            match_by_callsign, match_by_callsign_pattern,
                            match_by_callsign_suffix, match_by_mmsi, match_by_name_candidates,
-                           suggest_vessels)
+                           is_recent, suggest_vessels)
 from stt_proxy.claude import _get_claude
 from stt_proxy import conversation_correct
 from stt_proxy.corrections import (_callsign_supported_by_text, _partial_callsign_pattern, _phonetic_callsign_probes,
@@ -287,6 +287,43 @@ Rules:
 RESOLVER_LIVE_CANDIDATES = os.environ.get("RESOLVER_LIVE_CANDIDATES", "on").strip().lower() != "off"
 
 
+# An age bound on the live-match path specifically.
+#
+# BELLONA, 2026-08-18: a 135x12 m inland barge drawing 1.5 m, bound for Antwerp, 72 km from
+# Maas Center, whose last AIS fix was 122 HOURS old, was named with high confidence over
+# GT VELA -- 12.8 km away and reporting seven minutes earlier. It reached the resolver
+# entirely through this function: match_by_mmsi reads _mmsi_index directly, so AIS_MAX_AGE_MIN
+# never applied here, and roughly half a real candidate list arrives by this route.
+#
+# Kept separate from AIS_MAX_AGE_MIN rather than folded into it: that setting bounds what can
+# be FOUND by name across every matcher, and turning it on is a much larger change than
+# declining to re-offer a vessel last heard from days ago.
+#
+# ON by default since 2026-08-18, on measurement. bench_identify --resolve --repeats 3 over
+# the 08-13/14 labels, only this bound varied:
+#
+#                    off (0)   360 min
+#     precision       87.1%     88.3%    +1.2
+#     recall          65.6%     66.3%    +0.7
+#     correct           386       386     unchanged
+#     wrong              57        51     -6
+#     missed            145       145     unchanged
+#
+# Spread 0.0 on every metric across three runs per arm, so this is signal and not the ~2.9
+# points of resolver sampling noise. Nothing was lost: not one correct identification became
+# a miss. All six transmissions that moved are a single conversation where nobody was
+# identifiable and PRESTO -- last heard from 29 hours earlier -- was named across all six.
+#
+# This is a REMOVING-wrong-candidates change, and the contrast with adding is now measured
+# from both ends: relaxing AIS_HINT_MIN_SCORE on 2026-08-12 added candidates and cost 11
+# precision points; this removes them and gains 1.2.
+#
+# Six hours because a ship quiet through a couple of 900 s polls should still be offered,
+# while yesterday's traffic should not. Only this value was measured -- there is no sweep
+# behind it. ROLLBACK: AIS_LIVE_MATCH_MAX_AGE_MIN=0 restores the old behaviour exactly.
+LIVE_MATCH_MAX_AGE_MIN = int(os.environ.get("AIS_LIVE_MATCH_MAX_AGE_MIN", "360"))
+
+
 def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
     """Vessels the per-transmission pass already matched against AIS in this window."""
     found: dict[str, dict] = {}
@@ -298,6 +335,8 @@ def _live_match_candidates(chunks: list[dict]) -> dict[str, dict]:
             continue
         entry = match_by_mmsi(mmsi)
         if not entry:
+            continue
+        if not is_recent(entry, LIVE_MATCH_MAX_AGE_MIN):
             continue
         marked = dict(entry)
         marked["via_live_match"] = True
@@ -331,6 +370,24 @@ AIS_PARTIAL_CALLSIGN            = os.environ.get("AIS_PARTIAL_CALLSIGN", "on").s
 AIS_PHONETIC_CALLSIGN           = os.environ.get("AIS_PHONETIC_CALLSIGN", "on").strip().lower() != "off"
 PARTIAL_CALLSIGN_MIN_NAME_SCORE = int(os.environ.get("PARTIAL_CALLSIGN_MIN_NAME_SCORE", "60"))
 
+# Trying the TAIL of a callsign that decoded cleanly but short.
+#
+# CLAMOR SCHULTE, 2026-08-18, callsign V7B2710: the decoder produced "7B2710", complete but
+# for the leading V, which was swallowed before the spelling began ("call SUNvictor seven")
+# rather than garbled within it. match_by_callsign_suffix resolves that run to exactly one
+# cached vessel -- and was never asked, because it is reachable only through
+# _partial_callsign_pattern, which declines a span containing no garble as the exact
+# lookup's job. The exact lookup then cannot match a run that is a character short. Each
+# path defers to the other; the ship goes unidentified with its callsign on the air.
+#
+# Both existing gates still apply: the tail must fit exactly one cached callsign, and a name
+# resembling that vessel must be spoken somewhere in the window. Measured over the 300
+# stored conversations it fires on 4, agreeing with the stored verdict on 3 and supplying
+# CLAMOR SCHULTE on the fourth -- no new wrong answers. Off until that is confirmed
+# end-to-end rather than by candidate inspection, which has misled here before.
+CALLSIGN_SUFFIX_FALLBACK        = os.environ.get(
+    "AIS_CALLSIGN_SUFFIX_FALLBACK", "off").strip().lower() == "on"
+
 
 def _name_corroborates(vessel_name: str, chunks: list[dict]) -> bool:
     """True when some name spoken anywhere in the window resembles `vessel_name`.
@@ -362,6 +419,14 @@ def _partial_callsign_candidates(chunks: list[dict]) -> dict[str, dict]:
             probes.append(("pattern", decoded[0]))
         if AIS_PHONETIC_CALLSIGN:
             probes += [("suffix", run) for run in _phonetic_callsign_probes(text)]
+        if CALLSIGN_SUFFIX_FALLBACK:
+            # A run that decoded CLEANLY but came out short. Nothing in it is garbled, so
+            # _partial_callsign_pattern declines it as the exact lookup's job -- and the
+            # exact lookup cannot match a callsign missing a character. Without this the
+            # two paths hand it back and forth and the tail is never tried.
+            probes += [("suffix", run) for run in _spelled_out_runs(text)
+                       if len(run) >= CALLSIGN_RUN_MIN_LEN and not run.isdigit()
+                       and not match_by_callsign(run)]
 
         for kind, probe in probes:
             entry = (match_by_callsign_pattern(probe) if kind == "pattern"
@@ -493,15 +558,29 @@ def _render_resolver_input(chunks: list[dict], candidates: list[dict]) -> str:
 # problem) from one that was offered and rejected (a resolver-judgement problem). They need
 # opposite fixes, and both BORIS SOKOLOV and SEA BANCKERT were undiagnosable without it.
 #
-# Name, MMSI and how each candidate got on the list -- nothing else. Every AIS field across
-# 300 stored conversations would bloat the store, and position or draught answers no
-# question this exists to answer.
+# Name, MMSI, how each candidate got on the list, and the four facts that judge whether it
+# was PLAUSIBLE -- where it was, how deep it sat, where it was going, and when it was last
+# heard from. Not every AIS field: imo, sog and cog judge nothing here and this is written
+# three hundred times over.
+#
+# Position and the rest were left out at first, on the argument that they answered no
+# question this record existed to answer. Two measurements then failed for want of exactly
+# them. A vessel's position is only knowable at the moment it is used: a frozen cache keeps
+# only each ship's LATEST fix, so NOORDBORG reads as 101.6 km away in a snapshot taken a day
+# after it called, and any retrospective proximity question scores where the ship ended up
+# rather than where it was on the radio. And BELLONA -- the misidentification that prompted
+# all of this -- was recognisable as wrong precisely by draught 1.5 m and destination
+# ANTWERPEN on a Rotterdam approach channel, plus a fix 122 hours old.
+#
+# Not recording these does not defer those questions. It destroys them.
 _CANDIDATE_MARKS = ("via_callsign", "via_live_match", "via_partial_callsign")
+_CANDIDATE_FACTS = ("latitude", "longitude", "draught", "destination", "last_seen")
 
 
 def _record_candidates(rows: list[dict], candidates: list[dict]) -> list[dict]:
     compact = [{"name": c.get("name"), "mmsi": c.get("mmsi"),
-                **{mark: bool(c.get(mark)) for mark in _CANDIDATE_MARKS}}
+                **{mark: bool(c.get(mark)) for mark in _CANDIDATE_MARKS},
+                **{fact: c.get(fact) for fact in _CANDIDATE_FACTS}}
                for c in candidates]
     for row in rows:
         row["resolver_candidates"] = compact

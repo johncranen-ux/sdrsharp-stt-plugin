@@ -145,6 +145,10 @@ def ais_caches(monkeypatch):
     # later test's candidates ranking depend on test order, the same reason the caches above
     # are reset.
     monkeypatch.setattr(ais, "_in_scope", set())
+    # Same reason as _in_scope above, and set by the same call: set_in_scope() stamps the
+    # poll time, which is what the age filter measures against. A prior test's stamp would
+    # silently move every later test's freshness cutoff.
+    monkeypatch.setattr(ais, "_last_poll_at", None)
     # Feed-health state is module-global and its log is rate-limited, so without this a
     # test's output would depend on which tests ran before it.
     monkeypatch.setattr(ais, "_unknown_frames_logged", 0)
@@ -346,6 +350,107 @@ def test_age_filter_narrows_the_pool_without_touching_the_cache(ais_caches, monk
     assert "WILSON DURNESS" in vessels               # still there
     monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 120)
     assert proxy.match_by_name("WILSON DURNESS")["name"] == "WILSON DURNESS"
+
+
+# What the age filter measures age AGAINST
+#
+# The wall clock is the wrong reference during a feed outage: every vessel ages out
+# together, so "the estuary emptied" and "the feed died" become indistinguishable, and the
+# filter silently destroys identification exactly when it is already broken. This project
+# has lost six days to a feed that failed quietly. Measuring against the last SUCCESSFUL
+# poll freezes the cutoff when the feed stops, which is the behaviour that survives it.
+#
+# It is also what makes the filter measurable at all: a bench runs against a frozen cache
+# days after the fact, where every entry is stale by wall clock and any bound excludes
+# everything.
+
+def test_age_is_measured_from_the_wall_clock_before_any_poll(ais_caches):
+    """A cold start has no poll to measure from, so nothing changes from the old behaviour."""
+    assert ais._last_poll_at is None
+    before = datetime.datetime.now()
+    assert before <= ais._reference_now() <= datetime.datetime.now()
+
+
+def test_a_successful_poll_becomes_the_reference(ais_caches, monkeypatch):
+    ais.set_in_scope({"1", "2"})
+    assert ais._last_poll_at is not None
+    assert ais._reference_now() == ais._last_poll_at
+
+
+def test_a_stalled_feed_stops_ageing_vessels_out(ais_caches, monkeypatch):
+    """The outage case. The last good poll was an hour ago and nothing has arrived since;
+    a vessel seen in that poll must stay matchable, not vanish because time passed."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    monkeypatch.setattr(ais, "_last_poll_at",
+                        datetime.datetime.now() - datetime.timedelta(minutes=60))
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=61)
+    assert proxy.match_by_name("WILSON DURNESS")["name"] == "WILSON DURNESS"
+
+
+def test_a_vessel_missing_from_the_latest_good_poll_still_ages_out(ais_caches, monkeypatch):
+    """The other half: freezing the reference must not disable the filter outright."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(ais, "AIS_MAX_AGE_MIN", 15)
+    monkeypatch.setattr(ais, "_last_poll_at",
+                        datetime.datetime.now() - datetime.timedelta(minutes=60))
+    vessels["WILSON DURNESS"] = _aged("WILSON DURNESS", minutes_ago=200)
+    assert proxy.match_by_name("WILSON DURNESS") is None
+
+
+# The live-match path had no age gate at all
+#
+# BELLONA, 2026-08-18: a 135x12 m inland barge drawing 1.5 m and bound for Antwerp, 72 km
+# from Maas Center, whose last AIS fix was 122 HOURS old, was named with high confidence
+# over GT VELA -- which was 12.8 km away and had reported seven minutes earlier. It reached
+# the resolver purely through _live_match_candidates, which re-resolves live_mmsi through
+# match_by_mmsi. That reads _mmsi_index directly and so bypasses AIS_MAX_AGE_MIN entirely.
+
+def test_a_stale_live_match_is_not_offered_at_all_by_default(ais_caches):
+    """On by default since 2026-08-18, on measured evidence rather than on the argument.
+
+    bench_identify --resolve --repeats 3 over the 08-13/14 labels, only this bound varied:
+    precision 87.1% -> 88.3%, recall 65.6% -> 66.3%, wrong 57 -> 51, correct UNCHANGED at
+    386 and missed unchanged at 145, spread 0.0 on every metric across three runs. All six
+    transmissions that moved were one conversation where nobody was identifiable and PRESTO
+    -- 29 hours stale -- was being named across all six.
+
+    Six hours: long enough that a ship quiet through a couple of 900 s polls is still
+    offered, short enough to exclude yesterday's traffic. Only this value was measured.
+    """
+    vessels, _ = ais_caches
+    assert conversations.LIVE_MATCH_MAX_AGE_MIN == 360
+    ais._mmsi_index["253000036"] = _aged("BELLONA", minutes_ago=7320, mmsi="253000036")
+    assert conversations._live_match_candidates([{"live_mmsi": "253000036"}]) == {}
+
+
+def test_a_recent_live_match_is_still_offered_by_default(ais_caches):
+    """The other half of the default: this bound must not cost a fresh candidate."""
+    vessels, _ = ais_caches
+    ais._mmsi_index["305970000"] = _aged("GT VELA", minutes_ago=7, mmsi="305970000")
+    assert "305970000" in conversations._live_match_candidates([{"live_mmsi": "305970000"}])
+
+
+def test_the_live_match_bound_can_be_switched_off(ais_caches, monkeypatch):
+    """The rollback path, kept working rather than commented out."""
+    vessels, _ = ais_caches
+    monkeypatch.setattr(conversations, "LIVE_MATCH_MAX_AGE_MIN", 0)
+    ais._mmsi_index["253000036"] = _aged("BELLONA", minutes_ago=7320, mmsi="253000036")
+    assert "253000036" in conversations._live_match_candidates([{"live_mmsi": "253000036"}])
+
+
+def test_a_stale_live_match_is_not_offered_once_the_bound_is_set(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(conversations, "LIVE_MATCH_MAX_AGE_MIN", 360)
+    ais._mmsi_index["253000036"] = _aged("BELLONA", minutes_ago=7320, mmsi="253000036")
+    assert conversations._live_match_candidates([{"live_mmsi": "253000036"}]) == {}
+
+
+def test_a_fresh_live_match_survives_the_bound(ais_caches, monkeypatch):
+    vessels, _ = ais_caches
+    monkeypatch.setattr(conversations, "LIVE_MATCH_MAX_AGE_MIN", 360)
+    ais._mmsi_index["305970000"] = _aged("GT VELA", minutes_ago=7, mmsi="305970000")
+    assert "305970000" in conversations._live_match_candidates([{"live_mmsi": "305970000"}])
 
 
 def test_last_seen_rolls_forward_rather_than_recording_entry_time(ais_caches, monkeypatch):
@@ -2209,6 +2314,55 @@ def test_partial_callsign_becomes_a_candidate_when_the_name_agrees(partial_cache
     assert cands[0]["partial_pattern"] == "5.R.9"
 
 
+# A cleanly decoded callsign that is simply SHORT
+#
+# CLAMOR SCHULTE, 2026-08-18, callsign V7B2710: the vessel spelled it out and the decoder
+# produced "7B2710" -- complete but for the leading V, which was never garbled so much as
+# swallowed before the spelling began, into "call SUNvictor seven". Every path then declined
+# for a locally correct reason. The exact lookup cannot match a short run.
+# _partial_callsign_pattern returns None because nothing inside the span was garbled -- "not
+# this function's problem". And match_by_callsign_suffix, which resolves 7B2710 to exactly
+# one cached vessel, is reachable only THROUGH that pattern. Each path defers to the other
+# and nobody tries the tail, so the resolver was handed a list without the ship on it.
+
+_CLAMOR = {"name": "CLAMOR SCHULTE", "mmsi": "538012343", "callsign": "V7B2710", "type": 80}
+_SHORT_CALL = ("Maas Approach, this is motortanker, Aslamu Shulte, "
+               "call Sunvictor seven, Bravo two seven one zero, over.")
+
+
+@pytest.fixture
+def short_callsign_caches(monkeypatch):
+    monkeypatch.setattr(ais, "_callsign_cache", {"V7B2710": _CLAMOR})
+    monkeypatch.setattr(ais, "_vessel_cache", {"CLAMOR SCHULTE": _CLAMOR})
+    monkeypatch.setattr(conversations, "CALLSIGN_SUFFIX_FALLBACK", True)
+    return _CLAMOR
+
+
+def test_a_callsign_missing_its_first_character_still_finds_the_vessel(short_callsign_caches):
+    cands = proxy._resolver_candidates([_chunk(30, _SHORT_CALL, cid=1)])
+    assert [c["name"] for c in cands] == ["CLAMOR SCHULTE"]
+    assert cands[0]["via_partial_callsign"] is True, "one character short is not exact"
+
+
+def test_the_short_callsign_path_still_needs_the_name_to_agree(short_callsign_caches):
+    """The gate that makes a unique tail safe. A tail alone is a guess -- and a tail that
+    uniquely fits the WRONG ship is a confident false identity, which costs most here."""
+    text = "Maas Approach, this is Wilson Durness, call Sunvictor seven, Bravo two seven one zero, over."
+    assert proxy._resolver_candidates([_chunk(30, text, cid=1)]) == []
+
+
+def test_an_ambiguous_tail_identifies_nobody(short_callsign_caches, monkeypatch):
+    """Two ships whose callsigns end the same way. match_by_callsign_suffix declines rather
+    than picking, and this path must not paper over that."""
+    twin = {"name": "CLAMOR SCHUTTE", "mmsi": "9", "callsign": "A7B2710", "type": 80}
+    monkeypatch.setattr(ais, "_callsign_cache", {"V7B2710": _CLAMOR, "A7B2710": twin})
+    assert proxy._resolver_candidates([_chunk(30, _SHORT_CALL, cid=1)]) == []
+
+
+def test_the_short_callsign_path_is_off_until_it_has_been_measured():
+    assert conversations.CALLSIGN_SUFFIX_FALLBACK is False
+
+
 def test_partial_callsign_is_refused_when_no_name_corroborates(partial_caches):
     """The pattern alone is a guess. Without a name that agrees, offer nothing."""
     text = "Maas Approach, this is Wilson Durness, Callsign five DEMA Romeo, clear nine."
@@ -2248,6 +2402,12 @@ _ISABEL = {"name": "ISABEL", "mmsi": "244700279", "callsign": "PB7708", "type": 
 
 @pytest.fixture
 def santa_caches(monkeypatch):
+    # Stamped fresh because the live-match path is age-bounded by default since 2026-08-18,
+    # and _is_fresh counts a missing last_seen as NOT fresh. Both real caches carry the
+    # field on every one of their ~5,000 entries, so an unstamped vessel is not a state the
+    # running server can be in -- the same argument the _mmsi_index note below makes.
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _SANTA["last_seen"] = _ISABEL["last_seen"] = stamp
     monkeypatch.setattr(ais, "_vessel_cache", {"SANTA ISABEL MAERSK": _SANTA,
                                                "ISABEL": _ISABEL})
     monkeypatch.setattr(ais, "_callsign_cache", {"OXWU2": _SANTA, "PB7708": _ISABEL})
@@ -3519,18 +3679,34 @@ def test_the_candidate_list_the_resolver_saw_is_recorded(monkeypatch):
     assert got[0]["via_callsign"] is True and got[1]["via_live_match"] is True
 
 
-def test_a_recorded_candidate_carries_no_position_or_particulars(monkeypatch):
-    """300 conversations x every AIS field would bloat the store for no diagnostic gain.
-    Name, MMSI and how it got on the list are what answer "was the truth offered?"."""
+def test_a_recorded_candidate_carries_the_facts_that_judge_plausibility(monkeypatch):
+    """Position, draught, destination and age, recorded AS THEY WERE when the resolver chose.
+
+    These were deliberately left out at first, on the grounds that they answered no question
+    the record existed to answer. Two measurements then failed for want of exactly them.
+    A proximity tie-break could not be scored, because a frozen cache holds only each
+    vessel's LAST position -- NOORDBORG reads as 101.6 km away in a snapshot taken a day
+    after it called, so the arm scored the ship's later whereabouts, not its whereabouts on
+    the radio. And BELLONA was recognisable as wrong precisely by draught 1.5 m and
+    destination ANTWERPEN on a Rotterdam approach channel.
+
+    A vessel's position is only knowable at the moment it is used. Not recording it there
+    does not defer the question, it destroys it.
+    """
     chunks = [{"id": 1, "text": "Maas Approach.", "time": None}]
     monkeypatch.setattr(conversations, "_resolver_candidates",
                         lambda c: [{"name": "SERENADA", "mmsi": "275545000",
                                     "latitude": 51.9, "longitude": 4.1, "draught": 12.5,
-                                    "destination": "ROTTERDAM"}])
+                                    "destination": "ROTTERDAM", "last_seen": "2026-08-18 12:00:00",
+                                    "imo": 9999999, "sog": 11.2, "cog": 45.0}])
     monkeypatch.setattr(conversations, "_get_claude", lambda: (_ for _ in ()).throw(
         RuntimeError("no API in tests")))
     got = conversations.resolve_conversation(chunks)[0]["resolver_candidates"][0]
-    assert set(got) == {"name", "mmsi", "via_callsign", "via_live_match", "via_partial_callsign"}
+    assert got["latitude"] == 51.9 and got["longitude"] == 4.1
+    assert got["draught"] == 12.5 and got["destination"] == "ROTTERDAM"
+    assert got["last_seen"] == "2026-08-18 12:00:00"
+    # Still not everything: imo, sog and cog judge nothing here and this is written 300 times.
+    assert "imo" not in got and "sog" not in got and "cog" not in got
 
 
 def test_storage_without_corrections_is_unchanged(monkeypatch):
