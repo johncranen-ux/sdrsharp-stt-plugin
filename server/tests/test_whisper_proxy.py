@@ -1943,6 +1943,25 @@ def test_real_values_survive_the_placeholder_pass():
     assert result == {"vessel": "MSC Athens", "callsign": "5LKV5", "vessel_type": "container"}
 
 
+@pytest.mark.parametrize("echoed", ["<name or null>", "<callsign or null>", "<type or null>"])
+def test_the_schema_placeholder_itself_becomes_a_real_null(echoed):
+    """Seen once in 300 stored conversations: instead of filling the schema in, the model
+    copied it back, and `<name or null>` was journalled as the vessel for a real
+    transmission. The word-only guard above does not catch it -- angle brackets and all."""
+    result = {"vessel": echoed, "callsign": echoed, "vessel_type": echoed}
+    identify._null_out_placeholders(result)
+    assert result == {"vessel": None, "callsign": None, "vessel_type": None}
+
+
+def test_a_name_merely_containing_an_angle_bracket_is_kept():
+    """AIS 6-bit decode artefacts reach the cache as names like 'CGAS TIGET<<'. They are
+    junk, but they are junk _looks_like_ais_artefact already judges -- nulling them here
+    would hide a bad cache entry behind a silent None."""
+    result = {"vessel": "CGAS TIGET<<", "callsign": None, "vessel_type": None}
+    identify._null_out_placeholders(result)
+    assert result["vessel"] == "CGAS TIGET<<"
+
+
 def test_partial_callsign_pattern_decodes_the_real_transmission():
     """MSC TEMA VIII (5LRK9) went unidentified: Whisper heard Lima->'DEMA', Kilo->'clear'."""
     text = ("Good afternoon, this is Motortanker MSC DEMA eight, "
@@ -3454,6 +3473,64 @@ def test_storage_keeps_the_verbatim_text_beside_the_correction(monkeypatch, tmp_
     assert turns[0]["conv"] == "Maas Approach, Motorvessel Example Trader."
     assert turns[0]["changes"][0]["to"] == "Motorvessel"
     assert "conv" not in turns[1], "an uncorrected turn stores no conv field"
+
+
+def test_storage_keeps_the_live_mmsi_beside_the_live_name(monkeypatch):
+    """Without this the commonest identification failure cannot be diagnosed afterwards.
+
+    `live_vessel` alone is ambiguous: `enrich_with_ais` returns the result untouched when
+    AIS matches nothing, so a stored name can mean either "AIS matched this ship" or "the
+    model heard this name and AIS had no such ship". Those have opposite causes -- a matcher
+    problem versus a cache-membership problem -- and `live_mmsi` is what separates them.
+    It has now blocked two post-hoc investigations (BORIS SOKOLOV, 2026-08-13).
+    """
+    when = datetime.datetime(2026, 8, 7, 10, 14, 15)
+    monkeypatch.setattr(conversations, "_resolved", [])
+    monkeypatch.setattr(conversations, "_save_conversations", lambda: None)
+    window = _window(when)
+    window[0]["live_vessel"], window[0]["live_mmsi"] = "SEA BANCKERT", "244660257"
+    window[1]["live_vessel"], window[1]["live_mmsi"] = "Boris Sokolov", None
+    conversations._store_resolved(
+        window,
+        [{"chunk_ids": [1, 2], "vessel": None, "mmsi": None,
+          "evidence": "e", "confidence": "low"}],
+        None)
+    turns = conversations._resolved[0]["turns"]
+    assert turns[0]["live_mmsi"] == "244660257", "AIS matched: the ship was in the cache"
+    assert turns[1]["live_mmsi"] is None, "no AIS match: heard, but not in the cache"
+
+
+def test_the_candidate_list_the_resolver_saw_is_recorded(monkeypatch):
+    """"Not in the candidate list" is the commonest reason a conversation resolves to
+    nobody, and until now the list itself was thrown away -- leaving no way to tell a
+    vessel that was never offered from one that was offered and rejected."""
+    chunks = [{"id": 1, "text": "Maas Approach, Serenada.", "time": None}]
+    monkeypatch.setattr(conversations, "_resolver_candidates",
+                        lambda c: [{"name": "SERENADA", "mmsi": "275545000",
+                                    "via_callsign": True},
+                                   {"name": "GOOD WAY", "mmsi": "1", "via_live_match": True}])
+    monkeypatch.setattr(conversations, "_get_claude", lambda: (_ for _ in ()).throw(
+        RuntimeError("no API in tests")))
+    rows = conversations.resolve_conversation(chunks)
+    assert rows, "the resolver-unavailable path must still return a row"
+    got = rows[0]["resolver_candidates"]
+    assert [c["name"] for c in got] == ["SERENADA", "GOOD WAY"]
+    assert got[0]["mmsi"] == "275545000"
+    assert got[0]["via_callsign"] is True and got[1]["via_live_match"] is True
+
+
+def test_a_recorded_candidate_carries_no_position_or_particulars(monkeypatch):
+    """300 conversations x every AIS field would bloat the store for no diagnostic gain.
+    Name, MMSI and how it got on the list are what answer "was the truth offered?"."""
+    chunks = [{"id": 1, "text": "Maas Approach.", "time": None}]
+    monkeypatch.setattr(conversations, "_resolver_candidates",
+                        lambda c: [{"name": "SERENADA", "mmsi": "275545000",
+                                    "latitude": 51.9, "longitude": 4.1, "draught": 12.5,
+                                    "destination": "ROTTERDAM"}])
+    monkeypatch.setattr(conversations, "_get_claude", lambda: (_ for _ in ()).throw(
+        RuntimeError("no API in tests")))
+    got = conversations.resolve_conversation(chunks)[0]["resolver_candidates"][0]
+    assert set(got) == {"name", "mmsi", "via_callsign", "via_live_match", "via_partial_callsign"}
 
 
 def test_storage_without_corrections_is_unchanged(monkeypatch):

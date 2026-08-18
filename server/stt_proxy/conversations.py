@@ -484,6 +484,30 @@ def _render_resolver_input(chunks: list[dict], candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# What the resolver was offered, recorded on every row it produces
+#
+# "not in the candidate list" is far and away the commonest reason a conversation resolves
+# to nobody -- it is the stated reason in almost every unidentified row -- and until now the
+# list itself was discarded the moment the call returned. That left no way to separate the
+# two cases behind that sentence: a vessel that was never offered (a cache-membership
+# problem) from one that was offered and rejected (a resolver-judgement problem). They need
+# opposite fixes, and both BORIS SOKOLOV and SEA BANCKERT were undiagnosable without it.
+#
+# Name, MMSI and how each candidate got on the list -- nothing else. Every AIS field across
+# 300 stored conversations would bloat the store, and position or draught answers no
+# question this exists to answer.
+_CANDIDATE_MARKS = ("via_callsign", "via_live_match", "via_partial_callsign")
+
+
+def _record_candidates(rows: list[dict], candidates: list[dict]) -> list[dict]:
+    compact = [{"name": c.get("name"), "mmsi": c.get("mmsi"),
+                **{mark: bool(c.get(mark)) for mark in _CANDIDATE_MARKS}}
+               for c in candidates]
+    for row in rows:
+        row["resolver_candidates"] = compact
+    return rows
+
+
 def resolve_conversation(chunks: list[dict]) -> list[dict]:
     """Segment a closed window into exchanges and identify each. Never returns text."""
     if not chunks:
@@ -517,9 +541,12 @@ def resolve_conversation(chunks: list[dict]) -> list[dict]:
         exchanges = json.loads(content).get("exchanges", [])
     except Exception as exc:
         print(f"  [resolve error] {exc}", flush=True)
-        return _unresolved(chunks)
+        # Recorded on this path too: "the resolver never ran" and "the resolver ran and
+        # found nobody" look identical in the store otherwise, and only one of them is a
+        # reason to go looking at the candidate list.
+        return _record_candidates(_unresolved(chunks), candidates)
 
-    return _validate_exchanges(exchanges, chunks, by_name)
+    return _record_candidates(_validate_exchanges(exchanges, chunks, by_name), candidates)
 
 
 def _unresolved(chunks: list[dict]) -> list[dict]:
@@ -797,7 +824,15 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
             row = {"time": t["time"].strftime("%H:%M:%S"),
                    "text": t.get("corrected") or t.get("text", ""),
                    "raw": t.get("text", ""),
-                   "live_vessel": t.get("live_vessel")}
+                   "live_vessel": t.get("live_vessel"),
+                   # Stored beside the name because the name alone is ambiguous:
+                   # enrich_with_ais returns the result untouched when AIS matches nothing,
+                   # so live_vessel can mean either "AIS matched this ship" or "the model
+                   # heard this name and AIS had no such ship". Those have opposite causes
+                   # -- a matcher problem versus a cache-membership problem -- and only the
+                   # MMSI separates them. Its absence blocked the BORIS SOKOLOV diagnosis
+                   # on 2026-08-13 and the same question again five days later.
+                   "live_mmsi": t.get("live_mmsi")}
             fix = corrections.get(t["id"])
             # Absent rather than equal-to-text when nothing was corrected, so the page can
             # tell "not corrected" from "corrected to the same thing".

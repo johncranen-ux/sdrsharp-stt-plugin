@@ -96,10 +96,26 @@ f. A transmission may be a single word, a fragment, or badly garbled. Correct it
 _PLACEHOLDER_VALUES = {"null", "none", "n/a", "unknown", "-", ""}
 
 
+def _is_schema_echo(value: str) -> bool:
+    """Whether the model copied the schema back instead of filling it in.
+
+    The schema above literally reads `"vessel": "<name or null>"`, and once in 300 stored
+    conversations that string was journalled as the vessel for a real transmission -- it is
+    truthy, so it survived every fallback the same way the bare word "null" used to.
+
+    Wrapped in angle brackets, not merely containing one: AIS 6-bit decode artefacts reach
+    the cache as names like `CGAS TIGET<<`, and those are a bad cache entry to be seen
+    (`_looks_like_ais_artefact` judges them), not a placeholder to be silently nulled.
+    """
+    stripped = value.strip()
+    return stripped.startswith("<") and stripped.endswith(">")
+
+
 def _null_out_placeholders(result: dict) -> None:
     for field in ("vessel", "callsign", "vessel_type"):
         value = result.get(field)
-        if isinstance(value, str) and value.strip().lower() in _PLACEHOLDER_VALUES:
+        if isinstance(value, str) and (value.strip().lower() in _PLACEHOLDER_VALUES
+                                       or _is_schema_echo(value)):
             result[field] = None
 
 

@@ -1759,6 +1759,78 @@ nor the conversation-correction pass. `tests/test_suggestions.py` asserts each o
 That feedback path is exactly how a sub-cutoff match once rewrote "motor vessel to Leland"
 into "motor vessel Vlieland" and named the wrong ship.
 
+## "The name arrived intact and we still missed it" is 2 of 35 (2026-08-18)
+
+Prompted by three shortlist entries where a full vessel name had been spoken plainly on a
+conversation that resolved to nobody: CIELO DI ULSAN, MSC SAUDI ARABIA, BORIS SOKOLOV.
+
+Measured properly, the class is small. Scoring what the **live pass extracted** against
+ground truth — a cleaner instrument than raw n-grams, because it is the model's own reading
+of the name — over the 35 unidentified conversations in the 08-13/14 labels:
+
+    name arrived at or above the 76 matcher cutoff    2
+    never arrived that intact                        33
+
+The closest of the other 33 are `Baltic`/BALTICBORG (75), `Hammerstar`/AMUR STAR (74),
+`Amundsen`/MARAN AMUNDSEN (73) — the same cluster pressed under the threshold already
+recorded. This corroborates "the name never arrives" rather than overturning it.
+
+**A measurement trap avoided.** Asking instead "would the heard name match *something* in
+today's cache" gives 20 of 50 and is worthless: the matches are `Maranamest` → AMUSE where
+the truth is MARAN AMUNDSEN, and `Free North` → NORAH where the truth is MELTEMI I. Matching
+something is not matching the right thing. Same shape as the candidate-recall trap of
+2026-08-12; always score against labels.
+
+The two real cases have **opposite** causes, which is the whole reason the instrumentation
+below now exists:
+
+- **BORIS SOKOLOV** — heard as `Boris Sokolov`, title case. That casing is the tell:
+  `enrich_with_ais` returns the result untouched when AIS matches nothing, so a title-case
+  `live_vessel` means the model heard the name and AIS had no such ship. `live_mmsi` was
+  never set, `_live_match_candidates` keys on `live_mmsi`, so the vessel never reached the
+  candidate list and the resolver correctly refused an off-list name. *Why* AIS had no
+  match could not be determined — the cache state at that instant is not recorded.
+- **SEA BANCKERT** — heard as `SEA BANCKERT`, uppercase, i.e. the AIS spelling written back
+  by enrichment. AIS *did* match, the ship *was* offered, and the resolver rejected it:
+  *"SEA BANCKERT is phonetically similar but the callsign PEER does not appear."* The shore
+  station had repeated the name clearly. Prompt rules 3-5 all elevate callsigns while rule 6
+  demotes the live-pass candidate to "a lead, not evidence", and between them a good name
+  match lost to a callsign a 12-second check-in was never going to contain.
+
+**The prompt was NOT changed.** Across the 19 stored conversations where the live pass had
+an AIS match and the resolver still named nobody, the live match is the *wrong* ship in
+almost all of them (WESTZEE, GEORGIA, HOUSTON, MULSANNE, OLSKE) and refusing was correct.
+SEA BANCKERT is n=1, prompt changes here have cost 11 WER points before, and any change
+needs `bench_identify --resolve --repeats 3` against a 2.9-point noise floor to mean
+anything. Label more callsign-absent rejections before touching it.
+
+### What was changed: two fields, so the next one is diagnosable
+
+`live_mmsi` is now stored beside `live_vessel` on every turn, and the candidate list the
+resolver saw is stored on every row it produces as `resolver_candidates` (name, MMSI, and
+which pass put it there — no positions or particulars). Together they separate the two
+causes above, which the store previously could not:
+
+| stored | means |
+|---|---|
+| `live_vessel` set, `live_mmsi` null | the name was heard; AIS had no such ship |
+| both set | AIS matched; the ship reached the candidate list |
+| truth absent from `resolver_candidates` | never offered — a cache-membership problem |
+| truth present, row unnamed | offered and rejected — a resolver-judgement problem |
+
+Recorded on the resolver-error path too, so "never ran" and "ran and found nobody" stay
+distinguishable. Costs about 1.1 KB per row, taking the 300-row store from ~595 KB to
+~900 KB. This gap has now blocked two post-hoc investigations; that is what it buys.
+
+### And one incidental defect
+
+`_null_out_placeholders` coerced the bare words `null`, `none`, `n/a`, `unknown`, `-` but
+not the schema placeholder itself, so the literal string `<name or null>` was journalled
+once as the vessel of a real transmission. Now nulled when a value is *wrapped* in angle
+brackets — wrapped, not merely containing one, because AIS 6-bit decode artefacts arrive as
+names like `CGAS TIGET<<` and those are a bad cache entry to be seen, not a placeholder to
+be hidden. One occurrence in ~1,400 turns.
+
 ## Testing
 
 - C#: `dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj`
