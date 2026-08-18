@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Windows 11.** Paths are Windows paths; use `pathlib.Path`, never assume POSIX separators.
-- **Scope is the settings `start-all.bat` exposes** — nothing else. 27 settings after the 2026-08-18 additions. The proxy reads 65 env vars; the other 38 stay as code defaults and must NOT appear.
+- **Scope is the settings `start-all.bat` exposes** — nothing else. 26 settings after the 2026-08-18 additions. The proxy reads 65 env vars; the other 39 stay as code defaults and must NOT appear.
 - **Secrets never leave the server.** `SettingSpec.secret` marks them; anything rendering or serialising for a client must be able to mask by that flag alone. In this phase that means `redacted_values()` exists and is tested.
 - **Atomic writes.** `config.json` is written temp-then-replace so an interrupted save cannot truncate it.
 - **`config.json` is gitignored.** It holds API keys. Add the ignore rule in Task 1.
@@ -27,7 +27,7 @@
 | file | responsibility |
 |---|---|
 | `server/webapp/__init__.py` | empty package marker |
-| `server/webapp/settings_schema.py` | `SettingSpec`, `SettingType`, and `SETTINGS` — the catalogue of 27 |
+| `server/webapp/settings_schema.py` | `SettingSpec`, `SettingType`, and `SETTINGS` — the catalogue of 26 |
 | `server/webapp/config_store.py` | load/save `config.json`, atomic write, defaults merge, `redacted_values()` |
 | `server/webapp/env_builder.py` | values dict → environment dict for a child process |
 | `server/webapp/import_batch.py` | one-time read of current values out of `start-all.bat` |
@@ -61,7 +61,7 @@ Every value is stored and returned as a **string**, because that is what an envi
 """The setting catalogue: what the control panel is allowed to expose, and how each
 value is validated.
 
-Scope is deliberately the 27 settings start-all.bat names. The proxy reads 65 env vars;
+Scope is deliberately the 26 settings start-all.bat names. The proxy reads 65 env vars;
 the rest are code defaults that no operator should be editing from a web form.
 """
 import sys
@@ -528,7 +528,10 @@ def load(path: Path) -> dict[str, str]:
             stored = {k: str(v) for k, v in raw.items()}
     except FileNotFoundError:
         pass
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming explicitly.
+        # A config.json that is not valid UTF-8 must fall back to defaults like any other
+        # unreadable file -- crashing here would take the whole server down at startup.
         pass
     return {s.key: stored.get(s.key, s.default) for s in SETTINGS}
 
@@ -592,7 +595,8 @@ git commit -m "Store settings in config.json, validated and written atomically"
 - Create: `server/tests/test_env_builder.py`
 
 **Interfaces:**
-- Consumes: `load` from Task 2; `BY_KEY` from Task 1.
+- Consumes: `BY_KEY` from Task 1. (Nothing from Task 2 — the builder is a pure
+  transformation over a values dict the caller already has.)
 - Produces: `build_env(values: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]`.
 
 The rule that matters: **an empty value is omitted, not exported as an empty string.** `AIS_CACHE_FILE=""` in the environment is not the same as unset — the proxy reads it with `os.environ.get("AIS_CACHE_FILE", "")` and `.strip() or default`, so empty happens to be safe there, but `ANTHROPIC_API_KEY=""` would make the key look present and fail later with a confusing error rather than the clear "unset disables identification".
@@ -806,7 +810,7 @@ from webapp.settings_schema import BY_KEY, validate_value
 # Active `set NAME=value` only, anchored at the start of the line. A commented line
 # (`:: set X=off`) documents a rollback that is NOT currently applied, and importing it
 # would silently turn a shipped fix off during the migration.
-_SET_RE = re.compile(r"^set\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_SET_RE = re.compile(r"^set\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.IGNORECASE)
 
 
 def parse_batch(text: str) -> dict[str, str]:
@@ -829,7 +833,7 @@ def import_into(batch_path: Path, config_path: Path) -> dict[str, str]:
     Validates as it goes, so a value the schema rejects fails here -- during a migration a
     human is watching -- rather than at the next restart.
     """
-    text = Path(batch_path).read_text(encoding="utf-8", errors="replace")
+    text = Path(batch_path).read_text(encoding="utf-8-sig")
     imported = parse_batch(text)
 
     values = {spec.key: spec.default for spec in BY_KEY.values()}
@@ -964,7 +968,8 @@ This task adds no production code. If it fails, the fix belongs in Tasks 1–4.
 - [ ] **Step 4: Run the whole suite**
 
 Run: `py -m pytest server/tests -q`
-Expected: PASS. The pre-existing count is 809; this phase adds 32, so expect 841 passed, 1 xfailed.
+Expected: PASS. The pre-existing count is 809; this phase adds 34 (10+10+6+6+2), so
+expect 843 passed, 1 xfailed — or 840 passed, 3 skipped if `start-all.bat` is absent.
 
 - [ ] **Step 5: Commit**
 
