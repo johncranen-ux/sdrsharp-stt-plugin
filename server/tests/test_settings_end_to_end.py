@@ -102,3 +102,28 @@ def test_the_built_environment_matches_what_the_batch_file_sets(tmp_path):
                                   .read_text(encoding="utf-8", errors="replace")).items():
         if value.strip():
             assert env.get(key) == value, f"{key} did not survive the round trip"
+
+
+# The eleven settings start-all.bat actively sets today, minus SCRIPT_DIR and PROXY_SCRIPT
+# which are batch plumbing rather than settings. Hardcoded ON PURPOSE: the test above
+# derives its expectation from BY_KEY, so a renamed catalogue key disappears from the
+# expected and actual sides together and the assertion passes over its own blind spot.
+# This list is independent of the catalogue, so a rename fails loudly here.
+_KEYS_START_ALL_BAT_SETS = (
+    "ANTHROPIC_API_KEY", "AISSTREAM_API_KEY", "AISSTREAM_API_KEY2", "GROQ_API_KEY",
+    "OPENROUTER_API_KEY", "AISHUB_USERNAME", "STT_BACKEND", "GROQ_MODEL",
+    "AISHUB_BBOX", "WHISPER_BACKEND_PORT", "PROXY_PORT",
+)
+
+
+@pytest.mark.skipif(not (_SERVER_DIR / "start-all.bat").exists(),
+                    reason="start-all.bat is gitignored; present only on a configured machine")
+def test_every_setting_the_launcher_configures_reaches_the_child(tmp_path):
+    """Catalogue-independent. If a key is renamed or dropped from SETTINGS, the operator's
+    configured value silently reverts to a code default they never chose -- and the sibling
+    test cannot see it, because its expectation is built from the same catalogue."""
+    config = tmp_path / "config.json"
+    import_into(_SERVER_DIR / "start-all.bat", config)
+    env = build_env(config_store.load(config), base={})
+    missing = [key for key in _KEYS_START_ALL_BAT_SETS if key not in env]
+    assert missing == [], f"configured settings that never reached the environment: {missing}"
