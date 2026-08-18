@@ -12,7 +12,7 @@ Environment hazards this test must stay clear of:
     cleared before the environment is built.
 """
 import json
-import os
+import re
 import socket
 import subprocess
 import sys
@@ -64,6 +64,11 @@ def test_a_proxy_started_from_the_built_environment_serves_requests(tmp_path):
         values[key] = ""
 
     env = build_env(values)
+    # NOTE: CONVERSATIONS_FILE and VESSELS_LOG_FILE are hardcoded in the proxy with no env
+    # override, so unlike AIS_CACHE_FILE this child cannot be pointed away from the live
+    # files. It is safe only incidentally: a proxy that receives no audio never mutates the
+    # store it loaded, and terminate() on Windows does not run atexit handlers. Making those
+    # paths configurable belongs to the phase 2 Paths group.
     child = subprocess.Popen(
         [sys.executable, str(_SERVER_DIR / "whisper-proxy.py")],
         cwd=str(_SERVER_DIR), env=env,
@@ -100,30 +105,39 @@ def test_the_built_environment_matches_what_the_batch_file_sets(tmp_path):
     env = build_env(config_store.load(config), base={})
     for key, value in parse_batch((_SERVER_DIR / "start-all.bat")
                                   .read_text(encoding="utf-8", errors="replace")).items():
-        if value.strip():
-            assert env.get(key) == value, f"{key} did not survive the round trip"
+        # pytest.fail, not a bare assert: several of these values are live API keys, and a
+        # bare assert has pytest rewrite both operands' repr() into the failure output --
+        # exactly the scenario this test exists to catch would leak the secret into the log.
+        if value.strip() and env.get(key) != value:
+            pytest.fail(f"{key} did not survive the round trip")
 
 
-# The eleven settings start-all.bat actively sets today, minus SCRIPT_DIR and PROXY_SCRIPT
-# which are batch plumbing rather than settings. Hardcoded ON PURPOSE: the test above
-# derives its expectation from BY_KEY, so a renamed catalogue key disappears from the
-# expected and actual sides together and the assertion passes over its own blind spot.
-# This list is independent of the catalogue, so a rename fails loudly here.
-_KEYS_START_ALL_BAT_SETS = (
-    "ANTHROPIC_API_KEY", "AISSTREAM_API_KEY", "AISSTREAM_API_KEY2", "GROQ_API_KEY",
-    "OPENROUTER_API_KEY", "AISHUB_USERNAME", "STT_BACKEND", "GROQ_MODEL",
-    "AISHUB_BBOX", "WHISPER_BACKEND_PORT", "PROXY_PORT",
-)
+# Plumbing the batch file uses to find itself -- not settings, and correctly never catalogued.
+_BATCH_PLUMBING = {"SCRIPT_DIR", "PROXY_SCRIPT"}
+# Deliberately NOT import_batch.parse_batch: that filters through BY_KEY, the very catalogue
+# this test polices, so a renamed key would drop out of the expected and actual sides together
+# and the assertion would pass over its own blind spot. Scanning the file independently also
+# catches a NEW set line that was never catalogued, which build_env silently drops.
+_SET_LINE = re.compile(r"^set\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.IGNORECASE)
+
+
+def _keys_the_launcher_sets(batch_path: Path) -> set[str]:
+    found = set()
+    for line in batch_path.read_text(encoding="utf-8-sig").splitlines():
+        match = _SET_LINE.match(line.strip())
+        if match and match.group(2).strip():
+            found.add(match.group(1).upper())
+    return found - _BATCH_PLUMBING
 
 
 @pytest.mark.skipif(not (_SERVER_DIR / "start-all.bat").exists(),
                     reason="start-all.bat is gitignored; present only on a configured machine")
 def test_every_setting_the_launcher_configures_reaches_the_child(tmp_path):
-    """Catalogue-independent. If a key is renamed or dropped from SETTINGS, the operator's
-    configured value silently reverts to a code default they never chose -- and the sibling
-    test cannot see it, because its expectation is built from the same catalogue."""
+    """Catalogue-independent. Catches BOTH a renamed/dropped catalogue key -- whose configured
+    value would silently revert to a code default the operator never chose -- and a new set
+    line in start-all.bat that was never catalogued, which build_env drops without a word."""
     config = tmp_path / "config.json"
     import_into(_SERVER_DIR / "start-all.bat", config)
     env = build_env(config_store.load(config), base={})
-    missing = [key for key in _KEYS_START_ALL_BAT_SETS if key not in env]
+    missing = sorted(_keys_the_launcher_sets(_SERVER_DIR / "start-all.bat") - set(env))
     assert missing == [], f"configured settings that never reached the environment: {missing}"
