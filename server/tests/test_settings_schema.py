@@ -1,7 +1,7 @@
 """The setting catalogue: what the control panel is allowed to expose, and how each
 value is validated.
 
-Scope is deliberately the 27 settings start-all.bat names. The proxy reads 65 env vars;
+Scope is deliberately the 26 settings start-all.bat names. The proxy reads 65 env vars;
 the rest are code defaults that no operator should be editing from a web form.
 """
 import sys
@@ -79,3 +79,9 @@ def test_a_bbox_with_min_above_max_is_rejected():
 def test_the_sea_box_reasoning_survived_into_the_description():
     """That comment is some of the best documentation in the project."""
     assert "4.25" in BY_KEY["AISHUB_BBOX"].description
+
+
+def test_the_ais_feed_can_be_switched_off():
+    """whisper-proxy.py falls through to "AIS feed: disabled" on any value that is not
+    aishub or aisstream, so a two-choice enum would remove the only way to turn it off."""
+    assert validate_value(BY_KEY["AIS_SOURCE"], "off") == "off"

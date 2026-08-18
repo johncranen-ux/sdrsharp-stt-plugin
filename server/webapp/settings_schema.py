@@ -1,6 +1,6 @@
 """What the control panel is allowed to expose, and how each value is validated.
 
-Scope is the settings start-all.bat names -- 27 of the 65 environment variables the proxy
+Scope is the settings start-all.bat names -- 26 of the 65 environment variables the proxy
 reads. That file is the curated operator surface: a setting becomes operator-facing by being
 added there with the prose comment that explains it, so this catalogue inherits that
 documentation rather than competing with it.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class SettingType(str, enum.Enum):
@@ -100,7 +100,7 @@ SETTINGS: list[SettingSpec] = [
     SettingSpec(key="AISSTREAM_API_KEY", type=SettingType.SECRET, default="", group="Secrets",
                 description="Only used when AIS_SOURCE is aisstream."),
     SettingSpec(key="AISSTREAM_API_KEY2", type=SettingType.SECRET, default="", group="Secrets",
-                description="Second aisstream key, used as a fallback."),
+                description="Second aisstream key kept in the launcher. NOTE: no code currently reads this -- only AISSTREAM_API_KEY is used. Retained because it is set in start-all.bat."),
     SettingSpec(key="AISHUB_USERNAME", type=SettingType.SECRET, default="", group="Secrets",
                 description="AISHub username, issued for a station contributing an AIS feed. "
                             "Signing up alone is not enough."),
@@ -122,19 +122,20 @@ SETTINGS: list[SettingSpec] = [
 
     # ---- AIS source ----------------------------------------------------------
     SettingSpec(key="AIS_SOURCE", type=SettingType.ENUM, default="aishub", group="AIS source",
-                choices=["aishub", "aisstream"],
+                choices=["aishub", "aisstream", "off"],
                 description="Where vessel data comes from. aishub polls a REST API; aisstream "
-                            "is a websocket feed, kept live and tested so reverting works."),
+                            "is a websocket feed, kept live and tested so reverting works. "
+                            "off disables vessel matching entirely: transcription continues, but no conversation is given a vessel."),
     SettingSpec(key="AISHUB_BBOX", type=SettingType.BBOX, default="51.4,52.6,2.0,4.25",
                 group="AIS source",
                 description="latmin,latmax,lonmin,lonmax. The sea box, set 2026-08-13: Maas "
-                            "Approach works ships at sea, never river traffic already inside. "
+                            "Approach works ships at sea entering or waiting to enter, never river traffic already inside. "
                             "The old wide box (51.0,53.2,2.0,6.0) carried the whole Rhine/Maas "
                             "inland network -- 8,381 vessels with 685 duplicate-name groups "
                             "against this box's 1,537 and 43, a 94% cut in the name collisions "
-                            "that cause misidentification. The east edge is 4.25, PAST Hoek van "
-                            "Holland (4.12), on purpose: MINERAL JINDEOK was at 4.113 while "
-                            "calling."),
+                            "that cause misidentification, and the share of ships over 150 m rises from 5% to 14%. The east edge is 4.25, PAST Hoek van "
+                            "Holland (4.12), on purpose: a boundary at the entrance would have excluded MINERAL JINDEOK, which was at 4.113 while "
+                            "calling and whose spelled-out callsign proves it was on the channel."),
     SettingSpec(key="AISHUB_POLL_SEC", type=SettingType.INT, default="900", group="AIS source",
                 minimum=60, maximum=86400,
                 description="Seconds between AISHub polls. Values under 60 are refused: AISHub "
