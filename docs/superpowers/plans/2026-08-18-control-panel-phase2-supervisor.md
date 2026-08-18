@@ -1,6 +1,6 @@
 # Control Panel — Phase 2: Auth, Supervisor, Dashboard and Logs Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Turn the Phase 1 settings layer into a running, password-protected web app that starts, stops, restarts and monitors the proxy and the AIS station counter, shows their logs, and says plainly whether audio is still arriving from SDR#.
 
@@ -93,7 +93,7 @@ Thirteen small modules rather than one `server.py`: sessions change for security
 
 Why one catalogue rather than a second config file: the operator sees one Settings screen and one `config.json`, which is what makes a host migration one screen (spec, "Host-portable by construction"). The `exported` flag is the boundary that stops `WEBAPP_BIND_HOST` — and, more importantly, anything else the app keeps for itself — being handed to a child process that has no business seeing it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # append to server/tests/test_settings_schema.py
@@ -135,12 +135,12 @@ def test_non_exported_settings_never_reach_the_child_environment():
     assert env == {"PROXY_PORT": "9000"}
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `py -m pytest server/tests/test_settings_schema.py server/tests/test_env_builder.py -v`
 Expected: FAIL — `AttributeError: 'SettingSpec' object has no attribute 'exported'` and `KeyError: 'LOG_DIR'`.
 
-- [ ] **Step 3: Install the dependencies**
+- [x] **Step 3: Install the dependencies**
 
 ```bash
 py -m pip install fastapi "uvicorn[standard]" psutil argon2-cffi httpx
@@ -158,7 +158,7 @@ httpx
 
 Verify: `py -c "import fastapi, uvicorn, psutil, argon2, httpx; print('ok')"` prints `ok`.
 
-- [ ] **Step 4: Add the `exported` flag and the new settings**
+- [x] **Step 4: Add the `exported` flag and the new settings**
 
 In `server/webapp/settings_schema.py`, add to `SettingSpec`:
 
@@ -240,7 +240,7 @@ Append these entries to `SETTINGS`, keeping the file's comment style. The descri
                             "proxy owns."),
 ```
 
-- [ ] **Step 5: Make `build_env` honour the flag**
+- [x] **Step 5: Make `build_env` honour the flag**
 
 In `server/webapp/env_builder.py`, replace the `if key not in BY_KEY: continue` line:
 
@@ -250,7 +250,7 @@ In `server/webapp/env_builder.py`, replace the `if key not in BY_KEY: continue` 
             continue
 ```
 
-- [ ] **Step 6: Ignore the new secret-bearing files**
+- [x] **Step 6: Ignore the new secret-bearing files**
 
 Append to `.gitignore` (next to the existing `config.json` line):
 
@@ -259,12 +259,12 @@ credentials.json
 server/logs/
 ```
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `py -m pytest server/tests`
 Expected: all pass, including `test_catalogue_defaults.py` — the three new exported settings have no `os.environ.get` in `stt_proxy` yet, so nothing can drift until Task 2 adds them with matching defaults (`""`, `""`, `"localhost"`).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add server/requirements.txt server/webapp/settings_schema.py server/webapp/env_builder.py server/tests/test_settings_schema.py server/tests/test_env_builder.py .gitignore
@@ -287,7 +287,7 @@ git commit -m "Separate the settings the app keeps for itself from the ones a ch
 
 The dashboard's most important number is **time since the last chunk arrived**, because that is what separates "SDR# is up and receiving" from "SDR# is up with the play button unpressed". Nothing records it today. `now` travels with the payload so the client ages every timestamp against the proxy's clock, not the browser's.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # append to server/tests/test_whisper_proxy.py
@@ -337,12 +337,12 @@ def test_conversations_file_honours_its_environment_override(monkeypatch, tmp_pa
         importlib.reload(conversations)
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `py -m pytest server/tests/test_whisper_proxy.py -k "status or conversations_file" -v`
 Expected: FAIL — `AttributeError: module 'whisper_proxy' has no attribute '_status_payload'`.
 
-- [ ] **Step 3: Add the path overrides**
+- [x] **Step 3: Add the path overrides**
 
 `server/stt_proxy/conversations.py`, replacing line 871 — mirroring the `AIS_CACHE_FILE` pattern in `ais.py:50` so there is one idiom for this in the codebase:
 
@@ -368,7 +368,7 @@ VESSELS_LOG_FILE = os.path.normpath(
 BACKEND_HOST = os.environ.get("WHISPER_BACKEND_HOST", "localhost").strip() or "localhost"
 ```
 
-- [ ] **Step 4: Record chunk arrival and serve the status**
+- [x] **Step 4: Record chunk arrival and serve the status**
 
 In `server/whisper-proxy.py`, near the other module-level state (after line 91):
 
@@ -428,17 +428,17 @@ In `do_POST`, immediately after the `if self.path not in PATH_MAP:` block return
         _last_chunk_at = time.time()
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `py -m pytest server/tests/test_whisper_proxy.py -v`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `py -m pytest server/tests`
 Expected: all pass. `test_catalogue_defaults.py` now sees `CONVERSATIONS_FILE` and `VESSELS_LOG_FILE` with code default `""` and `WHISPER_BACKEND_HOST` with `"localhost"`, which is exactly what Task 1 put in the catalogue.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/whisper-proxy.py server/stt_proxy/conversations.py server/stt_proxy/vessel_log.py server/tests/test_whisper_proxy.py
@@ -460,7 +460,7 @@ git commit -m "Let the proxy report its own health, and stop hardcoding where it
 
 `config.json` holds six plaintext API keys and inherits its directory's ACL today, which on a normal Windows install means every local user can read it. The spec's Section 3 covers secrets in transit; this is the at-rest half.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_secure_file.py
@@ -501,12 +501,12 @@ def test_restrict_reports_failure_rather_than_raising(tmp_path):
     assert restrict(tmp_path / "does-not-exist.json") is False
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_secure_file.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.secure_file'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/secure_file.py
@@ -546,12 +546,12 @@ def restrict(path: Path) -> bool:
     return done.returncode == 0
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_secure_file.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Harden `config.json` on every save**
+- [x] **Step 5: Harden `config.json` on every save**
 
 In `server/webapp/config_store.py`, add the import and call it after `os.replace`:
 
@@ -566,12 +566,12 @@ from webapp.secure_file import restrict
         restrict(path)
 ```
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `py -m pytest server/tests`
 Expected: all pass. Watch `test_config_store.py` in particular — it writes many temporary configs, and each now takes an `icacls` call.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/webapp/secure_file.py server/webapp/config_store.py server/tests/test_secure_file.py
@@ -593,7 +593,7 @@ git commit -m "Restrict config.json to this account, so six API keys stop being 
 
 A password hash is a credential, not a setting: it is never rendered in a form, never sent to a browser, and never edited as text. It therefore lives in its own file, set only by `py -m webapp.set_password`. There is deliberately no bootstrap route — an unauthenticated "set the first password" endpoint is exactly the window Section 3 exists to close.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_credentials.py
@@ -651,12 +651,12 @@ def test_verify_tolerates_a_hash_it_cannot_parse():
     assert credentials.verify_password("not-a-hash", "anything") is False
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_credentials.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.credentials'`.
 
-- [ ] **Step 3: Implement the credential store**
+- [x] **Step 3: Implement the credential store**
 
 ```python
 # server/webapp/credentials.py
@@ -731,7 +731,7 @@ def save_password(path: Path, password: str) -> None:
     restrict(path)
 ```
 
-- [ ] **Step 4: Implement the CLI**
+- [x] **Step 4: Implement the CLI**
 
 ```python
 # server/webapp/set_password.py
@@ -771,7 +771,10 @@ if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
 ```
 
-- [ ] **Step 5: Run the tests and set a real password**
+- [ ] **Step 5: Run the tests and set a real password** — tests done; the password itself is
+      NOT set. `getpass` needs a console the agent does not have, and choosing the operator's
+      password for them would be worse than leaving it. Run it yourself:
+      `cd server && py -m webapp.set_password`
 
 Run: `py -m pytest server/tests/test_credentials.py -v` → PASS.
 
@@ -783,7 +786,7 @@ cd server && py -m webapp.set_password
 
 Confirm `server/credentials.json` exists, contains only a `$argon2id$` string, and is gitignored (`git status --short` shows nothing).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/webapp/credentials.py server/webapp/set_password.py server/tests/test_credentials.py
@@ -811,7 +814,7 @@ git commit -m "Add the operator password: argon2id, its own file, set only from 
 
 Sessions live in memory: there is one operator, and a restart of the panel logging them out is the correct amount of ceremony. CSRF is a per-session token echoed in a header, because the browser is now on a different machine and cookies travel.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_auth.py
@@ -924,12 +927,12 @@ def test_loopback_without_a_password_is_allowed_and_any_bind_with_one_is():
     check_bind_allowed("0.0.0.0", has_password=True)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_auth.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.auth'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/auth.py
@@ -1056,12 +1059,12 @@ def check_bind_allowed(host: str, has_password: bool) -> None:
         f"WEBAPP_BIND_HOST back to 127.0.0.1.")
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_auth.py -v`
 Expected: PASS, 10 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/webapp/auth.py server/tests/test_auth.py
@@ -1084,7 +1087,7 @@ git commit -m "Add sessions, CSRF tokens, login throttling and the refusal to bi
 
 psutil rather than parsing `netstat -ano` and `tasklist`: `tasklist` has been observed reporting stale entries in this project, and psutil gives pid, image name and creation time from one API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_ports.py
@@ -1177,12 +1180,12 @@ def test_clearing_a_free_port_is_a_no_op():
     assert clear_port(_free_port(), {"python.exe"}) is False
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_ports.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.ports'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/ports.py
@@ -1270,12 +1273,12 @@ def clear_port(port: int, expected_images: set[str], timeout_sec: float = 5.0) -
     return True
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_ports.py -v`
 Expected: PASS, 6 tests. If `test_a_listening_socket_in_this_process_is_found` fails on a machine where psutil cannot see own-process connections, run the suite from an ordinary (non-elevated) shell first — elevation is not required for own processes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/webapp/ports.py server/tests/test_ports.py
@@ -1302,7 +1305,7 @@ git commit -m "Free a port before starting, but only when we recognise what hold
 
 A registry, not two handlers: AIS-catcher joins in Phase 4 as one more entry, and the counter may be retired by flipping `COUNTER_ENABLED`. Disabled is not stopped — a disabled process is not shown as failed.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_registry.py
@@ -1381,12 +1384,12 @@ def test_an_explicit_log_directory_is_honoured(tmp_path):
     assert paths.log_dir == tmp_path
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_registry.py -v`
 Expected: FAIL — `ImportError: cannot import name 'registry' from 'webapp'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/registry.py
@@ -1494,12 +1497,12 @@ def is_enabled(spec: ProcessSpec, values: dict[str, str]) -> bool:
     return (values.get(spec.enabled_key) or "on").strip().lower() != "off"
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_registry.py -v`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/webapp/registry.py server/tests/test_registry.py
@@ -1524,7 +1527,7 @@ git commit -m "Describe the managed processes as a registry rather than two hand
 
 Three failures this project has already had are what this task's tests are about: a child dying with its console window, a zombie holding a port, and a pid file adopted by an unrelated process after pid reuse. The pid file therefore records the image name **and** the process creation time; both must match on reattachment.
 
-- [ ] **Step 1: Write the fake child and the failing tests**
+- [x] **Step 1: Write the fake child and the failing tests**
 
 ```python
 # server/tests/fake_child.py
@@ -1727,12 +1730,12 @@ def test_a_disabled_process_is_neither_startable_nor_shown_as_failed(tmp_path, m
         sup.start("fake")
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `py -m pytest server/tests/test_supervisor.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.supervisor'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/supervisor.py
@@ -1962,17 +1965,17 @@ class Supervisor:
         return self.start(name)
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `py -m pytest server/tests/test_supervisor.py -v`
 Expected: PASS, 9 tests. They start real detached children; if one leaks, `py -c "import psutil;[p.kill() for p in psutil.process_iter(['cmdline']) if p.info['cmdline'] and 'fake_child.py' in ' '.join(p.info['cmdline'])]"` clears them.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `py -m pytest server/tests`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/webapp/supervisor.py server/tests/test_supervisor.py server/tests/fake_child.py
@@ -1993,7 +1996,7 @@ git commit -m "Supervise detached children: dated logs, cleared ports, pid files
 
 Tailing now crosses a network, so it reads a bounded byte range and the client comes back with `next_offset`. `offset=None` means "the end minus `limit`", which is the first view. A file that shrank was rotated or truncated, so the reader restarts at zero and says so rather than returning nonsense.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_logs.py
@@ -2068,12 +2071,12 @@ def test_the_latest_log_is_the_most_recent_dated_file(tmp_path):
     assert latest_log(tmp_path, "nothing") is None
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_logs.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.logs'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/logs.py
@@ -2138,12 +2141,12 @@ def read_tail(path: Path, offset: int | None = None, limit: int = DEFAULT_LIMIT)
         text=chunk.decode("utf-8", errors="replace"), restarted=restarted)
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_logs.py -v`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/webapp/logs.py server/tests/test_logs.py
@@ -2164,7 +2167,7 @@ git commit -m "Read logs as bounded byte ranges, surviving rotation and bad byte
 
 `fetch` is injected so tests never open a socket. When the proxy is down the panel says so in words — the spec is explicit that an empty table must never stand in for "the source is gone".
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_health.py
@@ -2236,12 +2239,12 @@ def test_the_proxy_is_asked_on_loopback_at_the_configured_port():
     assert seen["url"] == "http://127.0.0.1:9100/api/status"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `py -m pytest server/tests/test_health.py -v`
 Expected: FAIL — `ImportError: cannot import name 'health' from 'webapp'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # server/webapp/health.py
@@ -2326,12 +2329,12 @@ def health(values: dict[str, str], paths: Paths,
     return Health(paths=path_checks(values, paths), proxy=payload, proxy_error=error)
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `py -m pytest server/tests/test_health.py -v`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/webapp/health.py server/tests/test_health.py
@@ -2367,7 +2370,7 @@ git commit -m "Answer whether the configured paths resolve and whether the proxy
 
 Plus `startup.check_and_run()` and `startup.main()`.
 
-- [ ] **Step 1: Write the failing auth tests**
+- [x] **Step 1: Write the failing auth tests**
 
 ```python
 # server/tests/test_app_auth.py
@@ -2490,7 +2493,7 @@ def test_with_no_password_configured_the_panel_says_so_and_refuses_every_login(t
         assert client.post("/api/login", json={"password": "anything at all"}).status_code == 401
 ```
 
-- [ ] **Step 2: Write the failing route tests**
+- [x] **Step 2: Write the failing route tests**
 
 ```python
 # server/tests/test_app_routes.py
@@ -2613,12 +2616,12 @@ def test_the_index_page_is_served(client):
     assert "text/html" in response.headers["content-type"]
 ```
 
-- [ ] **Step 3: Run both to verify they fail**
+- [x] **Step 3: Run both to verify they fail**
 
 Run: `py -m pytest server/tests/test_app_auth.py server/tests/test_app_routes.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'webapp.app'`.
 
-- [ ] **Step 4: Implement the app**
+- [x] **Step 4: Implement the app**
 
 ```python
 # server/webapp/app.py
@@ -2800,7 +2803,7 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
     return app
 ```
 
-- [ ] **Step 5: Implement the entry point**
+- [x] **Step 5: Implement the entry point**
 
 ```python
 # server/webapp/startup.py
@@ -2854,17 +2857,17 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `py -m pytest server/tests/test_app_auth.py server/tests/test_app_routes.py -v`
 Expected: PASS. `test_the_index_page_is_served` fails until Task 12 creates `static/index.html` — create the directory with a one-line placeholder `index.html` now if it blocks, and let Task 12 replace it.
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `py -m pytest server/tests`
 Expected: all pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add server/webapp/app.py server/webapp/startup.py server/webapp/__main__.py server/tests/test_app_auth.py server/tests/test_app_routes.py
@@ -2901,23 +2904,29 @@ What the screen must do, which is not negotiable by the design:
 
 Polling: 3 s for processes and health, 2 s for the visible log tail; pause polling when `document.hidden`, so a tab left open overnight on a phone is not a load.
 
-- [ ] **Step 1: Invoke the frontend-design skill and settle the visual direction**
+- [x] **Step 1: Invoke the frontend-design skill and settle the visual direction**
 
 Run the skill, then write down in one paragraph at the top of `app.css` what the direction is, so a later change has something to be consistent with.
 
-- [ ] **Step 2: Write `index.html`**
+- [x] **Step 2: Write `index.html`**
 
 One file, three regions: `#login`, `#dashboard`, `#logs`. No inline event handlers; `app.js` wires everything by id. Include `<meta name="viewport" content="width=device-width, initial-scale=1">` — without it point 8 is impossible.
 
-- [ ] **Step 3: Write `app.css`**
+- [x] **Step 3: Write `app.css`**
 
 Hand-written, no framework, no web font from a CDN (the panel must work with no internet). Define the palette as CSS custom properties on `:root`.
 
-- [ ] **Step 4: Write `app.js`**
+- [x] **Step 4: Write `app.js`**
 
 Vanilla, no modules to bundle. Structure it as: `api()` wrapper that attaches the CSRF header and routes 401s back to login; `renderHealth()`, `renderProcesses()`, `renderLog()`; one `setInterval` per concern, all suspended on `document.hidden`.
 
-- [ ] **Step 5: Check it against a real browser**
+- [ ] **Step 5: Check it against a real browser** — done for checks 1, 2 and 5 plus live log
+      tailing and filtering, against a throwaway instance on port 8799 with its own config and
+      password in the scratchpad. Checks 3, 4 and 6 (start the counter from the panel, stop it,
+      restart the app and see a running child re-found) were NOT done in a browser: starting a
+      real child from a preview instance would have reached the live AIS station, and the same
+      behaviour is covered by test_control_panel_end_to_end.py and test_supervisor.py. Worth
+      repeating by hand once your own password is set.
 
 ```bash
 cd server && py -m webapp
@@ -2931,7 +2940,7 @@ Open `http://127.0.0.1:8787`. Verify by hand, and record the result of each in t
 5. Shrink the window to 390 px wide: the cards stack, nothing overflows horizontally.
 6. Reload the page: still signed in. Restart `py -m webapp`: signed out, and the counter — if left running — is **still running** and is re-found.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/webapp/static
@@ -2952,7 +2961,7 @@ git commit -m "Add the Dashboard and Logs screens, dark and usable from a phone"
 
 Every other test tests a part. This one signs in to the real app and starts the **real proxy** through it, because the claim of this phase is that an operator can run the system from a browser without a console window. It inherits the hazard rules from `test_settings_end_to_end.py`: a free port, a cache under `tmp_path`, and every network secret cleared.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # server/tests/test_control_panel_end_to_end.py
@@ -3066,17 +3075,17 @@ def test_a_disabled_process_cannot_be_started_through_the_api(client):
     assert "disabled" in refused.json()["detail"].lower()
 ```
 
-- [ ] **Step 2: Run it to verify it fails, then passes**
+- [x] **Step 2: Run it to verify it fails, then passes**
 
 Run: `py -m pytest server/tests/test_control_panel_end_to_end.py -v`
 Expected: it fails only for real reasons at this point (everything it needs exists). If the proxy exits immediately, read the `StartFailed` detail — it carries the child's own output, which is the whole reason it was built that way.
 
-- [ ] **Step 3: Run the full suite and count**
+- [x] **Step 3: Run the full suite and count**
 
 Run: `py -m pytest server/tests`
 Expected: green, ~940+ tests. Record the real number.
 
-- [ ] **Step 4: Confirm nothing leaked**
+- [x] **Step 4: Confirm nothing leaked**
 
 ```bash
 git status --short
@@ -3086,7 +3095,7 @@ git ls-files | grep -E "config\.json|credentials\.json|server/logs" || echo "no 
 
 Expected: `no secret file is tracked`.
 
-- [ ] **Step 5: Tick this plan's boxes and commit**
+- [x] **Step 5: Tick this plan's boxes and commit**
 
 ```bash
 git add server/tests/test_control_panel_end_to_end.py docs/superpowers/plans/2026-08-18-control-panel-phase2-supervisor.md
@@ -3097,13 +3106,13 @@ git commit -m "Prove the panel runs the real proxy end to end, with no console w
 
 ## Done when
 
-- [ ] `py -m pytest server/tests` is green, with the new tests included.
-- [ ] `py -m webapp` serves a panel that starts, stops and restarts the proxy and the counter, and survives its own restart without orphaning either.
-- [ ] Binding beyond loopback with no password refuses to start, with a message naming `set_password`.
-- [ ] Every mutating route rejects an unauthenticated request, proven by a test that enumerates the app's own routes.
-- [ ] No secret appears in any API response, log line or error message.
-- [ ] The dashboard shows time since the last transmission, and says so plainly when the proxy is not answering.
-- [ ] `config.json` and `credentials.json` are readable only by this account and are not tracked.
+- [x] `py -m pytest server/tests` is green, with the new tests included.
+- [x] `py -m webapp` serves a panel that starts, stops and restarts the proxy and the counter, and survives its own restart without orphaning either.
+- [x] Binding beyond loopback with no password refuses to start, with a message naming `set_password`.
+- [x] Every mutating route rejects an unauthenticated request, proven by a test that enumerates the app's own routes.
+- [x] No secret appears in any API response, log line or error message.
+- [x] The dashboard shows time since the last transmission, and says so plainly when the proxy is not answering.
+- [x] `config.json` and `credentials.json` are readable only by this account and are not tracked.
 
 ## Carried to Phase 3
 
