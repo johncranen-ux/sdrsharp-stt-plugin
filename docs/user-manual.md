@@ -7,12 +7,15 @@ Everything needed to install, configure and run the SDR# speech-to-text plugin.
 - [Requirements](#requirements)
 - [Install](#install)
 - [Configure](#configure)
-- [Run](#run)
+- [Starting the station](#starting-the-station)
+- [Reading the Dashboard](#reading-the-dashboard)
 - [Using the plugin](#using-the-plugin)
-- [The conversations page](#the-conversations-page)
+- [Conversations and Vessels](#conversations-and-vessels)
+- [Settings](#settings)
 - [Settings reference](#settings-reference)
 - [Optional: local GPU backend](#optional-local-gpu-backend)
 - [Measuring accuracy on your own traffic](#measuring-accuracy-on-your-own-traffic)
+- [Measuring what your AIS receiver can hear](#measuring-what-your-ais-receiver-can-hear)
 - [Troubleshooting](#troubleshooting)
 - [Legal note](#legal-note)
 
@@ -188,9 +191,81 @@ set AISSTREAM_API_KEY=YOUR_AISSTREAM_KEY_HERE
 
 Everything else has working defaults.
 
+This file matters for the batch-file fallback below, and it is what `server/config.json` gets
+imported from the first time the panel is set up. If you are starting with the panel on a
+fresh install, you can skip straight to [Starting the station](#starting-the-station) and
+enter these same keys in the **Settings** screen instead — see [Settings](#settings). Once
+`config.json` exists, editing `start-all.bat` no longer changes what the panel-managed proxy
+runs with; the two are independent from that point on.
+
 ---
 
-## Run
+## Starting the station
+
+### With the control panel
+
+```bash
+cd server
+py -m webapp
+```
+
+This prints where it is listening, by default `http://127.0.0.1:8787`:
+
+```
+[control panel] http://127.0.0.1:8787
+```
+
+Open that address in a browser on the same machine.
+
+**First run, no password set.** The panel refuses to sign anyone in until a password exists —
+it starts processes and holds every API key you configure, so an unauthenticated instance is
+not a safe default. The page tells you what to run:
+
+```bash
+cd server
+py -m webapp.set_password
+```
+
+It asks for the password twice (not echoed to the screen) and rejects anything under 12
+characters. The hash goes in `server/credentials.json` — never the plaintext, never
+`config.json`. Reload the page once it reports success and sign in.
+
+**Binding beyond this machine.** `WEBAPP_BIND_HOST` defaults to `127.0.0.1`, reachable only
+from the machine running the panel. Widen it (e.g. to `0.0.0.0`, to reach the panel from a
+phone on the LAN before the planned miniPC move) and the panel will not start without a
+password already set — it fails fast, at startup, with no listening socket ever opened:
+
+```
+[control panel] WEBAPP_BIND_HOST is '0.0.0.0', which is reachable from the network, and no
+password is set. Run `py -m webapp.set_password` from the server directory, or set
+WEBAPP_BIND_HOST back to 127.0.0.1.
+```
+
+Loopback addresses (`127.0.0.1`, `localhost`, `::1`) are exempt — a password is still a good
+idea there, but nothing on the network can reach an unset one.
+
+**Starting the proxy and, if you have a local AIS receiver, the counter.** Once signed in,
+the Dashboard's **Processes** section has a card per managed process — the Whisper proxy and
+the AIS station counter. Press **Start** on each you need. The panel builds that process's
+command line and environment directly from `config.json` (nothing here shells out to
+`start-all.bat` — that was tried and does not work headless: `start` needs an interactive
+window station a detached process does not have) and clears the port first if something the
+panel itself previously started is still holding it. If a *different* process holds the port,
+the start is refused rather than that process being killed — see
+[Troubleshooting](#troubleshooting).
+
+Then start SDR#, tune to a voice channel, open the **Speech to Text** panel and tick
+**Enable transcription** — see [Using the plugin](#using-the-plugin) and
+[Reading the Dashboard](#reading-the-dashboard) for what to check next.
+
+**Stopping.** Press **Stop** on a process's card. Closing the panel itself (Ctrl+C, or the
+terminal window) does **not** stop the proxy or the counter — each runs as its own detached
+process precisely so a panel restart does not interrupt transcription — so stop them from the
+Dashboard first if you want the station fully down.
+
+### Running without the panel
+
+For a headless or scripted start, or before a password is set up:
 
 ```bash
 server\start-all.bat
@@ -210,6 +285,79 @@ Then start SDR#, tune to a voice channel, open the **Speech to Text** panel and 
 
 To stop, close the proxy window. Restarting `start-all.bat` is safe at any time — it frees
 the port first, so you never end up with two proxies fighting over it.
+
+`start-all.bat` does not start the AIS station counter — there is no batch-file equivalent of
+that card. Run it by hand alongside the proxy if you need it; see
+[Measuring what your AIS receiver can hear](#measuring-what-your-ais-receiver-can-hear).
+
+`start-all.bat` and `server/config.json` are two independent sources of the same settings.
+The batch file sets them as real environment variables in its own console session; the panel
+reads them from `config.json` and hands each managed child an environment it built itself.
+Editing one never updates the other — if you use both across different sessions, keep them in
+sync by hand, or settle on one.
+
+---
+
+## Reading the Dashboard
+
+The Dashboard is the panel's home tab. Everything on it is read live, polled every few
+seconds — nothing here needs a manual refresh.
+
+### The watch
+
+The large reading at the top is time since the last audio chunk reached the proxy. It exists
+to answer one question at a glance: is SDR# actually feeding this thing.
+
+| Reading | Meaning |
+|---|---|
+| **never** | No chunk has arrived since the proxy started. Note reads *"is the play button pressed?"* — a plugin that is enabled but whose SDR# play button is unpressed produces exactly this. |
+| **`<n> ago`**, green dot | Under 15 minutes old — audio is arriving. |
+| **`<n> ago`**, amber/stale dot | 15 minutes or more old. Note reads *"a silent channel and an unpressed play button look alike"* — past that point the watch genuinely cannot tell a quiet band from SDR# having stopped sending, and says so rather than guessing. |
+| **no reading**, red dot | The proxy itself is not answering — a different failure from silence: the source is gone, not quiet. |
+
+Below the watch, five gauges repeat the proxy's own numbers: STT backend, AIS source, vessels
+cached, conversations stored, and how many of the configured paths resolve on this machine.
+
+### Feed lamps
+
+The **Feeds** panel answers a question the process cards below it cannot: not just *is the
+process running*, but *is data actually arriving*. The two are different facts — aisstream
+demonstrated the gap for five days in 2026-08: the proxy was up, every card was green, and no
+vessel data had arrived since the 5th. Each lamp reads its own source's record of the second
+fact, independent of whether the panel thinks the owning process is alive.
+
+There are two lamps today: **AIS station** (the local receiver, via the counter) and
+**AISHub** (the polled vessel feed, via the proxy).
+
+| Lamp | Meaning |
+|---|---|
+| Green | Delivering normally. |
+| Amber | The owning process is up, but something is off short of a clear failure — a poll is overdue, or AIS-catcher itself is not connected to the counter. Not yet worth restarting anything. |
+| Red | Actively failing — the counter's heartbeat has stopped, or AISHub has returned consecutive failed polls. |
+| Unlit | **The lamp's own process is not running.** A feed nobody asked for is not the same as a feed that failed — an operator who stopped the counter on purpose sees an unlit lamp, not a false alarm. |
+
+**Lamp test.** The button above the lamps cycles every one through green, amber and red (600
+ms per colour) and then back to its real state. It exists for the same reason a real bridge
+panel carries one: an unlit lamp is only reassuring if you can prove the bulb still works —
+otherwise "nothing is wrong" and "this stopped reporting weeks ago" look identical.
+
+### Process cards
+
+One card per managed process — currently the Whisper proxy and the AIS station counter. Each
+shows its state (running / stopped / disabled), uptime, pid, the port it should be on, and
+whether it is actually holding that port — a running process that lost its port to something
+else shows **Holding port: no**, which is worth investigating even though the process itself
+looks fine. **Start**, **Stop** and **Restart** act on that process only; a disabled process
+(switched off in Settings) cannot be started until re-enabled there.
+
+### The Logs popup
+
+Each card's **Log** button opens a popup over the page with that process's log tail: today's
+output, a **Follow** checkbox that sticks to the bottom as new lines arrive (turns itself off
+the moment you scroll up, so reading old lines never gets yanked away), and a substring filter.
+A full-page equivalent lives under the **Logs** tab and keeps its own independent read
+position, so opening a card's popup never disturbs whatever the Logs tab is showing, and vice
+versa.
 
 ---
 
@@ -240,32 +388,61 @@ should push `rms` clearly above `floor`.
 
 ---
 
-## The conversations page
+## Conversations and Vessels
 
-With an Anthropic key set, open **http://localhost:9000/conversations**.
+The panel's **Conversations** and **Vessels** tabs read the same store the proxy has always
+written — they fetch `/api/conversations` and `/api/ais-cache` from the proxy, cache the
+result (conversations for 15 s, the vessel cache, up to 1.8 MB, for 60 s), and page it before
+it reaches the browser. If the proxy is slow or down, the screen keeps showing its last good
+copy with a banner naming how old it is and why — never an empty table, and never a hang.
 
-Each entry is one radio exchange with a single identified vessel, decided *after* the
-exchange ended so late evidence counts. It shows the identity, how confident the resolver
-was, the evidence it used, and every transmission. Where the live transcript had guessed a
-different vessel, that guess is shown alongside in red — so corrections are visible rather
-than silently applied.
+### Conversations
 
-### Spotting a corrected transmission
+Each row is one radio exchange, filterable by identified/unidentified, channel, or free text
+across vessel, callsign and transcript. Opening a row shows every turn as a three-layer chain:
 
-Transmission text is not always verbatim. After identity is resolved, a second pass re-reads
-each turn against the rest of its exchange and repairs what the channel garbled — a mangled
-opening call from the shore station's clearer answer, a garbled readback from the instruction
-it was answering. Two things on the page tell you when that has happened:
+- **`raw`** — what the decoder actually output.
+- **`text`** — after the regex domain corrections (`draft` → `draught` and the rest). This is
+  the live transcript, what you would have seen at the time.
+- **`conv`** — after the retrospective correction pass re-reads the turn against the rest of
+  its exchange. Shown as **`conv: unchanged`** when there is nothing to display here — and
+  that phrase covers two different situations the store cannot tell apart: the pass ran and
+  genuinely found nothing to change, *or* the pass failed outright (a timeout, a bad
+  response). An absent `conv` is not proof the correction ran successfully.
+
+A turn can also carry a live vessel guess independent of whatever the conversation was
+eventually resolved to: **`ais-confirmed`** means that guess matched a real MMSI in the AIS
+cache; **`heard-only`** means a name was heard but no such ship exists in the cache — a weaker
+signal, worth noticing but not to be trusted the way `ais-confirmed` is.
+
+Below the turns, **Resolver candidates** lists every vessel the identification pass was
+actually offered for this conversation — by name hint, a live match carried over, callsign, or
+partial callsign, each tagged with the route that surfaced it. This is the pass's working set,
+not a verdict; it exists so you can see what evidence *was* available even on a conversation
+that ended up unidentified.
+
+On a conversation nobody was identified in, a block headed **"Scored below the identification
+cutoff"** may list a few names that came close but didn't clear the threshold. That heading is
+deliberate: this is **not** an identification, and the system never acts on it — it is here
+because you can sometimes settle by ear what an edit-distance score cannot. Measured on
+hand-labelled traffic, the right ship is in that list about a quarter of the time (9 of 35);
+the rest are near-misses worth a glance and nothing more. Turn it off with `AIS_SUGGEST=off`
+if it's more noise than help.
+
+The panel's chain view tells you *that* a turn's `conv` differs from its `text`, but not *why*
+— no substitution reasons here. For that, the proxy still serves its own page directly and
+independently of the panel, needing no login:
+
+**With an Anthropic key set, open http://localhost:9000/conversations.**
+
+Two things on that page show a correction the panel's chain view does not spell out:
 
 - **A green `N corrected` pill** in the conversation header, next to the confidence badge.
-  Its absence means nothing in that exchange was changed, and what you are reading is exactly
-  what was transcribed live.
-- **A dotted green underline** under the text of each turn that was changed. Turns without it
-  are untouched.
-
-**Hover the underlined text** to see what was actually heard, as `was: <original>`, followed by
-every substitution and the reason for it — for example
-`Sarbertside -> Starboard side (garbled readback of the instruction in turn 7)`.
+  Its absence means nothing in that exchange was changed.
+- **A dotted green underline** under the text of each turn that was changed. **Hover** it to
+  see what was actually heard, as `was: <original>`, followed by every substitution and its
+  reason — for example `Sarbertside -> Starboard side (garbled readback of the instruction in
+  turn 7)`.
 
 Nothing is ever overwritten: the original wording and the reason for each change are stored
 alongside the correction, and `/api/conversations` returns all of it (`text` is the live
@@ -280,7 +457,7 @@ name alone, with no MMSI, is shown as plain text — there is nothing reliable t
 `/identified-vessels` is an append-only file, so rows written before this was added stay
 unlinked; new transmissions get links as they arrive.
 
-Also available:
+Also available directly from the proxy:
 
 | URL | What |
 |---|---|
@@ -289,11 +466,55 @@ Also available:
 | `/api/conversations` | The same data as JSON |
 | `/api/ais-cache` | Current AIS vessel cache |
 
+### Vessels
+
+Search the whole AIS cache by name, MMSI, callsign or destination as free text. Each row's
+**last seen** is that vessel's own most recent position report from the feed, rewritten every
+time it is heard again — **never** means the field is genuinely absent, which cannot be
+backfilled and happens for any entry written before `last_seen` existed (2026-08-06). A
+missing `last_seen` is treated as unknown age everywhere else in the system too, never as
+recent.
+
+A row whose name is carried by more than one MMSI is marked **shared name**. That is a
+warning, not a defect: a shared name is exactly what makes a bare name unsafe to treat as an
+identification — it is why a conversation is never labelled by name alone (see
+[Conversations](#conversations) above). Click a vessel to see every
+conversation matched to that MMSI — matched by MMSI only, never by name, for the same reason.
+
+---
+
+## Settings
+
+`server/config.json` is what the panel, the proxy and the counter actually read their
+settings from once you're running through the panel — not `start-all.bat`. It was imported
+once, from the values `start-all.bat` held at the time; after that the two files are
+independent (see [Running without the panel](#running-without-the-panel)), and only
+`config.json` is what the Settings screen edits.
+
+The form is grouped the same way the reference below is grouped, and every field carries its
+description inline. Two things about it are load-bearing rather than incidental:
+
+- **Secrets can be set but never read back.** The six API keys are only ever reported as
+  *set* or *not set* — never their value, not in the form, not in any response body. An empty
+  box on save therefore means "leave this alone," not "clear it": the browser has no way to
+  show a value it was never given, so an empty field cannot be trusted to mean the operator
+  wants it gone. Clearing a secret needs the explicit **Clear** control next to the field,
+  which stages a sentinel the server reads as "remove this key."
+- **Some changes only take effect on that process's next start.** A setting is read once, at
+  process startup — `AIS_STATION_*` only by the counter, `WEBAPP_*` only by the panel itself,
+  everything else the proxy pulls into its own environment when it starts. Saving tells you
+  exactly which processes need restarting; restart them from the Dashboard.
+
+Key names have not changed from before the panel existed — the reference below is still
+authoritative.
+
 ---
 
 ## Settings reference
 
-All are environment variables, normally set in `start-all.bat`.
+All are environment variables. Set them from the panel's Settings screen (stored in
+`server/config.json`), or, without the panel, in `start-all.bat` — see
+[Settings](#settings) and [Running without the panel](#running-without-the-panel).
 
 ### Backend
 
@@ -350,9 +571,10 @@ is no `.env` loader in this project; every setting is read straight from the env
 Without `AISHUB_USERNAME` the proxy still starts and transcribes; it prints `AIS feed: disabled`
 and runs without vessel enrichment.
 
-Other settings: `AISHUB_BBOX` (`latmin,latmax,lonmin,lonmax`, default `51.0,53.2,2.0,6.0`) and
-`AISHUB_POLL_SEC` (default 900; values under 60 are raised to 60, because AISHub answers a
-faster caller with no data at all).
+Other settings: `AISHUB_BBOX` (`latmin,latmax,lonmin,lonmax`, default `51.4,52.6,2.0,4.25` —
+the sea box set 2026-08-13, replacing a wider inland-inclusive box; see the Settings screen's
+description for the measured effect) and `AISHUB_POLL_SEC` (default 900; values under 60 are
+raised to 60, because AISHub answers a faster caller with no data at all).
 
 When a heard name fits more than one ship, `/conversations` lists the candidates with
 VesselFinder links instead of choosing. Pick the one that fits what was said — a vessel already
@@ -575,6 +797,30 @@ conclusion:
 
 ## Troubleshooting
 
+**Panel refuses to start: `WEBAPP_BIND_HOST is '...', which is reachable from the network, and no password is set`**
+Deliberate — see [Starting the station](#starting-the-station). Either run
+`py -m webapp.set_password` from `server`, or set `WEBAPP_BIND_HOST` back to `127.0.0.1`.
+No socket is ever opened when this fires, so nothing needs to be undone.
+
+**A process card's Start fails with `port N is held by pid P (image), which is not one of ours`**
+Something the panel did not start is already listening on that port. The panel clears a port
+before starting only when the current holder is a process it recognises as its own kind — a
+port held by anything else is reported, never killed, so you can decide what to do with it
+yourself. Free the port (or change the port setting) and Start again.
+
+**The panel looks stale or a button does nothing after an upgrade**
+Hard-reload the tab (Ctrl+F5 or Ctrl+Shift+R). `/static` is served with `Cache-Control:
+no-cache`, so a fresh page load always revalidates its script — but a tab left open across an
+upgrade is still running the `app.js` it loaded when it was opened, and only a reload replaces
+it. This is exactly what a dead button after a deploy usually means; it happened once already,
+on 2026-08-19.
+
+**A feed lamp is red, but I stopped that feed's process on purpose**
+It shouldn't be — a lamp is **unlit**, not red, whenever its owning process is not running (see
+[Reading the Dashboard](#reading-the-dashboard)). If you see red next to a process the
+Processes panel shows as stopped, that combination is itself the bug worth reporting; the
+lamp's colour should only ever speak to a process that is actually up.
+
 **"Request timed out (60 s)" on every chunk**
 The proxy is not responding. Check its console window is running and reachable:
 `curl http://localhost:9000/`.
@@ -591,8 +837,9 @@ No audio is reaching the plugin. Check SDR# is playing audio and that the plugin
 Raise **VAD threshold** until `rms` for static sits below `floor`.
 
 **Vessel names are wrong**
-Check the `/conversations` page — the retrospective pass often corrects what the live
-transcript guessed. If names are still poor, the `Initial prompt` is the biggest lever.
+Check the Conversations tab, or the proxy's own `/conversations` page — the retrospective
+pass often corrects what the live transcript guessed. If names are still poor, the
+`Initial prompt` is the biggest lever.
 
 **Plugin does not appear in SDR#**
 SDR# skips plugins it cannot load, silently in the UI — but it does record why. Check
