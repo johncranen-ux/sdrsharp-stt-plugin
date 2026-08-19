@@ -166,5 +166,7 @@ def test_no_response_ever_carries_a_secret(client, tmp_path):
     from webapp import config_store
     config_store.save(tmp_path / "config.json", {"GROQ_API_KEY": "gsk_unmistakable_value"})
     _login(client)
-    for url in ("/api/processes", "/api/health", "/api/logs/proxy", "/api/session"):
+    for url in ("/api/processes", "/api/health", "/api/logs/proxy", "/api/session",
+               "/api/settings", "/api/conversations", "/api/conversations/some-id",
+               "/api/vessels", "/api/vessels/123456789"):
         assert "gsk_unmistakable_value" not in client.get(url).text, url

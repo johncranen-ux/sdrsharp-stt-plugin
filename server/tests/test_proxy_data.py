@@ -88,13 +88,31 @@ def test_a_failure_with_nothing_cached_yet_is_an_empty_result_that_says_why():
     records, snap = data.conversations()
     assert records == []
     assert snap.stale is True and snap.error is not None and snap.count == 0
+    # Distinct from the "last copy, stale" case below: there has never been a successful
+    # fetch, so age_sec being 0.0 must not be read as "the copy is 0s old" -- has_data says
+    # plainly that there is no copy at all.
+    assert snap.has_data is False
+
+
+def test_a_failed_fetch_that_did_succeed_before_still_reports_it_has_data():
+    clock = _Clock()
+    answers = {"conversations": [{"vessel": "PASHA"}]}
+    data, _ = _data(answers, clock)
+    data.conversations()
+
+    answers["conversations"] = ConnectionRefusedError("nobody home")
+    clock.now += proxy_data.CONVERSATIONS_TTL_SEC + 1
+    _, snap = data.conversations()
+    assert snap.has_data is True
 
 
 def test_a_payload_that_is_not_a_list_is_refused_rather_than_rendered():
     data, _ = _data({"conversations": {"unexpected": "shape"}})
     records, snap = data.conversations()
     assert records == []
-    assert "shape" in snap.error
+    # "shape" alone is inside the fixed prefix ("unexpected response shape: ") and would pass
+    # for any payload -- assert on the payload-specific part, the type name, instead.
+    assert "dict" in snap.error
 
 
 def test_conversations_and_vessels_have_independent_caches():

@@ -44,6 +44,16 @@ def test_submitting_an_empty_secret_leaves_the_stored_one_alone():
     assert key not in applied.changed
 
 
+def test_a_whitespace_only_secret_also_leaves_the_stored_one_alone():
+    """validate_value strips before storing, so a box containing only spaces validates to "" --
+    which must be read the same as an empty box (leave it alone), not as a clear. Without this,
+    a stray space silently wipes a live API key instead of requiring the CLEAR sentinel."""
+    key = _SECRETS[0]
+    applied = settings_api.apply(_values(**{key: "kept"}), {key: "   "})
+    assert applied.values[key] == "kept"
+    assert key not in applied.changed
+
+
 def test_a_secret_can_be_cleared_explicitly():
     key = _SECRETS[0]
     applied = settings_api.apply(_values(**{key: "kept"}), {key: settings_api.CLEAR})

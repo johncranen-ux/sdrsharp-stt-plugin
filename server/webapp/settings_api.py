@@ -117,9 +117,12 @@ def apply(values: dict[str, str], submitted: dict[str, str]) -> Applied:
     for key, raw in submitted.items():
         spec = BY_KEY[key]
 
-        if spec.type is SettingType.SECRET and raw == "":
-            # The form cannot show the current value, so an empty box cannot mean "clear it" --
-            # only the CLEAR sentinel can. Leave the stored value untouched and unreported.
+        if spec.type is SettingType.SECRET and raw.strip() == "":
+            # The form cannot show the current value, so an empty (or whitespace-only) box
+            # cannot mean "clear it" -- only the CLEAR sentinel can. Leave the stored value
+            # untouched and unreported. Checking the stripped value, not the raw one, matters:
+            # validate_value strips before storing, so a whitespace-only secret would otherwise
+            # sail past this guard and validate to "", silently clearing a live API key.
             continue
 
         candidate = "" if raw == CLEAR else raw
