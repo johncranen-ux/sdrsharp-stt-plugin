@@ -322,10 +322,10 @@ cached, conversations stored, and how many of the configured paths resolve on th
 
 The **Feeds** panel answers a question the process cards below it cannot: not just *is the
 process running*, but *is data actually arriving*. The two are different facts — aisstream
-demonstrated the gap for roughly eight days in 2026-08 (2026-08-05 to 08-13, not the five
-often quoted): the proxy was up, every card was green, and no vessel data had arrived since
-the 5th. Each lamp reads its own source's record of the second fact, independent of whether
-the panel thinks the owning process is alive.
+demonstrated the gap for roughly eight days in 2026-08 (2026-08-05 to 08-13): the proxy was
+up, every card was green, and no vessel data had arrived since the 5th. Each lamp reads its
+own source's record of the second fact, independent of whether the panel thinks the owning
+process is alive.
 
 There are two lamps today: **AIS station** (the local receiver, via the counter) and
 **AISHub** (the polled vessel feed, via the proxy).
