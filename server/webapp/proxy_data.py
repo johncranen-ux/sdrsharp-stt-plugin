@@ -35,6 +35,11 @@ class Snapshot(BaseModel):
     stale: bool
     error: str | None = None
     count: int = 0
+    # False only when no fetch has ever succeeded -- i.e. there is no "last copy" to speak of.
+    # stale alone cannot carry this: it is also true once a copy exists and a later refresh
+    # fails, and that is a genuinely different state ("showing the last copy, Ns old") from
+    # this one ("nothing has been fetched yet").
+    has_data: bool = True
 
 
 def _fetch_json(url: str, timeout: float):
@@ -86,7 +91,8 @@ class ProxyData:
                 age_sec=max(0.0, now - cell.fetched_at) if cell.records is not None else 0.0,
                 stale=cell.error is not None,
                 error=cell.error,
-                count=len(records))
+                count=len(records),
+                has_data=cell.records is not None)
 
     def _refresh(self, cell: _Cell, path: str) -> None:
         try:

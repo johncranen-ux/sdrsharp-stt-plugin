@@ -240,6 +240,34 @@ def test_a_known_vessel_carries_its_conversations(client):
     body = client.get("/api/vessels/244123456").json()
     assert body["mmsi"] == "244123456"
     assert [c["mmsi"] for c in body["conversations"]] == ["244123456"]
+    assert body["conversations_snapshot"]["stale"] is False
+
+
+def test_a_known_vessel_reports_when_its_conversations_could_not_be_fetched(tmp_path):
+    """The vessel exists in the AIS cache, but the conversations fetch fails outright -- an
+    empty list here must not read as "this vessel has no conversations"; the snapshot lets the
+    UI tell the two apart."""
+    from webapp.proxy_data import ProxyData
+
+    def fetch(url, timeout):
+        if "conversations" in url:
+            raise ConnectionRefusedError("nobody home")
+        return _VESSELS
+
+    credentials.save_password(tmp_path / "credentials.json", PASSWORD)
+    (tmp_path / "logs").mkdir()
+    fake = _FakeSupervisor(tmp_path / "logs")
+    proxy_data = ProxyData(lambda: {"PROXY_PORT": "9000"}, fetch=fetch)
+    app = create_app(server_dir=_SERVER_DIR, config_path=tmp_path / "config.json",
+                     credentials_path=tmp_path / "credentials.json", supervisor=fake,
+                     proxy_data=proxy_data)
+    with TestClient(app) as test_client:
+        test_client.headers[CSRF_HEADER] = test_client.post(
+            "/api/login", json={"password": PASSWORD}).json()["csrf_token"]
+        body = test_client.get("/api/vessels/244123456").json()
+    assert body["conversations"] == []
+    assert body["conversations_snapshot"]["error"] is not None
+    assert body["conversations_snapshot"]["has_data"] is False
 
 
 @pytest.mark.parametrize("path", ["/api/conversations", "/api/conversations/x",

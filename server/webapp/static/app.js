@@ -579,7 +579,11 @@ function updateConvRow(view, row) {
 
 function showConvSnapshot(snapshot) {
   const banner = $("conv-stale");
-  if (snapshot && snapshot.stale) {
+  if (snapshot && snapshot.stale && snapshot.has_data === false) {
+    // No fetch has ever succeeded -- there is no "last copy" to report an age for.
+    banner.textContent = `nothing has been fetched yet — ${snapshot.error || "unknown error"}`;
+    banner.hidden = false;
+  } else if (snapshot && snapshot.stale) {
     banner.textContent =
       `showing the last copy, ${elapsed(snapshot.age_sec)} old — ${snapshot.error || "unknown error"}`;
     banner.hidden = false;
@@ -602,7 +606,7 @@ function renderConvRows(rows) {
   const tbody = $("conv-rows");
   const seen = new Set();
   convState.rows.clear();
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     convState.rows.set(row.id, row);
     let view = convRows.get(row.id);
     if (!view) {
@@ -617,9 +621,16 @@ function renderConvRows(rows) {
       convRows.set(row.id, view);
     }
     updateConvRow(view, row);
-    tbody.append(view.root);   // also reorders an existing row into the current page's order
+    // Reorders an existing row into the current page's order, but only when it is not
+    // already there -- appending (or inserting) a node already at that DOM position still
+    // counts as a move and drops the reader's text selection, which is exactly the poll-time
+    // disruption this guard exists to avoid. tbody.children[index] is read fresh each
+    // iteration, so an earlier insertBefore in this same pass is reflected immediately.
+    if (tbody.children[index] !== view.root) {
+      tbody.insertBefore(view.root, tbody.children[index] || null);
+    }
     seen.add(row.id);
-  }
+  });
   for (const [id, view] of convRows) {
     if (!seen.has(id)) {
       view.root.remove();
@@ -932,7 +943,11 @@ function updateVesselRow(view, row) {
 
 function showVesselSnapshot(snapshot) {
   const banner = $("vessel-stale");
-  if (snapshot && snapshot.stale) {
+  if (snapshot && snapshot.stale && snapshot.has_data === false) {
+    // No fetch has ever succeeded -- there is no "last copy" to report an age for.
+    banner.textContent = `nothing has been fetched yet — ${snapshot.error || "unknown error"}`;
+    banner.hidden = false;
+  } else if (snapshot && snapshot.stale) {
     banner.textContent =
       `showing the last copy, ${elapsed(snapshot.age_sec)} old — ${snapshot.error || "unknown error"}`;
     banner.hidden = false;
@@ -953,7 +968,7 @@ function renderVesselRows(rows) {
   const tbody = $("vessel-rows");
   const seen = new Set();
   vesselState.rows.clear();
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     vesselState.rows.set(row.mmsi, row);
     let view = vesselRows.get(row.mmsi);
     if (!view) {
@@ -968,9 +983,13 @@ function renderVesselRows(rows) {
       vesselRows.set(row.mmsi, view);
     }
     updateVesselRow(view, row);
-    tbody.append(view.root);   // also reorders an existing row into the current page's order
+    // See renderConvRows: only move a row when it is not already at this DOM position, so a
+    // 20s poll does not drop a reader's in-progress text selection by re-appending everything.
+    if (tbody.children[index] !== view.root) {
+      tbody.insertBefore(view.root, tbody.children[index] || null);
+    }
     seen.add(row.mmsi);
-  }
+  });
   for (const [mmsi, view] of vesselRows) {
     if (!seen.has(mmsi)) {
       view.root.remove();
@@ -1051,8 +1070,12 @@ function renderVesselFields(detail) {
   const keys = VESSEL_FIELD_ORDER.filter((key) => key in detail);
   for (const key of Object.keys(detail)) {
     // "the full cached entry" -- a field this screen did not anticipate is still shown, not
-    // silently dropped, only "conversations" (rendered separately below) is excluded.
-    if (key !== "conversations" && !VESSEL_FIELD_ORDER.includes(key)) keys.push(key);
+    // silently dropped, only "conversations" and its snapshot (rendered separately below,
+    // resp. consulted by it) are excluded.
+    if (key !== "conversations" && key !== "conversations_snapshot" &&
+        !VESSEL_FIELD_ORDER.includes(key)) {
+      keys.push(key);
+    }
   }
   for (const key of keys) {
     const row = element("div", "vessel-field");
@@ -1063,9 +1086,16 @@ function renderVesselFields(detail) {
   return dl;
 }
 
-function renderVesselConversations(list) {
-  // Requirement 5: a vessel with no conversations must say so, not show an empty area.
+function renderVesselConversations(list, snapshot) {
+  // "we could not ask" must never print as "there is nothing" -- see showConvSnapshot's
+  // has_data distinction. Nothing else polls conversations from this tab, so this fetch is
+  // live on every click and can fail with no earlier copy to fall back on.
   if (!list || !list.length) {
+    if (snapshot && snapshot.error && snapshot.has_data === false) {
+      return element("p", "conv-note note-port",
+        `conversations could not be fetched — ${snapshot.error}`);
+    }
+    // Requirement 5: a vessel with no conversations must say so, not show an empty area.
     return element("p", "conv-note", "No conversations recorded for this vessel.");
   }
   const ul = element("ul", "vessel-conv-list");
@@ -1091,7 +1121,7 @@ function renderVesselDetail(detail) {
   body.append(renderVesselFields(detail));
 
   body.append(element("h3", null, "Conversations"));
-  body.append(renderVesselConversations(detail.conversations));
+  body.append(renderVesselConversations(detail.conversations, detail.conversations_snapshot));
 }
 
 function showVesselDetail(open) {

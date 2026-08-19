@@ -200,8 +200,13 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         entry = vessels_view.detail(entries, mmsi)
         if entry is None:
             raise HTTPException(status_code=404, detail="no such vessel in the cache")
-        records, _snap = data.conversations()
+        records, conv_snap = data.conversations()
         entry["conversations"] = vessels_view.conversations_for(records, mmsi)
+        # Nothing else polls conversations from this tab, so the 15s TTL is always expired
+        # here -- every detail click is a live fetch, and it can fail. Without the snapshot
+        # the UI cannot tell "this vessel has no conversations" from "the list could not be
+        # fetched", and an empty list reads as the former either way.
+        entry["conversations_snapshot"] = conv_snap.model_dump()
         return entry
 
     @guarded.get("/api/settings")
