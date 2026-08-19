@@ -211,13 +211,109 @@ body {
   font-size: 17px;
 }
 
+/* -- the annunciator ----------------------------------------------------- */
+/*
+ * A bridge annunciator is a panel of engraved lamp tiles, one per subsystem, dark until
+ * something has to be said. That is exactly the shape of the question these answer: is this
+ * feed still delivering? The lamps are fixed-width tiles laid left to right rather than
+ * stretched across the viewport, because a real panel's tiles do not resize.
+ *
+ * The lamp test exists for the reason it exists on a real bridge: a dark panel is only
+ * reassuring if you can prove the bulbs still work.
+ */
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  margin-bottom: var(--step);
+}
+.section-head .legend { margin: 0; }
+
+.button-test {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 2px 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fog);
+}
+.button-test:hover:not(:disabled) { color: var(--chart); border-bottom-color: var(--dial); }
+/* Fixed width so the label changing to "Testing... red" does not shove the layout, and full
+ * opacity while disabled because during a test the label IS the feedback. */
+.button-test { min-width: 15ch; text-align: left; }
+.button-test:disabled { opacity: 1; color: var(--dial); cursor: default; }
+
+.feeds { margin-bottom: calc(var(--step) * 4); }
+.processes { margin-bottom: calc(var(--step) * 4); }
+
+.feed-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(248px, 296px));
+  gap: var(--step);
+}
+
+.feed {
+  display: flex;
+  align-items: start;
+  gap: 13px;
+  padding: calc(var(--step) * 2);
+  background: var(--sea-850);
+  border: 1px solid var(--sea-700);
+  border-radius: var(--radius);
+}
+
+/* The lamp: a bulb behind a bezel, genuinely unlit when there is nothing to report. */
+.lamp {
+  width: 15px;
+  height: 15px;
+  margin-top: 3px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--sea-900);
+  border: 1px solid var(--sea-600);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+.feed[data-lamp="green"] .lamp {
+  background: var(--starboard); border-color: var(--starboard);
+  box-shadow: 0 0 9px rgba(53, 179, 126, 0.5), inset 0 0 3px rgba(255, 255, 255, 0.35);
+}
+.feed[data-lamp="amber"] .lamp {
+  background: var(--dial); border-color: var(--dial);
+  box-shadow: 0 0 9px rgba(233, 161, 59, 0.5), inset 0 0 3px rgba(255, 255, 255, 0.35);
+}
+.feed[data-lamp="red"] .lamp {
+  background: var(--port); border-color: var(--port);
+  box-shadow: 0 0 9px rgba(224, 87, 74, 0.55), inset 0 0 3px rgba(255, 255, 255, 0.3);
+}
+
+.feed-body { min-width: 0; }
+.feed-name { margin-bottom: 3px; }
+.feed-reading {
+  display: block;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+.feed-note {
+  display: block;
+  font-size: 12.5px;
+  color: var(--fog);
+  overflow-wrap: anywhere;
+}
+.feed[data-lamp="amber"] .feed-note { color: var(--dial); }
+.feed[data-lamp="red"] .feed-note { color: var(--port); }
+
 /* -- views -------------------------------------------------------------- */
 
 .view { padding: calc(var(--step) * 3); }
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: calc(var(--step) * 2);
 }
 
@@ -243,12 +339,12 @@ body {
 
 .readouts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
-  gap: var(--step);
-  margin: 0 0 calc(var(--step) * 2);
-  padding: var(--step) 0;
-  border-top: 1px solid var(--sea-700);
-  border-bottom: 1px solid var(--sea-700);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(84px, max-content);
+  justify-content: start;
+  gap: calc(var(--step) * 4);
+  margin: 0;
+  flex: 1 1 auto;
 }
 .readout dd {
   margin: 0;
@@ -258,13 +354,20 @@ body {
 }
 .readout-warn dd { color: var(--port); }
 
-.card-actions { display: flex; gap: var(--step); flex-wrap: wrap; }
-
-.card-log {
-  margin: calc(var(--step) * 2) 0 0;
-  max-height: 190px;
-  overflow: auto;
+/* Readouts and controls share one row, because a full-width card with them stacked is
+ * mostly empty space and reads as an unfinished panel rather than a wide one. */
+.card-foot {
+  display: flex;
+  align-items: end;
+  gap: calc(var(--step) * 3);
+  flex-wrap: wrap;
+  padding-top: calc(var(--step) * 1.5);
+  border-top: 1px solid var(--sea-700);
 }
+
+.card-actions { display: flex; gap: var(--step); flex-wrap: wrap; margin-left: auto; }
+/* Set apart because it is a different kind of control: it changes nothing, it only shows. */
+.card-actions .button-log { margin-left: calc(var(--step) * 2); }
 
 .paths { margin-top: calc(var(--step) * 4); }
 .path-list { list-style: none; margin: var(--step) 0 0; padding: 0; }
@@ -295,7 +398,7 @@ body {
 }
 .check { display: flex; align-items: center; gap: 6px; font-size: 14px; }
 
-.log, .card-log {
+.log {
   background: var(--sea-850);
   border: 1px solid var(--sea-700);
   border-radius: var(--radius);
@@ -315,6 +418,60 @@ body {
 .log-empty { color: var(--fog); }
 .log-rotated { color: var(--dial); }
 
+/* -- the log popup ------------------------------------------------------- */
+
+.dialog {
+  width: min(1100px, 94vw);
+  max-width: none;
+  height: min(76vh, 900px);
+  padding: 0;
+  background: var(--sea-800);
+  color: var(--chart);
+  border: 1px solid var(--sea-600);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+/* The dialog is display:none until opened, so the [hidden] override above must not claim it,
+ * and its own display must only apply when it is open. */
+.dialog[open] { display: flex; flex-direction: column; }
+.dialog::backdrop { background: rgba(4, 10, 15, 0.88); }
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  flex-wrap: wrap;
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  border-bottom: 1px solid var(--sea-700);
+  background: var(--sea-850);
+}
+.dialog-title { font-size: 16px; font-weight: 600; margin: 0; }
+.dialog-meta {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--fog);
+}
+.dialog-head .check { margin-left: auto; }
+.dialog-head input[type="search"] {
+  padding: 6px 10px;
+  background: var(--sea-900);
+  border: 1px solid var(--sea-600);
+  border-radius: var(--radius);
+  color: var(--chart);
+  font: inherit;
+  font-size: 13px;
+  min-width: 150px;
+}
+
+.dialog-log {
+  flex: 1 1 auto;
+  padding-top: calc(var(--step) * 1.5);
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+
 /* -- small screens: "is it still running?" gets asked from a phone ------- */
 
 @media (max-width: 640px) {
@@ -325,7 +482,24 @@ body {
   .watch-value { font-size: 32px; }
   .view { padding: calc(var(--step) * 2); }
   .cards { grid-template-columns: 1fr; }
+  .feed-tiles { grid-template-columns: 1fr; }
+  .card-foot { gap: calc(var(--step) * 2); }
+  /* Back to a wrapping row on a phone: laid out as columns the four readouts cannot fit and
+   * the card stops being able to shrink at all. */
+  .readouts {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: calc(var(--step) * 2);
+  }
+  .card-actions { margin-left: 0; width: 100%; }
   .card-actions .button { flex: 1; padding: 12px 14px; }
+  .card-actions .button-log { margin-left: 0; }
+  /* 100% rather than 100vw: vw includes the scrollbar, so a full-width dialog was wider
+   * than the content area and gave the whole page a horizontal scrollbar. dvh follows the
+   * phone's collapsing address bar, which vh does not. */
+  .dialog { width: 100%; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
+  .dialog-head { gap: var(--step); }
+  .dialog-head .check { margin-left: 0; }
   .path-key { min-width: 0; }
   .path-item { flex-wrap: wrap; }
   .log { height: 50vh; }

@@ -63,9 +63,23 @@ py -m webapp.set_password</pre>
   </section>
 
   <main id="dashboard" class="view">
-    <div id="cards" class="cards"></div>
+    <!-- The annunciator: a process being up and its data still arriving are two different
+         facts, and the cards below only answer the first. -->
+    <section class="feeds" aria-label="Feeds">
+      <div class="section-head">
+        <h2 class="legend">Feeds</h2>
+        <button id="lamp-test" class="button button-quiet button-test" type="button">
+          Lamp test</button>
+      </div>
+      <div id="feed-tiles" class="feed-tiles"></div>
+    </section>
+
+    <section class="processes" aria-label="Processes">
+      <div class="section-head"><h2 class="legend">Processes</h2></div>
+      <div id="cards" class="cards"></div>
+    </section>
     <section class="paths">
-      <h2 class="legend">Paths on this machine</h2>
+      <div class="section-head"><h2 class="legend">Paths on this machine</h2></div>
       <ul id="paths" class="path-list"></ul>
     </section>
   </main>
@@ -88,6 +102,23 @@ py -m webapp.set_password</pre>
     <pre id="log-view" class="log" tabindex="0"></pre>
   </main>
 </div>
+
+<!-- A process's output, over the dashboard. <dialog> rather than a hand-built overlay: it
+     brings the backdrop, the focus trap and Escape-to-close with it. -->
+<dialog id="log-dialog" class="dialog" aria-labelledby="dialog-title">
+  <header class="dialog-head">
+    <span id="dialog-lamp" class="dot dot-idle" aria-hidden="true"></span>
+    <h2 id="dialog-title" class="dialog-title">Log</h2>
+    <span id="dialog-meta" class="dialog-meta"></span>
+    <label class="check">
+      <input id="dialog-follow" type="checkbox" checked>
+      <span>Follow</span>
+    </label>
+    <input id="dialog-filter" type="search" placeholder="substring" aria-label="Filter">
+    <button id="dialog-close" class="button button-quiet" type="button">Close</button>
+  </header>
+  <pre id="dialog-log" class="log dialog-log" tabindex="0"></pre>
+</dialog>
 
 <script src="/static/app.js"></script>
 </body>
