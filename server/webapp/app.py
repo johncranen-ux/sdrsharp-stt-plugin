@@ -169,7 +169,23 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html",
+                            headers={"Cache-Control": "no-cache"})
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    class RevalidatingStatic(StaticFiles):
+        """Serve the panel's own assets with `no-cache`.
+
+        Not `no-store`: the file is still cached, but the browser must revalidate before using
+        it, so an unchanged app.js costs a 304 and a changed one is picked up on an ordinary
+        reload. Without this the page and its script have independent cache lifetimes, and a
+        tab can end up running an older app.js against a newer index.html -- which happened on
+        2026-08-19 and looked like a dead button rather than a stale file.
+        """
+
+        def file_response(self, *args, **kwargs):
+            response = super().file_response(*args, **kwargs)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
+
+    app.mount("/static", RevalidatingStatic(directory=STATIC_DIR), name="static")
     return app

@@ -113,6 +113,16 @@ def test_the_health_route_reports_paths_and_the_proxy_being_down(client):
     assert body["proxy_error"] is None or "not answering" in body["proxy_error"]
 
 
+def test_the_health_route_carries_a_lamp_for_every_feed(client):
+    """The panel draws the annunciator straight from this, so a feed dropping out of the
+    payload would silently remove a lamp rather than show a failed one."""
+    feeds = client.get("/api/health").json()["feeds"]
+    assert [feed["key"] for feed in feeds] == ["ais-station", "aishub"]
+    for feed in feeds:
+        assert feed["lamp"] in {"green", "amber", "red", "unlit"}
+        assert feed["owner"] in {"proxy", "counter"}
+
+
 def test_the_index_page_is_served(client):
     response = client.get("/")
     assert response.status_code == 200
