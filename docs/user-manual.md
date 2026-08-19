@@ -808,6 +808,19 @@ Deliberate — see [Starting the station](#starting-the-station). Either run
 `py -m webapp.set_password` from `server`, or set `WEBAPP_BIND_HOST` back to `127.0.0.1`.
 No socket is ever opened when this fires, so nothing needs to be undone.
 
+**The counter's timestamps look two hours behind the proxy's**
+They are two different clocks and both are correct. The counter writes **UTC** and says so —
+`2026-08-19T19:19:15+00:00`, `hour=2026-08-19T19Z` — because its hourly buckets have to line up
+with AISHub's own accounting and with the timestamps inside AIS messages. The proxy writes
+**your local time**, with no zone marker and no date: `[21:19:15] CH01: vessel=...`. In summer
+that is CEST, UTC+2, so one moment appears as 19:19 in one log and 21:19 in the other.
+
+This matters whenever you line a transcription up against a vessel count: apply the offset
+rather than assuming the two logs share a clock. Note also that the dated log filenames
+(`proxy-2026-08-19.log`, `counter-2026-08-19.log`) are named from the **local** date, so a file
+named for one day can hold counter records belonging to the next UTC day — between local
+midnight and 02:00 in summer, that is exactly what happens.
+
 **A process card's Start fails with `port N is held by pid P (image), which is not one of ours`**
 Something the panel did not start is already listening on that port. The panel clears a port
 before starting only when the current holder is a process it recognises as its own kind — a
