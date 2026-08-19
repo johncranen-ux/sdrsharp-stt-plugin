@@ -363,7 +363,7 @@ def poll_and_record(username: str, bbox, fetch=None) -> None:
     Split out of `poll_loop` so the outcome recording can be tested without an infinite loop.
     Every exception is caught here because the caller is a daemon thread with nothing above it:
     an error that escaped would end polling silently and leave the cache frozen, which is the
-    failure aisstream spent five days demonstrating.
+    failure aisstream spent roughly eight days demonstrating (2026-08-05 to 08-13).
     """
     try:
         _record_success(poll_once(username, bbox, fetch=fetch))

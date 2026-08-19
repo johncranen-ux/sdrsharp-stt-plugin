@@ -87,8 +87,10 @@ def test_health_combines_both_answers(tmp_path):
 # -- the feeds panel ---------------------------------------------------------
 #
 # A process being up and its data still arriving are two different facts. The cards answer the
-# first; these answer the second, which is the one that went unnoticed for five days when
-# aisstream stopped delivering while the proxy carried on looking perfectly healthy.
+# first; these answer the second -- the one that stayed silently green for most of an aisstream
+# outage that ran roughly eight days (2026-08-05 to the 08-13 AISHub cutover). The silence was
+# diagnosed on 2026-08-07, not at the end of the outage, so "unnoticed" describes only the gap
+# before that fix landed, not the outage's full length.
 
 import json  # noqa: E402
 import time  # noqa: E402
