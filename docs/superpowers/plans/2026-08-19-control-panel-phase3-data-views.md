@@ -37,7 +37,6 @@
 - `server/tests/test_proxy_data.py`, `test_conversations_view.py`, `test_vessels_view.py`, `test_settings_api.py`
 
 **Modify**
-- `server/stt_proxy/ais.py` — Task 1, the stall.
 - `server/webapp/app.py` — five new routes.
 - `server/webapp/static/index.html`, `app.css`, `app.js` — three new tabs.
 - `server/tests/test_app_routes.py` — route and auth coverage for the new endpoints.
@@ -115,9 +114,9 @@ so the suspicion is strong; treat the vendor attribution as a lead, not a findin
 2. **In the panel — already planned, and now load-bearing.** Task 2's `proxy_data.py` (short
    TTL + serve the last good snapshot, flagged stale, when a fetch fails) is the correct
    response and needs no change of design. Two constraints follow from this finding:
-   - Its fetch timeout must be **short** (the phase 1 `health.TIMEOUT_SEC` of 2.0 s is right).
-     A generous timeout buys nothing: the transfer is already dead, and waiting only turns a
-     fast fallback into a 19 s hang.
+   - Its fetch timeout must be **short**: `FETCH_TIMEOUT_SEC = 2.0`, matching the phase 1
+     `health.TIMEOUT_SEC`. A generous timeout buys nothing — the transfer is already dead, and
+     waiting only turns a fast fallback into a 19 s hang.
    - It must treat `ConnectionResetError` / a short read as an ordinary, expected outcome
      rather than a proxy fault — the proxy is healthy when this happens.
 3. **Keep the browser payload small anyway**, as the plan already does by paging server-side.
@@ -178,7 +177,7 @@ connections is fine — it is the bytes that go missing, not the connect).
   - `class ProxyData: __init__(self, load_values, fetch=None, clock=time.time)`
   - `ProxyData.conversations() -> tuple[list[dict], Snapshot]`
   - `ProxyData.vessels() -> tuple[list[dict], Snapshot]`
-  - `CONVERSATIONS_TTL_SEC = 15`, `VESSELS_TTL_SEC = 60`, `FETCH_TIMEOUT_SEC = 6.0`
+  - `CONVERSATIONS_TTL_SEC = 15`, `VESSELS_TTL_SEC = 60`, `FETCH_TIMEOUT_SEC = 2.0`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -325,7 +324,12 @@ CONVERSATIONS_TTL_SEC = 15
 # The AIS cache changes only when the feed polls, which is every 900s by default. A minute of
 # staleness costs nothing and a 1.8 MB fetch is not free.
 VESSELS_TTL_SEC = 60
-FETCH_TIMEOUT_SEC = 6.0
+# 2.0 rather than something generous, and the same value health.py already uses. A
+# successful fetch measures 0.03s, so this is ~60x headroom; and a fetch that is going to
+# fail fails by TCP reset at 18.9s (Task 1), so every value well under that buys the same
+# outcome -- the smaller one just shortens the window where a screen waits on a transfer
+# that is already dead.
+FETCH_TIMEOUT_SEC = 2.0
 
 
 class Snapshot(BaseModel):
