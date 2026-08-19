@@ -16,6 +16,54 @@ from webapp.supervisor import AlreadyRunning, ProcessState, StartFailed  # noqa:
 
 PASSWORD = "a long enough password"
 
+_CONVERSATIONS = [
+    {
+        "start": "2026-08-19T10:15:00+00:00",
+        "end": "2026-08-19T10:16:30+00:00",
+        "channel": "16",
+        "vessel": "PASHA BULKER",
+        "mmsi": "244123456",
+        "type": "Bulk Carrier",
+        "destination": "ROTTERDAM",
+        "confidence": 0.87,
+        "turns": [
+            {"time": "2026-08-19T10:15:05+00:00", "raw": "Pasha Approach",
+             "text": "Pasha Bulker", "conv": None,
+             "live_vessel": "PASHA BULKER", "live_mmsi": "244123456"},
+        ],
+        "resolver_candidates": [],
+    },
+    {
+        "start": "2026-08-19T09:00:00+00:00",
+        "end": "2026-08-19T09:02:00+00:00",
+        "channel": "12",
+        "vessel": None,
+        "mmsi": None,
+        "type": None,
+        "destination": None,
+        "confidence": None,
+        "turns": [],
+        "resolver_candidates": [],
+    },
+]
+
+_VESSELS = [
+    {"mmsi": "244123456", "name": "PASHA BULKER", "callsign": "PH1234",
+     "type": "Bulk Carrier", "destination": "ROTTERDAM", "draught": 12.3,
+     "last_seen": "2026-08-19T10:00:00+00:00", "source": "aishub"},
+    {"mmsi": "999888777", "name": "SEA STAR", "callsign": "PH5678", "type": "Tanker",
+     "destination": "MAASVLAKTE", "draught": 8.1,
+     "last_seen": "2026-08-19T08:00:00+00:00", "source": "local"},
+]
+
+
+def _fake_proxy_data(conversations, vessels):
+    from webapp.proxy_data import ProxyData
+
+    def fetch(url, timeout):
+        return conversations if "conversations" in url else vessels
+    return ProxyData(lambda: {"PROXY_PORT": "9000"}, fetch=fetch)
+
 
 class _FakeSupervisor:
     def __init__(self, log_dir: Path):
@@ -53,18 +101,37 @@ class _FakeSupervisor:
         return self.paths.log_dir / "proxy-2026-08-18.log"
 
 
-@pytest.fixture
-def client(tmp_path):
+def _build_app(tmp_path):
     credentials.save_password(tmp_path / "credentials.json", PASSWORD)
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "proxy-2026-08-18.log").write_bytes(b"banner line\n")
     fake = _FakeSupervisor(tmp_path / "logs")
+    proxy_data = _fake_proxy_data(_CONVERSATIONS, _VESSELS)
     app = create_app(server_dir=_SERVER_DIR, config_path=tmp_path / "config.json",
-                     credentials_path=tmp_path / "credentials.json", supervisor=fake)
+                     credentials_path=tmp_path / "credentials.json", supervisor=fake,
+                     proxy_data=proxy_data)
+    return app, fake
+
+
+@pytest.fixture
+def client(tmp_path):
+    app, fake = _build_app(tmp_path)
     with TestClient(app) as test_client:
         test_client.headers[CSRF_HEADER] = test_client.post(
             "/api/login", json={"password": PASSWORD}).json()["csrf_token"]
         test_client.fake = fake
+        yield test_client
+
+
+@pytest.fixture
+def unauthenticated_client(tmp_path):
+    """Same app, same fixed proxy data -- but never logs in, and carries no CSRF header.
+
+    Every new data route needs a test proving an unauthenticated request is rejected; this is
+    what makes that possible without duplicating app construction.
+    """
+    app, _ = _build_app(tmp_path)
+    with TestClient(app) as test_client:
         yield test_client
 
 
@@ -127,3 +194,55 @@ def test_the_index_page_is_served(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
+
+
+def test_the_conversations_route_pages_and_reports_its_snapshot(client):
+    body = client.get("/api/conversations", params={"limit": 1}).json()
+    assert body["limit"] == 1
+    assert "stale" in body["snapshot"] and "age_sec" in body["snapshot"]
+
+
+def test_the_conversations_route_never_ships_transcripts_in_the_list(client):
+    """The list is polled; 613 KB per poll over Tailscale is not acceptable."""
+    for row in client.get("/api/conversations").json()["rows"]:
+        assert "turns" not in row
+
+
+def test_an_unknown_conversation_id_is_a_404_not_an_empty_object(client):
+    assert client.get("/api/conversations/nope").status_code == 404
+
+
+def test_a_conversation_id_with_colons_and_a_pipe_round_trips(client):
+    """conversation_id is f"{start}|{channel}" -- it carries both the ':' of an ISO timestamp
+    and the '|' separator. The route uses a :path converter; this proves a browser-side
+    encodeURIComponent round-trips through it rather than 404ing on every detail page."""
+    from urllib.parse import quote
+
+    conv_id = "2026-08-19T10:15:00+00:00|16"
+    response = client.get(f"/api/conversations/{quote(conv_id, safe='')}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == conv_id
+    assert body["vessel"] == "PASHA BULKER"
+
+
+def test_the_vessels_route_searches(client):
+    body = client.get("/api/vessels", params={"text": "pasha"}).json()
+    assert "rows" in body and "total" in body
+    assert [row["mmsi"] for row in body["rows"]] == ["244123456"]
+
+
+def test_an_unknown_mmsi_is_a_404(client):
+    assert client.get("/api/vessels/999999999").status_code == 404
+
+
+def test_a_known_vessel_carries_its_conversations(client):
+    body = client.get("/api/vessels/244123456").json()
+    assert body["mmsi"] == "244123456"
+    assert [c["mmsi"] for c in body["conversations"]] == ["244123456"]
+
+
+@pytest.mark.parametrize("path", ["/api/conversations", "/api/conversations/x",
+                                  "/api/vessels", "/api/vessels/1"])
+def test_the_data_routes_reject_an_unauthenticated_request(unauthenticated_client, path):
+    assert unauthenticated_client.get(path).status_code == 401

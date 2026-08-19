@@ -17,8 +17,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from webapp import config_store, credentials, health as health_module, logs, registry
+from webapp import (config_store, conversations_view, credentials,
+                    health as health_module, logs, registry, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
+from webapp.proxy_data import ProxyData
 from webapp.supervisor import ProcessState, Supervisor, SupervisorError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -41,7 +43,8 @@ def _is_secure(request: Request) -> bool:
 
 
 def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
-               supervisor: Supervisor | None = None) -> FastAPI:
+               supervisor: Supervisor | None = None,
+               proxy_data: ProxyData | None = None) -> FastAPI:
     # No docs_url, redoc_url or openapi_url: an unauthenticated schema of every route this
     # panel exposes is a gift to anyone who reaches the port.
     app = FastAPI(title="SDR# control panel", docs_url=None, redoc_url=None, openapi_url=None)
@@ -54,6 +57,7 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
 
     paths = registry.resolve_paths(values(), server_dir)
     sup = supervisor or Supervisor(paths=paths, load_values=values)
+    data = proxy_data or ProxyData(values)
 
     # -- guards ------------------------------------------------------------
 
@@ -162,6 +166,43 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
     @guarded.get("/api/health", response_model=health_module.Health)
     def read_health() -> health_module.Health:
         return health_module.health(values(), sup.paths)
+
+    def _envelope(page, snap) -> dict:
+        body = page.model_dump()
+        body["snapshot"] = snap.model_dump()
+        return body
+
+    @guarded.get("/api/conversations")
+    def read_conversations(identified: bool | None = None, channel: str | None = None,
+                           text: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+        records, snap = data.conversations()
+        return _envelope(conversations_view.query(
+            records, identified=identified, channel=channel, text=text,
+            limit=limit, offset=offset), snap)
+
+    @guarded.get("/api/conversations/{conversation_id:path}")
+    def read_conversation(conversation_id: str) -> dict:
+        records, _snap = data.conversations()
+        for record in records:
+            if conversations_view.conversation_id(record) == conversation_id:
+                return conversations_view.detail(record)
+        raise HTTPException(status_code=404, detail="no such conversation")
+
+    @guarded.get("/api/vessels")
+    def read_vessels(text: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+        entries, snap = data.vessels()
+        return _envelope(vessels_view.search(entries, text=text, limit=limit, offset=offset),
+                         snap)
+
+    @guarded.get("/api/vessels/{mmsi}")
+    def read_vessel(mmsi: str) -> dict:
+        entries, _snap = data.vessels()
+        entry = vessels_view.detail(entries, mmsi)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="no such vessel in the cache")
+        records, _snap = data.conversations()
+        entry["conversations"] = vessels_view.conversations_for(records, mmsi)
+        return entry
 
     app.include_router(open_routes)
     app.include_router(guarded)
