@@ -100,9 +100,9 @@ def proxy_status(values: dict[str, str],
 # -- the feeds panel ---------------------------------------------------------
 #
 # A running process and an arriving feed are two different facts, and the cards only answer the
-# first. aisstream demonstrated the gap for five days: the proxy was up, the dashboard was
-# green, and no vessel data had arrived since the 5th. These read the second fact from each
-# source's own record of it.
+# first. aisstream demonstrated the gap for roughly eight days (2026-08-05 to 08-13, not the
+# five originally logged here): the proxy was up, the dashboard was green, and no vessel data
+# had arrived since the 5th. These read the second fact from each source's own record of it.
 
 # The counter writes a heartbeat every 60s whatever the traffic, so a gap means the process is
 # not running. Two and a half intervals allows for a slow write without letting a dead counter

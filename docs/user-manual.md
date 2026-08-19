@@ -322,9 +322,10 @@ cached, conversations stored, and how many of the configured paths resolve on th
 
 The **Feeds** panel answers a question the process cards below it cannot: not just *is the
 process running*, but *is data actually arriving*. The two are different facts — aisstream
-demonstrated the gap for five days in 2026-08: the proxy was up, every card was green, and no
-vessel data had arrived since the 5th. Each lamp reads its own source's record of the second
-fact, independent of whether the panel thinks the owning process is alive.
+demonstrated the gap for roughly eight days in 2026-08 (2026-08-05 to 08-13, not the five
+often quoted): the proxy was up, every card was green, and no vessel data had arrived since
+the 5th. Each lamp reads its own source's record of the second fact, independent of whether
+the panel thinks the owning process is alive.
 
 There are two lamps today: **AIS station** (the local receiver, via the counter) and
 **AISHub** (the polled vessel feed, via the proxy).
@@ -425,9 +426,11 @@ On a conversation nobody was identified in, a block headed **"Scored below the i
 cutoff"** may list a few names that came close but didn't clear the threshold. That heading is
 deliberate: this is **not** an identification, and the system never acts on it — it is here
 because you can sometimes settle by ear what an edit-distance score cannot. Measured on
-hand-labelled traffic, the right ship is in that list about a quarter of the time (9 of 35);
-the rest are near-misses worth a glance and nothing more. Turn it off with `AIS_SUGGEST=off`
-if it's more noise than help.
+hand-labelled traffic, the right ship is in that list about a quarter of the time (9 of 35) —
+an **upper bound**, since the pool measured against was a frozen cache broader than what was
+actually live when each conversation resolved, and the real figure cannot be recovered after
+the fact. The rest are near-misses worth a glance and nothing more. Turn it off with
+`AIS_SUGGEST=off` if it's more noise than help.
 
 The panel's chain view tells you *that* a turn's `conv` differs from its `text`, but not *why*
 — no substitution reasons here. For that, the proxy still serves its own page directly and
@@ -598,10 +601,12 @@ because you can settle by ear what the matcher cannot: "Meld Them In" for MELTEM
 obvious to someone who heard the transmission and invisible to an edit-distance score.
 
 Expect to be right about a quarter of the time — measured on hand-labelled traffic, the
-correct ship is in the three 9 times out of 35. The other three-quarters are near-misses
-worth a glance and nothing more. The block never appears beside a conversation that *was*
-identified, and never in the first 30 conversations after a fresh start, because it needs a
-corpus to learn which words are the shore station rather than a ship.
+correct ship is in the three 9 times out of 35, an **upper bound**: the pool was a frozen
+cache broader than what was actually live when each conversation resolved, and the real
+figure cannot be recovered after the fact. The other three-quarters are near-misses worth a
+glance and nothing more. The block never appears beside a conversation that *was* identified,
+and never in the first 30 conversations after a fresh start, because it needs a corpus to
+learn which words are the shore station rather than a ship.
 
 Turn it off with `AIS_SUGGEST=off`. `AIS_SUGGEST_N` changes how many are listed.
 
