@@ -567,9 +567,10 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 | `aisstream` | The original aisstream.io websocket. Needs `AISSTREAM_API_KEY`. Dead since 2026-08-05; kept because it was reliable for a long time and may return. |
 | `off` | No vessel enrichment. |
 
-`AISHUB_USERNAME` is the key from AISHub's welcome mail. **It goes in `server/start-all.bat`
-alongside the other API keys — that file is gitignored. Never put it in a tracked file.** There
-is no `.env` loader in this project; every setting is read straight from the environment.
+`AISHUB_USERNAME` is the key from AISHub's welcome mail. **Set it from the panel's Settings
+screen — it is stored in `server/config.json`, which is gitignored. Never put it in a tracked
+file.** Editing `start-all.bat` no longer has any effect on a proxy the panel is managing; see
+[Settings](#settings) and [Running without the panel](#running-without-the-panel).
 
 Without `AISHUB_USERNAME` the proxy still starts and transcribes; it prints `AIS feed: disabled`
 and runs without vessel enrichment.
