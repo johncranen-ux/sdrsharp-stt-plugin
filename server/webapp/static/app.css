@@ -564,6 +564,63 @@ body {
 
 .conv-note { color: var(--fog); font-size: 13px; margin: 0; }
 
+/* -- vessels -------------------------------------------------------------- */
+/*
+ * The table, pager, empty/stale/fetch-error states and the detail card reuse the
+ * .conv-table / .conv-pager / .conv-detail family above verbatim -- they are already generic
+ * layout, not conversation-specific -- rather than duplicating the same rules under a second
+ * name. Only what is genuinely new to this screen gets its own class.
+ *
+ * The shared-name badge is the point of the screen as much as the search box: a name carried
+ * by two MMSIs is not an identification, and it must be visible in the row itself, not only
+ * discoverable by opening detail.
+ */
+
+.vessel-name { overflow-wrap: anywhere; }
+.vessel-shared-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dial);
+  border: 1px solid var(--dial);
+  border-radius: var(--radius);
+  vertical-align: middle;
+}
+
+.vessel-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: calc(var(--step) * 2) calc(var(--step) * 3);
+  margin: 0;
+}
+.vessel-field dt { margin-bottom: 2px; }
+.vessel-field dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.vessel-conv-list { list-style: none; margin: 0; padding: 0; }
+.vessel-conv-item { border-bottom: 1px solid var(--sea-800); }
+.vessel-conv-item:last-child { border-bottom: 0; }
+.vessel-conv-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: calc(var(--step) * 1.2) 0;
+  background: transparent;
+  border: 0;
+  color: var(--chart);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.vessel-conv-link:hover { color: var(--dial); }
+
 /* -- logs --------------------------------------------------------------- */
 
 .log-controls {
@@ -654,7 +711,11 @@ body {
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; gap: var(--step); padding: var(--step) calc(var(--step) * 2); }
   .tabs { margin-left: 0; order: 3; width: 100%; }
-  .tab { flex: 1; }
+  /* min-width: 0 lets a tab shrink below its label's natural width -- without it, four tabs'
+   * intrinsic widths (added by this screen; three fit) summed past 390px and pushed the last
+   * one off the right edge, giving the page a horizontal scrollbar. The longest label wraps to
+   * two lines instead, which is a smaller cost than scrolling the whole page sideways. */
+  .tab { flex: 1; min-width: 0; }
   .watch { padding: calc(var(--step) * 2); gap: calc(var(--step) * 2); }
   .watch-value { font-size: 32px; }
   .view { padding: calc(var(--step) * 2); }
@@ -686,6 +747,7 @@ body {
   .conv-filters .field-inline select { min-width: 0; width: 100%; }
   .conv-pager { flex-wrap: wrap; }
   .cand-pass { margin-left: 0; }
+  .vessel-fields { grid-template-columns: 1fr 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -43,6 +43,7 @@ py -m webapp.set_password</pre>
     <nav class="tabs" role="tablist">
       <button class="tab" role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
       <button class="tab" role="tab" data-tab="conversations" aria-selected="false">Conversations</button>
+      <button class="tab" role="tab" data-tab="vessels" aria-selected="false">Vessels</button>
       <button class="tab" role="tab" data-tab="logs" aria-selected="false">Logs</button>
     </nav>
     <button id="signout" class="button button-quiet" type="button">Sign out</button>
@@ -135,6 +136,49 @@ py -m webapp.set_password</pre>
         <button id="conv-detail-close" class="button button-quiet" type="button">Close</button>
       </div>
       <div id="conv-detail-body"></div>
+    </section>
+  </main>
+
+  <main id="vessels" class="view" hidden>
+    <!-- The question this screen exists to answer: is this vessel in the cache, and when was
+         it last seen? A name shared by two MMSIs is marked right in the row -- see
+         vessel-shared-badge -- because that collision is exactly what makes a bare name
+         untrustworthy on this screen. -->
+    <div class="conv-filters">
+      <label class="field field-inline">
+        <span class="legend">Search</span>
+        <input id="vessel-text" type="search" placeholder="name, MMSI, callsign, destination…">
+      </label>
+    </div>
+
+    <p id="vessel-stale" class="note note-port" hidden></p>
+    <p id="vessel-fetch-error" class="note note-port" hidden></p>
+
+    <div class="conv-table-wrap">
+      <table class="conv-table">
+        <thead>
+          <tr>
+            <th>Name</th><th>MMSI</th><th>Callsign</th><th>Type</th>
+            <th>Destination</th><th>Draught</th><th>Last seen</th>
+          </tr>
+        </thead>
+        <tbody id="vessel-rows"></tbody>
+      </table>
+    </div>
+    <p id="vessel-empty" class="conv-empty" hidden>No vessels match that search.</p>
+
+    <div id="vessel-pager" class="conv-pager">
+      <button id="vessel-prev" class="button button-quiet" type="button">Previous</button>
+      <span id="vessel-page-note" class="legend"></span>
+      <button id="vessel-next" class="button button-quiet" type="button">Next</button>
+    </div>
+
+    <section id="vessel-detail" class="conv-detail card" hidden aria-label="Vessel detail">
+      <div class="conv-detail-head">
+        <h2 id="vessel-detail-title" class="conv-detail-title">Vessel</h2>
+        <button id="vessel-detail-close" class="button button-quiet" type="button">Close</button>
+      </div>
+      <div id="vessel-detail-body"></div>
     </section>
   </main>
 

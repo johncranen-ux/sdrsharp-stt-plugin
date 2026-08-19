@@ -851,6 +851,287 @@ async function selectConversation(id) {
   }
 }
 
+/* -- vessels ---------------------------------------------------------------- */
+/*
+ * "Is this vessel in the cache, and when was it last seen?" -- currently a Python one-liner,
+ * asked repeatedly enough to be worth a screen. Same shape as conversations above: a
+ * generation counter tags every request so a slow answer to an old search cannot overwrite a
+ * fast answer to a new one (`refreshVessels`), rows are a Map built once and updated in place
+ * (`vesselRows`), and the search box is debounced -- 250ms per the brief, since ~6000 rows means
+ * every keystroke is otherwise its own request against the whole cache.
+ *
+ * The one thing this screen adds that conversations does not: `name_shared` on a row is not
+ * decoration, it is the reason the screen exists alongside the search box -- a name carried by
+ * two MMSIs is not an identification, and it has to be visible without opening detail. See
+ * `updateVesselRow`.
+ */
+const vesselRows = new Map();
+const vesselState = {
+  generation: 0,
+  offset: 0,
+  limit: 50,
+  total: 0,
+  rows: new Map(),       // mmsi -> last row seen, for the detail header
+  selectedMmsi: null,
+  detailGeneration: 0,
+};
+let vesselFilterTimer = null;
+
+function vesselParams() {
+  const params = new URLSearchParams();
+  const text = $("vessel-text").value.trim();
+  if (text) params.set("text", text);
+  params.set("limit", String(vesselState.limit));
+  params.set("offset", String(vesselState.offset));
+  return params;
+}
+
+function buildVesselRow() {
+  const tr = element("tr", "conv-row");
+  tr.tabIndex = 0;
+  const cells = {};
+  for (const key of ["name", "mmsi", "callsign", "type", "destination", "draught", "last_seen"]) {
+    cells[key] = element("td", "conv-cell");
+    tr.append(cells[key]);
+  }
+  cells.mmsi.classList.add("conv-mono");
+  cells.callsign.classList.add("conv-mono");
+  cells.draught.classList.add("conv-mono", "conv-num");
+  cells.last_seen.classList.add("conv-mono");
+
+  // The name cell carries both the name text and the shared-name mark, as two nodes kept
+  // separate so updateVesselRow can toggle the badge without touching the name's text node.
+  const nameText = element("span", "vessel-name");
+  const badge = element("span", "vessel-shared-badge", "shared name");
+  badge.hidden = true;
+  cells.name.append(nameText, badge);
+  return { root: tr, cells, nameText, badge };
+}
+
+function updateVesselRow(view, row) {
+  view.root.classList.toggle("conv-row-selected", row.mmsi === vesselState.selectedMmsi);
+  setText(view.nameText, row.name || "—");
+  // The mark itself: a name two MMSIs share cannot be trusted alone, and it has to read that
+  // way right here, not only after opening detail.
+  view.badge.hidden = !row.name_shared;
+  setText(view.cells.mmsi, row.mmsi || "—");
+  setText(view.cells.callsign, row.callsign || "—");
+  setText(view.cells.type, row.type || "—");
+  setText(view.cells.destination, row.destination || "—");
+  setText(view.cells.draught,
+    row.draught === null || row.draught === undefined ? "—" : `${row.draught} m`);
+  // "never", not "—": this vessel's entry has genuinely never carried a last_seen, which is a
+  // different claim from a field the row just doesn't have room to show.
+  setText(view.cells.last_seen, row.last_seen || "never");
+}
+
+function showVesselSnapshot(snapshot) {
+  const banner = $("vessel-stale");
+  if (snapshot && snapshot.stale) {
+    banner.textContent =
+      `showing the last copy, ${elapsed(snapshot.age_sec)} old — ${snapshot.error || "unknown error"}`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+// Same distinction as showConvFetchError: this fires only when the panel itself could not be
+// asked at all, never for the server successfully answering "here are zero rows".
+function showVesselFetchError(message) {
+  const banner = $("vessel-fetch-error");
+  banner.textContent = message ? `could not reach the panel: ${message}` : "";
+  banner.hidden = !message;
+}
+
+function renderVesselRows(rows) {
+  const tbody = $("vessel-rows");
+  const seen = new Set();
+  vesselState.rows.clear();
+  for (const row of rows) {
+    vesselState.rows.set(row.mmsi, row);
+    let view = vesselRows.get(row.mmsi);
+    if (!view) {
+      view = buildVesselRow();
+      view.root.addEventListener("click", () => selectVessel(row.mmsi));
+      view.root.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectVessel(row.mmsi);
+        }
+      });
+      vesselRows.set(row.mmsi, view);
+    }
+    updateVesselRow(view, row);
+    tbody.append(view.root);   // also reorders an existing row into the current page's order
+    seen.add(row.mmsi);
+  }
+  for (const [mmsi, view] of vesselRows) {
+    if (!seen.has(mmsi)) {
+      view.root.remove();
+      vesselRows.delete(mmsi);
+    }
+  }
+  // Only reached on a genuine "the server answered and there were none" -- a failed fetch
+  // returns before this runs, so the previous rows are never relabelled as "no vessels match".
+  $("vessel-empty").hidden = rows.length !== 0;
+}
+
+function renderVesselPager() {
+  const note = $("vessel-page-note");
+  if (vesselState.total === 0) {
+    setText(note, "");
+  } else {
+    const from = vesselState.offset + 1;
+    const to = Math.min(vesselState.offset + vesselState.limit, vesselState.total);
+    setText(note, `${from}–${to} of ${vesselState.total}`);
+  }
+  $("vessel-prev").disabled = vesselState.offset <= 0;
+  $("vessel-next").disabled = vesselState.offset + vesselState.limit >= vesselState.total;
+}
+
+async function refreshVessels() {
+  const generation = ++vesselState.generation;
+  let body;
+  try {
+    body = await api(`/api/vessels?${vesselParams().toString()}`);
+  } catch (error) {
+    if (generation !== vesselState.generation) return;   // a newer request already landed
+    showVesselFetchError(error.message);
+    return;
+  }
+  if (generation !== vesselState.generation) return;
+  showVesselFetchError(null);
+  showVesselSnapshot(body.snapshot);
+  vesselState.total = body.total;
+  vesselState.offset = body.offset;
+  renderVesselRows(body.rows);
+  renderVesselPager();
+}
+
+function vesselFiltersChanged() {
+  vesselState.offset = 0;
+  if (vesselFilterTimer) clearTimeout(vesselFilterTimer);
+  // 250ms: ~6000 cached vessels means every keystroke is a search over all of them if this
+  // fires unthrottled.
+  vesselFilterTimer = setTimeout(() => refreshVessels().catch(() => {}), 250);
+}
+
+/* -- vessel detail ------------------------------------------------------------ */
+
+const VESSEL_FIELD_LABELS = {
+  mmsi: "MMSI", name: "Name", callsign: "Callsign", type: "Type", imo: "IMO",
+  length: "Length", beam: "Beam", draught: "Draught", destination: "Destination",
+  latitude: "Latitude", longitude: "Longitude", last_seen: "Last seen", source: "Source",
+};
+// Fixed order for the fields known to appear on a cache entry; anything else the entry
+// happens to carry is still shown (see renderVesselFields), just after these.
+const VESSEL_FIELD_ORDER = ["name", "mmsi", "callsign", "type", "destination", "draught",
+                            "imo", "length", "beam", "latitude", "longitude",
+                            "last_seen", "source"];
+
+function vesselFieldValue(key, value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if ((key === "draught" || key === "length" || key === "beam") && typeof value === "number") {
+    return `${value} m`;
+  }
+  if ((key === "latitude" || key === "longitude") && typeof value === "number") {
+    return value.toFixed(4);
+  }
+  return String(value);
+}
+
+function renderVesselFields(detail) {
+  const dl = element("dl", "vessel-fields");
+  const keys = VESSEL_FIELD_ORDER.filter((key) => key in detail);
+  for (const key of Object.keys(detail)) {
+    // "the full cached entry" -- a field this screen did not anticipate is still shown, not
+    // silently dropped, only "conversations" (rendered separately below) is excluded.
+    if (key !== "conversations" && !VESSEL_FIELD_ORDER.includes(key)) keys.push(key);
+  }
+  for (const key of keys) {
+    const row = element("div", "vessel-field");
+    row.append(element("dt", "legend", VESSEL_FIELD_LABELS[key] || key));
+    row.append(element("dd", null, vesselFieldValue(key, detail[key])));
+    dl.append(row);
+  }
+  return dl;
+}
+
+function renderVesselConversations(list) {
+  // Requirement 5: a vessel with no conversations must say so, not show an empty area.
+  if (!list || !list.length) {
+    return element("p", "conv-note", "No conversations recorded for this vessel.");
+  }
+  const ul = element("ul", "vessel-conv-list");
+  for (const c of list) {
+    const li = element("li", "vessel-conv-item");
+    const label = c.label || (c.identified ? "identified" : "unidentified");
+    const button = element("button", "vessel-conv-link",
+      `${c.start || "—"} · ${c.channel || "—"} · ${label}`);
+    button.type = "button";
+    button.addEventListener("click", () => openConversationFromVessel(c.id));
+    li.append(button);
+    ul.append(li);
+  }
+  return ul;
+}
+
+function renderVesselDetail(detail) {
+  const body = $("vessel-detail-body");
+  body.replaceChildren();   // fetched once per selection, not on a poll -- same contract as
+                             // conversation detail
+
+  body.append(element("h3", null, "Cached entry"));
+  body.append(renderVesselFields(detail));
+
+  body.append(element("h3", null, "Conversations"));
+  body.append(renderVesselConversations(detail.conversations));
+}
+
+function showVesselDetail(open) {
+  $("vessel-detail").hidden = !open;
+}
+
+// Jumping into the Conversations screen from here, by id -- never by name, which is exactly
+// what cannot be trusted on this screen. selectConversation() already tolerates an id that
+// is not on the currently loaded page (convLabel falls back to "Conversation"/detail fields),
+// so this works regardless of what filters or page the Conversations tab was last left on.
+function openConversationFromVessel(id) {
+  showTab("conversations");
+  selectConversation(id).catch(() => {});
+}
+
+async function selectVessel(mmsi) {
+  vesselState.selectedMmsi = mmsi;
+  for (const [rowMmsi, view] of vesselRows) {
+    view.root.classList.toggle("conv-row-selected", rowMmsi === mmsi);
+  }
+  showVesselDetail(true);
+  const detailEl = $("vessel-detail");
+  // Scrolled immediately, before the fetch resolves -- see scrollConvIntoView's own comment:
+  // the click needs a visible response before the network round-trip, not after it.
+  scrollConvIntoView(detailEl);
+  const row = vesselState.rows.get(mmsi);
+  setText($("vessel-detail-title"), row && row.name ? `${row.name} (${mmsi})` : mmsi);
+  const body = $("vessel-detail-body");
+  body.replaceChildren(element("p", "conv-note", "Loading…"));
+
+  const generation = ++vesselState.detailGeneration;
+  try {
+    const detail = await api(`/api/vessels/${encodeURIComponent(mmsi)}`);
+    if (generation !== vesselState.detailGeneration) return;   // a later selection replaced this
+    renderVesselDetail(detail);
+    // Re-aim now the final height is known -- the placeholder undershoots the real content,
+    // same reasoning as conversation detail.
+    scrollConvIntoView(detailEl);
+  } catch (error) {
+    if (generation !== vesselState.detailGeneration) return;
+    body.replaceChildren(element("p", "conv-note note-port", `could not load: ${error.message}`));
+    scrollConvIntoView(detailEl);
+  }
+}
+
 /* -- views and polling ---------------------------------------------------- */
 
 function showBanner(message) {
@@ -863,6 +1144,7 @@ function showTab(name) {
   state.tab = name;
   $("dashboard").hidden = name !== "dashboard";
   $("conversations").hidden = name !== "conversations";
+  $("vessels").hidden = name !== "vessels";
   $("logs").hidden = name !== "logs";
   for (const tab of document.querySelectorAll(".tab")) {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
@@ -874,6 +1156,7 @@ function tick() {
   if (document.hidden) return;
   if (state.tab === "dashboard") refreshDashboard().catch(() => {});
   else if (state.tab === "conversations") refreshConversations().catch(() => {});
+  else if (state.tab === "vessels") refreshVessels().catch(() => {});
   else tabLog.pull().catch(() => {});
 }
 
@@ -882,9 +1165,12 @@ function startPolling() {
   // The dashboard is cheap and answers "is it still running?"; the log is the faster of the
   // two because it is being read while something is happening. Conversations sit between them:
   // the webapp itself only refreshes its copy every 15s (CONVERSATIONS_TTL_SEC), so polling
-  // faster than that would just re-fetch the same cached answer.
+  // faster than that would just re-fetch the same cached answer. Vessels changes only when the
+  // AIS feed polls -- the webapp's own copy is good for 60s (VESSELS_TTL_SEC) -- so it polls
+  // slower still; a search itself still answers immediately through vesselFiltersChanged.
   state.timers.push(setInterval(() => { if (state.tab === "dashboard") tick(); }, 3000));
   state.timers.push(setInterval(() => { if (state.tab === "conversations") tick(); }, 5000));
+  state.timers.push(setInterval(() => { if (state.tab === "vessels") tick(); }, 20000));
   state.timers.push(setInterval(() => { if (state.tab === "logs") tick(); }, 2000));
 }
 
@@ -973,6 +1259,23 @@ $("conv-detail-close").addEventListener("click", () => {
   // position, which can leave them staring at whatever now-empty space took its place. Land
   // back on the pager, right above where the detail was, rather than nowhere in particular.
   scrollConvIntoView($("conv-pager"));
+});
+
+$("vessel-text").addEventListener("input", vesselFiltersChanged);
+$("vessel-prev").addEventListener("click", () => {
+  vesselState.offset = Math.max(0, vesselState.offset - vesselState.limit);
+  refreshVessels().catch(() => {});
+});
+$("vessel-next").addEventListener("click", () => {
+  vesselState.offset += vesselState.limit;
+  refreshVessels().catch(() => {});
+});
+$("vessel-detail-close").addEventListener("click", () => {
+  vesselState.selectedMmsi = null;
+  vesselState.detailGeneration += 1;   // abandon whatever detail fetch might still be in flight
+  for (const view of vesselRows.values()) view.root.classList.remove("conv-row-selected");
+  showVesselDetail(false);
+  scrollConvIntoView($("vessel-pager"));
 });
 
 $("dialog-close").addEventListener("click", () => dialog.close());
