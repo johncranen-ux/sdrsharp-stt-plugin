@@ -61,9 +61,16 @@ What is established, measured against the live proxy on 2026-08-19:
 
 - `/api/ais-cache` returns 1.8 MB for 6046 vessels. Serialising that list takes **0.01 s** and a raw-socket read at a quiet moment delivered the whole body in **0.0 s**. Neither payload size nor JSON encoding is the cause.
 - The proxy runs `ThreadingHTTPServer`, so one slow handler does not block others — and indeed `/api/conversations` answered normally throughout.
-- Failures are **exactly ~18.97 s** every time (13 samples, 6 failures: 18.96, 18.96, 18.96, 18.97, 18.97, 18.98). Successes are **0.03 s**. There is no middle. A constant duration like that is a **fixed timeout somewhere**, not variable lock contention — contention would scatter.
-- Failures arrive in **runs of three, separated by runs of four successes**. Two failure runs began ~127 s apart.
-- **The AISHub poll is NOT the cause.** The probe recorded the proxy log's poll count beside every sample; it stayed at 11 across all 13 samples, successes and failures alike. `AIS_SAVE_INTERVAL` is 300 s and does not fit the ~127 s spacing either.
+- Over **60 samples at 10 s intervals: 32 failures (53%)**. Every failure took **18.94–19.00 s**; every success took **0.03–0.05 s**. There is no middle. A bimodal split that tight is a fixed timeout, not variable contention — contention scatters.
+- Failure and success runs are **irregular** (3,3,4,5,1,1,2,1,…), i.e. roughly a coin flip per request rather than a periodic window.
+
+**Three hypotheses have been measured and REFUTED. Do not re-propose them:**
+
+1. **The AISHub poll holding `_cache_lock`.** The probe recorded the proxy log's poll count beside every sample. It advanced once (11 → 12) across 60 samples while failures ran at 53% throughout. `AIS_SAVE_INTERVAL` is 300 s and fits nothing in the data either.
+2. **A second proxy bound to port 9000** — the zombie-listener failure this project has had twice, which would explain a ~50% split perfectly. Checked: `Get-NetTCPConnection -LocalPort 9000` shows exactly **one** listener, pid 13676, and exactly one `whisper-proxy.py` in `Win32_Process`.
+3. **Anything connection-level.** Interleaving a small endpoint with the large one, six requests each: `/api/status` **0/6 failed** (0.00–0.01 s), `/api/ais-cache` **2/6 failed** at 18.96 s. Accepting connections is fine.
+
+**What that leaves:** the fault is specific to writing the ~1.8 MB body. Serialisation is not it (0.01 s, measured separately), and a raw-socket client read the whole body in 0.0 s at a quiet moment — so it is intermittent even for the same payload. Look at the write path: `wfile.write` of a large buffer, HTTP/1.0 connection close semantics, and whether anything can hold `_cache_lock` between the handler acquiring it and finishing.
 
 Raw measurement: `scratchpad/probe_cache.py` and `probe_cache.jsonl`.
 
