@@ -25,7 +25,7 @@
 ## Deviations from the spec, and why
 
 1. **The Vessels tab does not read the separate identified-vessels log file.** Section 4 says "the identified-vessels log plus a searchable AIS cache". Every identification already travels in the conversation records, which this phase reads anyway, so the log would be a second reader over duplicate data. The Vessels tab therefore searches the AIS cache and drills into the conversations a vessel appears in. **Flag this at review** — if the log carries anything conversations do not, add a task.
-2. **Task 1 is not in the spec at all.** `/api/ais-cache` reproducibly stalls ~19 s and resets before serving. The Vessels view reads it, so it is fixed first.
+2. **Task 1 is not in the spec at all.** `/api/ais-cache` reproducibly stalls ~19 s and resets before serving. The Vessels view reads it, so it was investigated first. It turned out to be loopback TCP segment loss on this machine, below the application and unfixable from here — see Task 1 for the measurement. **Task 1 changes no code**; what it changes is Task 2, whose stale-snapshot fallback is now the mitigation rather than a nicety, and must use a short fetch timeout.
 
 ## File Structure
 
@@ -45,168 +45,123 @@
 
 ---
 
-### Task 1: Find out why the AIS cache read stalls for exactly 19 seconds
+### Task 1: Find out why the AIS cache read stalls for exactly 19 seconds — CLOSED, NOT A DEFECT IN THIS CODEBASE
 
-**Files:**
-- Modify: `server/stt_proxy/ais.py`
-- Test: `server/tests/test_ais_cache_read.py` (create)
+**Files changed: none.** The cause is below the application, in this machine's TCP stack. The
+candidate fix sketched here previously (a published snapshot in `ais.py`) was measured against
+the real symptom and cannot affect it; it has been removed so nobody implements it.
 
-**Interfaces:**
-- Consumes: nothing.
-- Produces: `/api/ais-cache` answers within a bounded time whatever the feed thread is doing. No signature changes.
+**Root cause (measured 2026-08-19):** on this machine a bulk loopback TCP transfer
+intermittently loses a ~33 KB run of segments near the end of the stream. The sender's TCP
+retransmits them, never gets an ACK, and gives up — Windows `MinRto` here is **300 ms** and
+`TcpMaxDataRetransmissions` is unset (default 5), so the give-up point is
+`300 ms x (2^6 - 1) = 18,900 ms`. That is the "exactly 19 seconds": every observed failure
+landed in 18.93–19.00 s. The stack then RSTs the connection, which the reader sees as
+`ConnectionResetError [WinError 10054]`. Nothing waits on `_cache_lock`, and no thread is
+stuck — the handler has been finished for 18.9 s by the time the client gives up.
 
-**Background — this is an INVESTIGATION task. The cause is not yet known, and the obvious hypothesis has already been measured and refuted. Do not skip to a fix.**
+**The evidence, in the order that closes the question:**
 
-What is established, measured against the live proxy on 2026-08-19:
+1. **The application always completes.** Instrumenting the sender, across the 60-request size
+   sweep below, shows `wfile.write` returning in **0.000–0.001 s** with no exception on **60 of
+   60** requests — including the 8 that the client saw as a 19 s reset. The 19 s is spent
+   entirely after `sendall` has returned, so no stack dump of the server would show anything:
+   there is no stuck thread to dump.
+2. **A bare `ThreadingHTTPServer` reproduces it with none of this project's code.** A
+   throwaway server holding one constant 1.8 MB buffer, importing nothing from `stt_proxy`,
+   failed **3/12** at 18.95–18.96 s. So `ais.py`, `_cache_lock`, the AISHub poll and
+   `json.dumps` are all excluded by construction.
+3. **HTTP is not involved either.** The same 1.8 MB over a plain TCP socket pair — no request
+   line, no headers, *both endpoints inside one process* — failed **4/16**, identically at
+   18.94–18.98 s. The receiver had taken **1,766,860–1,767,505 of 1,800,231 bytes** before the
+   reset: the stream dies with ~33 KB outstanding, every time.
 
-- `/api/ais-cache` returns 1.8 MB for 6046 vessels. Serialising that list takes **0.01 s** and a raw-socket read at a quiet moment delivered the whole body in **0.0 s**. Neither payload size nor JSON encoding is the cause.
-- The proxy runs `ThreadingHTTPServer`, so one slow handler does not block others — and indeed `/api/conversations` answered normally throughout.
-- Over **60 samples at 10 s intervals: 32 failures (53%)**. Every failure took **18.94–19.00 s**; every success took **0.03–0.05 s**. There is no middle. A bimodal split that tight is a fixed timeout, not variable contention — contention scatters.
-- Failure and success runs are **irregular** (3,3,4,5,1,1,2,1,…), i.e. roughly a coin flip per request rather than a periodic window.
+**Failure probability rises with transfer size but never reaches zero.** Interleaved sweeps
+against the bare server (so no run can be blamed on the minute it ran in):
 
-**Three hypotheses have been measured and REFUTED. Do not re-propose them:**
+| body | failures |
+| --- | --- |
+| 380 B (`/api/status`, live proxy) | 0 / 200 |
+| 32 KB | 0 / 100 |
+| 64 KB | **1** / 100 |
+| 128 KB | 0 / 100 |
+| 256 KB | 0 / 12 |
+| 512 KB | 1 / 24 |
+| 640 KB | 1 / 12 |
+| 768 KB | 3 / 12 |
+| 896 KB | 3 / 12 |
+| 1 MB | 7 / 24 |
+| 1.8 MB | 6 / 24 (bare server), 32 / 60 (live proxy) |
 
-1. **The AISHub poll holding `_cache_lock`.** The probe recorded the proxy log's poll count beside every sample. It advanced once (11 → 12) across 60 samples while failures ran at 53% throughout. `AIS_SAVE_INTERVAL` is 300 s and fits nothing in the data either.
-2. **A second proxy bound to port 9000** — the zombie-listener failure this project has had twice, which would explain a ~50% split perfectly. Checked: `Get-NetTCPConnection -LocalPort 9000` shows exactly **one** listener, pid 13676, and exactly one `whisper-proxy.py` in `Win32_Process`.
-3. **Anything connection-level.** Interleaving a small endpoint with the large one, six requests each: `/api/status` **0/6 failed** (0.00–0.01 s), `/api/ais-cache` **2/6 failed** at 18.96 s. Accepting connections is fine.
+This is why `/api/status` "never fails": at ~380 bytes it fails too rarely to appear in six
+samples, not never. **There is no payload size that is safe** — 64 KB failed once in 100. Do
+not design as though shrinking the response fixes this; shrinking only lowers the rate.
 
-**What that leaves:** the fault is specific to writing the ~1.8 MB body. Serialisation is not it (0.01 s, measured separately), and a raw-socket client read the whole body in 0.0 s at a quiet moment — so it is intermittent even for the same payload. Look at the write path: `wfile.write` of a large buffer, HTTP/1.0 connection close semantics, and whether anything can hold `_cache_lock` between the handler acquiring it and finishing.
+**What is inline on the loopback path.** Norton 360 26.7 is installed and its network drivers
+are loaded and running: `nllNetHub.sys` ("Gen Network Security Driver", Gen Digital),
+`nllbidsdriver.sys` ("Gen IDS Application Activity Monitor Driver") with `aswidsagent.exe`
+running as `nllbIDSAgent`, and `nllVpnRdr.sys` ("Norton VPN Driver"). One of these dropping
+loopback segments is the only identified candidate, and the symptom fits an inline filter
+driver — but it is **not proven**: confirming it needs `netsh wfp show filters`, which needs
+administrator rights this session did not have. Loopback packet loss has no benign explanation,
+so the suspicion is strong; treat the vendor attribution as a lead, not a finding.
 
-Raw measurement: `scratchpad/probe_cache.py` and `probe_cache.jsonl`.
+**Recommended mitigation, in order:**
 
-- [ ] **Step 1: Find where the 19 seconds is spent, before theorising further**
+1. **Operator action, outside the code.** Ask the user to exclude the proxy's port (or
+   `python.exe`) from Norton's firewall/IDS inspection, or to disable Norton's network
+   inspection briefly and re-run the reproduction below. That is the only thing that can
+   actually stop the loss.
+2. **In the panel — already planned, and now load-bearing.** Task 2's `proxy_data.py` (short
+   TTL + serve the last good snapshot, flagged stale, when a fetch fails) is the correct
+   response and needs no change of design. Two constraints follow from this finding:
+   - Its fetch timeout must be **short** (the phase 1 `health.TIMEOUT_SEC` of 2.0 s is right).
+     A generous timeout buys nothing: the transfer is already dead, and waiting only turns a
+     fast fallback into a 19 s hang.
+   - It must treat `ConnectionResetError` / a short read as an ordinary, expected outcome
+     rather than a proxy fault — the proxy is healthy when this happens.
+3. **Keep the browser payload small anyway**, as the plan already does by paging server-side.
+   It lowers the rate by roughly two orders of magnitude even though it cannot reach zero.
 
-Run the probe again with the proxy started under `py -X faulthandler`, and when a request is hanging, dump every thread's stack:
+**Reproduction**, if this needs re-testing after any change to the machine. Nothing here talks
+to the proxy; run it and watch for a ~19 s `ConnectionResetError`:
 
 ```python
-# scratch: fire this from a second console while a request is stuck
-import faulthandler, sys
-faulthandler.dump_traceback(file=open("stacks.txt", "w"), all_threads=True)
-```
+# 1.8 MB over plain TCP between two threads of one process, on 127.0.0.1.
+import socket, threading, time
+SIZE, PORT, BODY = 1800231, 9102, b"x" * 1800231
 
-Alternatively wrap the handler to log entry, post-lock, post-dumps and post-write timestamps, and read which span holds the 19 s. **The deliverable of this step is knowing which line blocks** — a stack, not a guess.
+def serve():
+    srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", PORT)); srv.listen(8)
+    while True:
+        conn, _ = srv.accept()
+        conn.recv(64); conn.sendall(BODY)
+        conn.shutdown(socket.SHUT_WR); conn.close()
 
-- [ ] **Step 2: Only once the blocking line is known, write the failing test and the fix**
-
-The test must reproduce the mechanism found in Step 1, not the one guessed here. If — and only if — Step 1 shows a reader waiting on `_cache_lock`, the sketch in Steps 3-6 applies; if it shows something else (a socket write blocking, a timeout in an unrelated thread starving the GIL, a handler-level timeout), discard that sketch and design against what was measured. **Report the finding before implementing.**
-
-- [ ] **Step 3: Write the failing test**
-
-```python
-# server/tests/test_ais_cache_read.py
-"""A reader must never wait on the whole of a poll.
-
-Measured 2026-08-19: two consecutive /api/ais-cache requests failed after ~19s while later
-ones took 0.03s. A dashboard that hangs for 19 seconds whenever the feed happens to be
-writing is not a dashboard.
-"""
-import threading
-import time
-
-from stt_proxy import ais
-
-
-def test_a_snapshot_is_available_while_a_long_write_is_in_progress(monkeypatch):
-    ais.reset_for_test()
-    for i in range(200):
-        ais.record({"mmsi": str(300000000 + i), "name": f"SHIP {i}"}, source="test")
-
-    stop = threading.Event()
-
-    def writer():
-        # Simulates the poll: many records, back to back, as poll_once does.
-        while not stop.is_set():
-            for i in range(200):
-                ais.record({"mmsi": str(300000000 + i), "name": f"SHIP {i}"}, source="test")
-
-    thread = threading.Thread(target=writer, daemon=True)
-    thread.start()
+threading.Thread(target=serve, daemon=True).start(); time.sleep(0.5)
+for i in range(16):
+    t = time.time(); s = socket.create_connection(("127.0.0.1", PORT), timeout=40)
+    s.sendall(b"go"); got, err = 0, None
     try:
-        worst = 0.0
-        for _ in range(20):
-            started = time.time()
-            entries = ais.snapshot()
-            worst = max(worst, time.time() - started)
-            assert len(entries) >= 200
-    finally:
-        stop.set()
-        thread.join(timeout=5)
-
-    assert worst < 1.0, f"a read waited {worst:.1f}s behind the writer"
+        while got < SIZE:
+            b = s.recv(65536)
+            if not b: break
+            got += len(b)
+    except Exception as exc:
+        err = type(exc).__name__
+    s.close(); print(f"{i}: got={got}/{SIZE} in {time.time()-t:.2f}s err={err}", flush=True)
+    time.sleep(0.3)
 ```
 
-- [ ] **Step 4: Run it and watch it fail**
+Earlier raw measurement against the live proxy, kept for the record:
+`docs/superpowers/plans/2026-08-19-ais-cache-stall-measurement.jsonl`.
 
-Run: `py -m pytest tests/test_ais_cache_read.py -v`
-Expected: FAIL — `ais.snapshot` and `ais.reset_for_test` do not exist yet.
-
-- [ ] **Step 5: Add a bounded snapshot accessor — ONLY if Step 1 showed lock starvation**
-
-The sketch below is a *candidate* fix for one specific cause: a reader competing for the write lock. It is written out because it is cheap and defensible on its own merits — a 1.8 MB read should never contend with the feed regardless — but it is **not yet known to fix the measured symptom**. If Step 1 found something else, this belongs in a separate piece of work, not here.
-
-`ais` keeps a published copy that the writer swaps in, so a read is a single attribute fetch and never waits for a poll.
-
-```python
-# server/stt_proxy/ais.py
-
-# The reader's copy. Rebound (never mutated) by _publish under the lock, so a reader takes
-# the reference and is done -- it cannot be starved by a poll writing 1500 vessels, which is
-# what made /api/ais-cache stall for ~19s at a time.
-_published: tuple[dict, ...] = ()
-
-
-def snapshot() -> list[dict]:
-    """Every cached vessel, as of the last completed write. Never blocks on the feed."""
-    return list(_published)
-
-
-def _publish() -> None:
-    """Republish the reader's copy. MUST be called with _cache_lock held."""
-    global _published
-    _published = tuple(_vessel_cache.values())
-```
-
-Call `_publish()` at the end of `record()` and `set_in_scope()`, inside the existing `_cache_lock` block. Add `reset_for_test()` clearing `_vessel_cache`, `_published` and the name index.
-
-- [ ] **Step 6: Point the endpoint at it**
-
-```python
-# server/whisper-proxy.py, replacing the _cache_lock block in the /api/ais-cache handler
-        if self.path == "/api/ais-cache":
-            try:
-                # snapshot() reads a published copy and never waits for the feed thread.
-                data = json.dumps(ais.snapshot()).encode("utf-8")
-```
-
-- [ ] **Step 7: Run the tests**
-
-Run: `py -m pytest tests/test_ais_cache_read.py tests/test_aishub.py -v`
-Expected: PASS.
-
-- [ ] **Step 8: Verify against the running proxy**
-
-Restart the proxy from the panel, then run the probe for one full poll interval:
-
-```bash
-py -c "
-import urllib.request, time
-for i in range(30):
-    t=time.time()
-    with urllib.request.urlopen('http://127.0.0.1:9000/api/ais-cache', timeout=40) as r:
-        n=len(r.read())
-    print(f'{i}: {n} bytes in {time.time()-t:.2f}s'); time.sleep(10)"
-```
-
-Expected: every request under 1 s, including across an `[AISHub] N vessels` log line. Record the worst time in the commit message.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add server/stt_proxy/ais.py server/whisper-proxy.py server/tests/test_ais_cache_read.py
-git commit -m "Publish the vessel cache for readers, so a poll cannot stall the dashboard
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-```
+**Three hypotheses were measured and refuted before the cause was found.** They are recorded so
+nobody spends the time again: the AISHub poll holding `_cache_lock` (the poll count advanced
+once across 60 samples while failures ran at 53% throughout); a second proxy bound to port 9000
+(exactly one listener, pid 13676, one process); and anything connection-level (accepting
+connections is fine — it is the bytes that go missing, not the connect).
 
 ---
 
@@ -1276,5 +1231,5 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Conversations, Vessels and Settings all reachable and usable from a phone-width window.
 - Stopping the proxy leaves every data screen showing its last copy with a stale banner, never an empty table and never a hang.
 - No secret value appears in any response body, page source, or log.
-- `/api/ais-cache` stays under 1 s across an AISHub poll.
+- A `/api/ais-cache` fetch that the stack resets (measured: up to ~53% of reads, see Task 1) leaves the Vessels screen on its last snapshot within the fetch timeout, never hanging on it. The endpoint itself cannot be made reliable from this codebase.
 - The manual's commands have each been run as written.
