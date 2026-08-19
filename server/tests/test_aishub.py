@@ -470,3 +470,92 @@ def test_get_in_scope_returns_a_copy_of_the_set(monkeypatch):
     result.add("3")
 
     assert ais.get_in_scope() == {"1", "2"}
+
+
+# -- what the feed reports about itself -------------------------------------
+#
+# The poll loop used to count failures in a local variable and throw them away, so a feed that
+# had returned nothing for an hour was indistinguishable, from outside the process, from one
+# polling happily -- the dashboard could only show the age of the last SUCCESS and had to guess
+# what an old one meant. These record the state the control panel's lamp reads.
+
+@pytest.fixture(autouse=True)
+def _clean_feed_state():
+    aishub.reset_feed_state()
+    yield
+    aishub.reset_feed_state()
+
+
+def test_a_feed_that_has_never_polled_says_so():
+    status = aishub.feed_status()
+    assert status["last_ok_at"] is None
+    assert status["last_error"] is None
+    assert status["consecutive_failures"] == 0
+
+
+def test_a_successful_poll_is_recorded_with_what_it_saw():
+    aishub.poll_and_record("user", aishub.BBOX, fetch=lambda url: _envelope([SHIP]))
+    status = aishub.feed_status()
+    assert status["last_ok_at"] is not None
+    assert status["last_count"] == 1
+    assert status["consecutive_failures"] == 0
+
+
+def test_a_failed_poll_is_recorded_with_its_reason():
+    def _rate_limited(url):
+        return _envelope([], error=True)
+
+    aishub.poll_and_record("user", aishub.BBOX, fetch=_rate_limited)
+    status = aishub.feed_status()
+    assert status["consecutive_failures"] == 1
+    assert "ERROR" in status["last_error"]
+    assert status["last_error_at"] is not None
+
+
+def test_consecutive_failures_accumulate_so_a_long_outage_is_visible():
+    def _down(url):
+        raise aishub.AisHubError("fetch failed")
+
+    for _ in range(3):
+        aishub.poll_and_record("user", aishub.BBOX, fetch=_down)
+    assert aishub.feed_status()["consecutive_failures"] == 3
+
+
+def test_a_recovery_clears_the_failure_run_but_keeps_the_last_error_readable():
+    """The lamp goes green immediately; what went wrong stays on the record."""
+    aishub.poll_and_record("user", aishub.BBOX,
+                           fetch=lambda url: (_ for _ in ()).throw(aishub.AisHubError("boom")))
+    aishub.poll_and_record("user", aishub.BBOX, fetch=lambda url: _envelope([SHIP]))
+
+    status = aishub.feed_status()
+    assert status["consecutive_failures"] == 0
+    assert status["last_error"] == "boom"
+    assert status["last_ok_at"] >= status["last_error_at"]
+
+
+def test_an_unexpected_exception_counts_as_a_failure_rather_than_escaping():
+    """poll_and_record runs on a daemon thread with nothing above it to catch anything. An
+    error it does not recognise must still leave the feed marked down, not kill the thread."""
+    def _explode(url):
+        raise RuntimeError("something nobody predicted")
+
+    aishub.poll_and_record("user", aishub.BBOX, fetch=_explode)
+    status = aishub.feed_status()
+    assert status["consecutive_failures"] == 1
+    assert "something nobody predicted" in status["last_error"]
+
+
+def test_the_poll_interval_travels_with_the_status():
+    """The dashboard decides "overdue" from this, so it must not hardcode 900."""
+    assert aishub.feed_status()["poll_sec"] == aishub.POLL_SEC
+
+
+def test_the_username_is_scrubbed_out_of_an_error_before_it_can_be_reported():
+    """The username is the API key and feed_status() crosses a network to a browser. urllib
+    decides the wording of its own exceptions, so the key is removed here rather than trusted
+    not to appear."""
+    def _leaky(url):
+        raise aishub.AisHubError("fetch failed: HTTP 403 for ws.php?username=SECRETKEY")
+
+    aishub.poll_and_record("SECRETKEY", aishub.BBOX, fetch=_leaky)
+    assert "SECRETKEY" not in aishub.feed_status()["last_error"]

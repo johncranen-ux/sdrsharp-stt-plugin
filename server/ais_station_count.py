@@ -200,6 +200,12 @@ class Coverage:
         self.rejected: dict[str, int] = defaultdict(int)
         self.polls = 0
         self.failures = 0
+        # The outcome of the MOST RECENT poll, which the running totals above cannot express:
+        # a station that failed once an hour ago and has answered ever since carries the same
+        # non-zero `failures` as one that is unreachable right now. None until the first poll,
+        # because "never asked" is a third state and the dashboard shows an unlit lamp for it.
+        self.last_poll_ok: bool | None = None
+        self.last_poll_at: datetime | None = None
         self.best_toward_maas = 0.0
         self._lock = threading.Lock()
 
@@ -213,10 +219,16 @@ class Coverage:
         except Exception as exc:
             with self._lock:
                 self.failures += 1
+                # Timestamped even in failure: "last tried at 10:04, no answer" is what tells
+                # the watchkeeper how long the station has been unreachable.
+                self.last_poll_ok = False
+                self.last_poll_at = datetime.now(timezone.utc)
             return f"{type(exc).__name__}: {exc}"
 
         with self._lock:
             self.polls += 1
+            self.last_poll_ok = True
+            self.last_poll_at = datetime.now(timezone.utc)
             for ship in ships:
                 lat, lon = ship.get("lat"), ship.get("lon")
                 if not lat or not lon:
@@ -262,6 +274,9 @@ class Coverage:
             return {
                 "polls": self.polls,
                 "poll_failures": self.failures,
+                "last_poll_ok": self.last_poll_ok,
+                "last_poll_at": (self.last_poll_at.isoformat(timespec="seconds")
+                                 if self.last_poll_at else None),
                 "max_km_by_sector": {SECTORS[k]: round(v, 2)
                                      for k, v in sorted(self.max_km.items())},
                 "max_detail_by_sector": {SECTORS[k]: v

@@ -4064,7 +4064,13 @@ def test_status_payload_carries_no_secret():
     field is a deliberate act -- one os.environ.get too many would publish an API key."""
     assert set(proxy._status_payload()) == {
         "stt_backend", "ais_source", "ais_cache_size", "ais_last_poll_at",
-        "conversations", "last_chunk_at", "started_at", "now",
+        "conversations", "last_chunk_at", "started_at", "now", "aishub",
+    }
+    # Pinned one level down too: "aishub" is a nested dict, so a new field inside it would
+    # otherwise slip past the set comparison above -- which is the whole point of this test.
+    assert set(proxy._status_payload()["aishub"]) == {
+        "last_ok_at", "last_error_at", "last_error", "last_count",
+        "consecutive_failures", "poll_sec",
     }
 
 

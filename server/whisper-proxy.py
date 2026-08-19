@@ -302,6 +302,12 @@ def _status_payload() -> dict:
         "ais_source": os.environ.get("AIS_SOURCE", "aishub").strip().lower(),
         "ais_cache_size": cache_size,
         "ais_last_poll_at": last_poll.timestamp() if last_poll else None,
+        # Whether the vessel feed is actually alive, which the age above cannot say on its
+        # own: a poll that has not succeeded for an hour and one that succeeds every fifteen
+        # minutes both look like "an old timestamp" until you know what the interval is and
+        # whether the last attempt failed. The username is scrubbed from `last_error` inside
+        # aishub before it can reach here.
+        "aishub": aishub.feed_status(),
         "conversations": stored,
         "last_chunk_at": _last_chunk_at,
         "started_at": _STARTED_AT,

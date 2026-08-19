@@ -273,28 +273,111 @@ def poll_once(username: str, bbox, fetch=None) -> int:
     return len(to_record)
 
 
+# -- what the feed can be asked about itself ---------------------------------
+#
+# The poll loop used to keep its failure count in a local variable, which meant the only thing
+# anything outside this thread could learn was the age of the last SUCCESS -- and an old
+# success cannot distinguish "polling normally, the box is just slow" from "every poll has
+# been refused for an hour". The control panel needs the difference to light a lamp, so the
+# loop's state lives here instead. Read under the lock; the writer is the poll thread and the
+# reader is whichever HTTP thread is serving /api/status.
+
+_feed_lock = threading.Lock()
+_last_ok_at: float | None = None
+_last_error_at: float | None = None
+_last_error: str | None = None
+_last_count: int | None = None
+_consecutive_failures = 0
+
+
+def reset_feed_state() -> None:
+    """Back to "never polled". For tests; nothing in the running proxy calls this."""
+    global _last_ok_at, _last_error_at, _last_error, _last_count, _consecutive_failures
+    with _feed_lock:
+        _last_ok_at = _last_error_at = _last_error = _last_count = None
+        _consecutive_failures = 0
+
+
+def feed_status() -> dict:
+    """Enough to say whether the vessel feed is alive, and since when.
+
+    `last_error` survives a recovery on purpose: a lamp that has just gone green is exactly
+    when someone wants to know what it was doing red.
+    """
+    with _feed_lock:
+        return {
+            "last_ok_at": _last_ok_at,
+            "last_error_at": _last_error_at,
+            "last_error": _last_error,
+            "last_count": _last_count,
+            "consecutive_failures": _consecutive_failures,
+            # Travels with the status so the dashboard can work out what "overdue" means for
+            # this deployment rather than hardcoding the default interval.
+            "poll_sec": POLL_SEC,
+        }
+
+
+def _record_success(count: int) -> None:
+    global _last_ok_at, _last_count, _consecutive_failures
+    with _feed_lock:
+        recovered = _consecutive_failures
+        _last_ok_at = time.time()
+        _last_count = count
+        _consecutive_failures = 0
+    if recovered:
+        print(f"[AISHub] recovered after {recovered} failed poll(s)", flush=True)
+    print(f"[AISHub] {count} vessels", flush=True)
+
+
+def _redact(reason: str, username: str) -> str:
+    """The AISHub username IS the API key, and this string ends up in a browser.
+
+    Nothing here deliberately puts the URL in an error message, but the message comes from
+    whatever urllib raised, and this is the one place between that exception and the network
+    where the key can be taken back out. Cheaper than auditing every exception type urllib
+    might grow.
+    """
+    return reason.replace(username, "***") if username else reason
+
+
+def _record_failure(reason: str, expected: bool) -> None:
+    global _last_error_at, _last_error, _consecutive_failures
+    with _feed_lock:
+        _last_error_at = time.time()
+        _last_error = reason
+        _consecutive_failures += 1
+        failures = _consecutive_failures
+    if not expected:
+        print(f"[AISHub] unexpected poll error: {reason}", flush=True)
+    # Rate-limited every time would be a configuration bug, so say so early and then stop
+    # repeating it; a long outage should not drown the console the way the aisstream silence
+    # warning did. The lamp carries the outage now, so the console does not have to.
+    elif failures <= 3 or failures % 20 == 0:
+        print(f"[AISHub] poll failed ({failures}): {reason}. "
+              f"Cache and scope left untouched.", flush=True)
+
+
+def poll_and_record(username: str, bbox, fetch=None) -> None:
+    """One poll and its consequences for the feed's own state. Never raises.
+
+    Split out of `poll_loop` so the outcome recording can be tested without an infinite loop.
+    Every exception is caught here because the caller is a daemon thread with nothing above it:
+    an error that escaped would end polling silently and leave the cache frozen, which is the
+    failure aisstream spent five days demonstrating.
+    """
+    try:
+        _record_success(poll_once(username, bbox, fetch=fetch))
+    except AisHubError as exc:
+        _record_failure(_redact(str(exc), username), expected=True)
+    except Exception as exc:
+        _record_failure(_redact(f"{type(exc).__name__}: {exc}", username), expected=False)
+
+
 def poll_loop(username: str) -> None:
     """Poll forever. Daemon-thread entry point; never raises."""
     print(f"[AISHub] polling {BBOX} every {POLL_SEC}s", flush=True)
-    failures = 0
     while True:
-        try:
-            count = poll_once(username, BBOX)
-            if failures:
-                print(f"[AISHub] recovered after {failures} failed poll(s)", flush=True)
-            failures = 0
-            print(f"[AISHub] {count} vessels", flush=True)
-        except AisHubError as exc:
-            failures += 1
-            # Rate-limited every time would be a configuration bug, so say so early and then
-            # stop repeating it; a long outage should not drown the console the way the
-            # aisstream silence warning did.
-            if failures <= 3 or failures % 20 == 0:
-                print(f"[AISHub] poll failed ({failures}): {exc}. "
-                      f"Cache and scope left untouched.", flush=True)
-        except Exception as exc:
-            failures += 1
-            print(f"[AISHub] unexpected poll error: {exc}", flush=True)
+        poll_and_record(username, BBOX)
         time.sleep(POLL_SEC)
 
 
