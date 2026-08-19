@@ -387,6 +387,183 @@ body {
 .path-bad .path-value { color: var(--port); }
 .path-value { overflow-wrap: anywhere; }
 
+/* -- conversations -------------------------------------------------------- */
+/*
+ * What the operator judges here is whether the identification was right, and the one thing
+ * this screen must never do is quietly lose evidence: a stale snapshot stays on screen with
+ * its age said out loud (see #conv-stale), and a fetch failure never masquerades as "there is
+ * nothing to show" (see #conv-fetch-error / #conv-empty). Live-match state is said in words
+ * for the same reason the annunciator lamps are -- colour alone is not a claim a screen reader
+ * or a colour-blind operator can act on.
+ */
+
+.conv-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--step) * 3);
+  align-items: end;
+  margin-bottom: calc(var(--step) * 2);
+}
+.conv-filters .field-inline input,
+.conv-filters .field-inline select { min-width: 160px; }
+
+/* Wide content scrolls inside its own box; the page itself must never gain a horizontal
+ * scrollbar on a phone. */
+.conv-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--sea-700);
+  border-radius: var(--radius);
+}
+
+.conv-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.conv-table thead th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fog);
+  font-weight: 400;
+  padding: var(--step) calc(var(--step) * 1.5);
+  background: var(--sea-850);
+  border-bottom: 1px solid var(--sea-700);
+  white-space: nowrap;
+}
+.conv-row { cursor: pointer; border-bottom: 1px solid var(--sea-800); }
+.conv-row:hover { background: var(--sea-800); }
+.conv-row-selected { background: var(--sea-700); }
+.conv-row-selected:hover { background: var(--sea-700); }
+.conv-cell {
+  padding: calc(var(--step) * 1.2) calc(var(--step) * 1.5);
+  vertical-align: top;
+}
+.conv-mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.conv-num { text-align: right; }
+.conv-row-unidentified .conv-vessel { color: var(--fog); }
+
+.conv-empty { color: var(--fog); padding: calc(var(--step) * 2) 0; }
+
+.conv-pager {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  margin: calc(var(--step) * 2) 0 calc(var(--step) * 4);
+}
+.conv-pager .legend { margin: 0; }
+
+/* -- conversation detail --------------------------------------------------- */
+
+.conv-detail { margin-bottom: calc(var(--step) * 4); }
+.conv-detail-head {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  margin-bottom: var(--step);
+}
+.conv-detail-title { font-size: 17px; font-weight: 600; margin: 0; }
+#conv-detail-close { margin-left: auto; }
+
+.conv-detail-meta {
+  color: var(--fog);
+  font-size: 13px;
+  margin: 0 0 calc(var(--step) * 2);
+}
+
+.conv-detail-body h3 {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fog);
+  margin: calc(var(--step) * 3) 0 var(--step);
+}
+.conv-detail-body h3:first-child { margin-top: 0; }
+
+.turn-list { list-style: none; margin: 0; padding: 0; }
+.turn {
+  padding: calc(var(--step) * 1.5) 0;
+  border-bottom: 1px solid var(--sea-800);
+}
+.turn:last-child { border-bottom: 0; }
+.turn-time {
+  display: block;
+  color: var(--fog);
+  font-size: 12.5px;
+  margin-bottom: 4px;
+}
+.turn-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+}
+.turn-step { max-width: 100%; overflow-wrap: anywhere; }
+.turn-step-label {
+  display: inline;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  margin-right: 4px;
+}
+.turn-step-changed { color: var(--dial); }
+.turn-step-unchanged { color: var(--fog); font-size: 13px; }
+.turn-arrow { color: var(--sea-600); }
+
+/* Live-match: words carry the meaning, colour only underlines it. */
+.turn-match {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+.turn-match-ais-confirmed { color: var(--starboard); }
+.turn-match-heard-only { color: var(--dial); }
+
+.cand-list { list-style: none; margin: 0; padding: 0; }
+.cand-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--sea-800);
+  font-size: 13px;
+}
+.cand-item:last-child { border-bottom: 0; }
+.cand-name { font-weight: 600; }
+.cand-mmsi { color: var(--fog); }
+.cand-meta { color: var(--fog); overflow-wrap: anywhere; }
+.cand-pass {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fog);
+}
+
+/* The framing IS the safety feature here: without it a below-cutoff guess reads as an
+ * identification, which is exactly the misreading that shipped once before. */
+.suggest-block { margin-top: calc(var(--step) * 3); }
+.suggest-heading { color: var(--dial) !important; }
+.suggest-list { list-style: none; margin: var(--step) 0 0; padding: 0; }
+.suggest-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+.suggest-score {
+  color: var(--fog);
+  min-width: 2.5em;
+}
+.suggest-heard { color: var(--fog); overflow-wrap: anywhere; }
+
+.conv-note { color: var(--fog); font-size: 13px; margin: 0; }
+
 /* -- logs --------------------------------------------------------------- */
 
 .log-controls {
@@ -503,6 +680,12 @@ body {
   .path-key { min-width: 0; }
   .path-item { flex-wrap: wrap; }
   .log { height: 50vh; }
+  .conv-filters { gap: var(--step) calc(var(--step) * 2); }
+  .conv-filters .field-inline { width: 100%; }
+  .conv-filters .field-inline input,
+  .conv-filters .field-inline select { min-width: 0; width: 100%; }
+  .conv-pager { flex-wrap: wrap; }
+  .cand-pass { margin-left: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

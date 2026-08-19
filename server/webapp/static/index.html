@@ -42,6 +42,7 @@ py -m webapp.set_password</pre>
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab" role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
+      <button class="tab" role="tab" data-tab="conversations" aria-selected="false">Conversations</button>
       <button class="tab" role="tab" data-tab="logs" aria-selected="false">Logs</button>
     </nav>
     <button id="signout" class="button button-quiet" type="button">Sign out</button>
@@ -81,6 +82,59 @@ py -m webapp.set_password</pre>
     <section class="paths">
       <div class="section-head"><h2 class="legend">Paths on this machine</h2></div>
       <ul id="paths" class="path-list"></ul>
+    </section>
+  </main>
+
+  <main id="conversations" class="view" hidden>
+    <div class="conv-filters">
+      <label class="field field-inline">
+        <span class="legend">Identified</span>
+        <select id="conv-identified">
+          <option value="">All</option>
+          <option value="true">Identified</option>
+          <option value="false">Unidentified</option>
+        </select>
+      </label>
+      <label class="field field-inline">
+        <span class="legend">Channel</span>
+        <input id="conv-channel" type="search" placeholder="e.g. CH01">
+      </label>
+      <label class="field field-inline">
+        <span class="legend">Text</span>
+        <input id="conv-text" type="search" placeholder="vessel, transcript…">
+      </label>
+    </div>
+
+    <!-- "there are no conversations" and "we could not ask" are different claims -- see
+         showConvSnapshot / showConvFetchError in app.js. -->
+    <p id="conv-stale" class="note note-port" hidden></p>
+    <p id="conv-fetch-error" class="note note-port" hidden></p>
+
+    <div class="conv-table-wrap">
+      <table class="conv-table">
+        <thead>
+          <tr>
+            <th>Start</th><th>Channel</th><th>Vessel</th><th>Type</th>
+            <th>Destination</th><th>Confidence</th><th>Turns</th><th>Candidates</th>
+          </tr>
+        </thead>
+        <tbody id="conv-rows"></tbody>
+      </table>
+    </div>
+    <p id="conv-empty" class="conv-empty" hidden>There are no conversations that match these filters.</p>
+
+    <div class="conv-pager">
+      <button id="conv-prev" class="button button-quiet" type="button">Previous</button>
+      <span id="conv-page-note" class="legend"></span>
+      <button id="conv-next" class="button button-quiet" type="button">Next</button>
+    </div>
+
+    <section id="conv-detail" class="conv-detail card" hidden aria-label="Conversation detail">
+      <div class="conv-detail-head">
+        <h2 id="conv-detail-title" class="conv-detail-title">Conversation</h2>
+        <button id="conv-detail-close" class="button button-quiet" type="button">Close</button>
+      </div>
+      <div id="conv-detail-body"></div>
     </section>
   </main>
 

@@ -510,6 +510,327 @@ function updateDialogMeta() {
     : process.state);
 }
 
+/* -- conversations --------------------------------------------------------- */
+/*
+ * The list is polled and filtered/paged, so it follows the same shape as `logStream`: a
+ * generation counter tags every request, and an answer for a filter or page that is no longer
+ * current is discarded rather than painted -- otherwise a slow response to an old filter can
+ * land after a fast response to a new one and show the wrong page.
+ *
+ * Rows are a Map keyed by id, built once and updated in place -- exactly `cardViews` and
+ * `feedViews` -- so a poll never destroys the row the reader has open or a text selection
+ * mid-copy. Re-appending an existing row moves it to the right position without rebuilding it.
+ */
+const convRows = new Map();
+const convState = {
+  generation: 0,
+  offset: 0,
+  limit: 50,
+  total: 0,
+  rows: new Map(),       // id -> last summary row seen, for the detail header
+  selectedId: null,
+  detailGeneration: 0,
+};
+let convFilterTimer = null;
+
+function convParams() {
+  const params = new URLSearchParams();
+  const identified = $("conv-identified").value;
+  if (identified) params.set("identified", identified);
+  const channel = $("conv-channel").value.trim();
+  if (channel) params.set("channel", channel);
+  const text = $("conv-text").value.trim();
+  if (text) params.set("text", text);
+  params.set("limit", String(convState.limit));
+  params.set("offset", String(convState.offset));
+  return params;
+}
+
+function buildConvRow() {
+  const tr = element("tr", "conv-row");
+  tr.tabIndex = 0;
+  const cells = {};
+  for (const key of ["start", "channel", "vessel", "type", "destination",
+                      "confidence", "turns", "candidates"]) {
+    cells[key] = element("td", "conv-cell");
+    tr.append(cells[key]);
+  }
+  cells.start.classList.add("conv-mono");
+  cells.channel.classList.add("conv-mono");
+  cells.vessel.classList.add("conv-vessel");
+  cells.confidence.classList.add("conv-mono");
+  cells.turns.classList.add("conv-mono", "conv-num");
+  cells.candidates.classList.add("conv-mono", "conv-num");
+  return { root: tr, cells };
+}
+
+function updateConvRow(view, row) {
+  view.root.classList.toggle("conv-row-selected", row.id === convState.selectedId);
+  view.root.classList.toggle("conv-row-unidentified", !row.identified);
+  setText(view.cells.start, row.start || "—");
+  setText(view.cells.channel, row.channel || "—");
+  setText(view.cells.vessel, row.label || "unidentified");
+  setText(view.cells.type, row.type || "—");
+  setText(view.cells.destination, row.destination || "—");
+  setText(view.cells.confidence, row.confidence || "—");
+  setText(view.cells.turns, String(row.turn_count));
+  setText(view.cells.candidates, String(row.candidate_count));
+}
+
+function showConvSnapshot(snapshot) {
+  const banner = $("conv-stale");
+  if (snapshot && snapshot.stale) {
+    banner.textContent =
+      `showing the last copy, ${elapsed(snapshot.age_sec)} old — ${snapshot.error || "unknown error"}`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+// A failed request to OUR OWN api() (network down, webapp itself unreachable) is a different
+// claim from the server successfully answering "here are zero rows" -- see requirement 3. The
+// stale-snapshot case above is handled server-side and still returns 200 with rows, so this
+// path only fires when the panel itself could not be asked at all.
+function showConvFetchError(message) {
+  const banner = $("conv-fetch-error");
+  banner.textContent = message ? `could not reach the panel: ${message}` : "";
+  banner.hidden = !message;
+}
+
+function renderConvRows(rows) {
+  const tbody = $("conv-rows");
+  const seen = new Set();
+  convState.rows.clear();
+  for (const row of rows) {
+    convState.rows.set(row.id, row);
+    let view = convRows.get(row.id);
+    if (!view) {
+      view = buildConvRow();
+      view.root.addEventListener("click", () => selectConversation(row.id));
+      view.root.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectConversation(row.id);
+        }
+      });
+      convRows.set(row.id, view);
+    }
+    updateConvRow(view, row);
+    tbody.append(view.root);   // also reorders an existing row into the current page's order
+    seen.add(row.id);
+  }
+  for (const [id, view] of convRows) {
+    if (!seen.has(id)) {
+      view.root.remove();
+      convRows.delete(id);
+    }
+  }
+  // Only a genuine "the server answered and there were none" reaches here -- a failed fetch
+  // returns before this function is called, so the previous rows (or nothing, on first load)
+  // stay exactly as they were rather than being relabelled as "empty".
+  $("conv-empty").hidden = rows.length !== 0;
+}
+
+function renderConvPager() {
+  const note = $("conv-page-note");
+  if (convState.total === 0) {
+    setText(note, "");
+  } else {
+    const from = convState.offset + 1;
+    const to = Math.min(convState.offset + convState.limit, convState.total);
+    setText(note, `${from}–${to} of ${convState.total}`);
+  }
+  $("conv-prev").disabled = convState.offset <= 0;
+  $("conv-next").disabled = convState.offset + convState.limit >= convState.total;
+}
+
+async function refreshConversations() {
+  const generation = ++convState.generation;
+  let body;
+  try {
+    body = await api(`/api/conversations?${convParams().toString()}`);
+  } catch (error) {
+    if (generation !== convState.generation) return;   // a newer request has already landed
+    showConvFetchError(error.message);
+    return;
+  }
+  if (generation !== convState.generation) return;
+  showConvFetchError(null);
+  showConvSnapshot(body.snapshot);
+  convState.total = body.total;
+  convState.offset = body.offset;
+  renderConvRows(body.rows);
+  renderConvPager();
+}
+
+function convFiltersChanged(immediate) {
+  convState.offset = 0;
+  if (convFilterTimer) clearTimeout(convFilterTimer);
+  if (immediate) {
+    refreshConversations().catch(() => {});
+  } else {
+    // Free-text and channel filters fire a network request per keystroke; debounced so typing
+    // "condor" does not send six of them.
+    convFilterTimer = setTimeout(() => refreshConversations().catch(() => {}), 300);
+  }
+}
+
+/* -- conversation detail --------------------------------------------------- */
+
+function convLabel(row) {
+  if (!row) return "Conversation";
+  return row.label || (row.identified ? "identified" : "unidentified");
+}
+
+function chainStep(label, value, changed) {
+  const span = element("span", `turn-step${changed ? " turn-step-changed" : ""}`);
+  span.append(element("span", "legend turn-step-label", label));
+  span.append(document.createTextNode(value === null || value === undefined ? "—" : value));
+  return span;
+}
+
+function passLabel(candidate) {
+  if (candidate.via_callsign) return "callsign";
+  if (candidate.via_live_match) return "live pass";
+  if (candidate.via_partial_callsign) return "partial callsign";
+  return "name hint";
+}
+
+function renderTurn(turn) {
+  const item = element("li", "turn");
+  item.append(element("span", "turn-time", turn.time || "—"));
+
+  const chain = element("div", "turn-chain");
+  chain.append(chainStep("raw", turn.raw, false));
+  chain.append(element("span", "turn-arrow", "→"));
+  chain.append(chainStep("text", turn.text, turn.changed_by_regex));
+  chain.append(element("span", "turn-arrow", "→"));
+  // conv: null means the correction pass changed nothing (or never ran) -- the store cannot
+  // tell those apart, so this says only what is known, and never invents a third layer of
+  // text that was never produced.
+  if (turn.conv === null || turn.conv === undefined) {
+    chain.append(element("span", "turn-step turn-step-unchanged", "conv: unchanged"));
+  } else {
+    chain.append(chainStep("conv", turn.conv, turn.changed_by_llm));
+  }
+  item.append(chain);
+
+  // Words carry the claim; the colour in app.css only underlines it.
+  if (turn.live_match === "ais-confirmed") {
+    item.append(element("span", "turn-match turn-match-ais-confirmed",
+      `AIS-confirmed: ${turn.live_vessel}`));
+  } else if (turn.live_match === "heard-only") {
+    item.append(element("span", "turn-match turn-match-heard-only",
+      `Heard only: “${turn.live_vessel}” — no such ship in the AIS cache`));
+  }
+  return item;
+}
+
+function renderResolverCandidates(list) {
+  if (!list || !list.length) {
+    return element("p", "conv-note", "No AIS vessels were offered to the resolver.");
+  }
+  const ul = element("ul", "cand-list");
+  for (const c of list) {
+    const li = element("li", "cand-item");
+    li.append(element("span", "cand-name", c.name || "?"));
+    li.append(element("span", "cand-mmsi", c.mmsi || "—"));
+    const bits = [];
+    if (c.latitude !== null && c.latitude !== undefined
+        && c.longitude !== null && c.longitude !== undefined) {
+      bits.push(`${Number(c.latitude).toFixed(3)}, ${Number(c.longitude).toFixed(3)}`);
+    }
+    if (c.draught !== null && c.draught !== undefined) bits.push(`draught ${c.draught} m`);
+    if (c.destination) bits.push(`dest ${c.destination}`);
+    if (c.last_seen) bits.push(`seen ${c.last_seen}`);
+    li.append(element("span", "cand-meta", bits.join(" · ")));
+    li.append(element("span", "cand-pass", passLabel(c)));
+    ul.append(li);
+  }
+  return ul;
+}
+
+// The heading text is not decoration -- without it a below-cutoff guess reads as an
+// identification, which is the exact misreading this framing exists to prevent.
+function renderSuggestions(list) {
+  if (!list || !list.length) return null;
+  const wrap = element("div", "suggest-block");
+  wrap.append(element("p", "legend suggest-heading", "Scored below the identification cutoff"));
+  const ol = element("ol", "suggest-list");
+  for (const s of list) {
+    const li = element("li", "suggest-item");
+    li.append(element("span", "cand-name", s.name || "?"));
+    li.append(element("span", "cand-mmsi", s.mmsi || "—"));
+    li.append(element("span", "suggest-score",
+      s.score === null || s.score === undefined ? "—" : String(Math.round(s.score))));
+    if (s.heard) li.append(element("span", "suggest-heard", `heard “${s.heard}”`));
+    ol.append(li);
+  }
+  wrap.append(ol);
+  return wrap;
+}
+
+function renderConvDetail(detail) {
+  // Prefer the list row's label (it already carries the "shared name -> show the MMSI too"
+  // rule from conversations_view.summarise); fall back to the detail record's own fields for
+  // a conversation that scrolled off the current page while its detail was loading.
+  const summary = convState.rows.get(detail.id);
+  setText($("conv-detail-title"), summary ? convLabel(summary)
+    : (detail.vessel || (detail.identified ? "identified" : "unidentified")));
+
+  const body = $("conv-detail-body");
+  body.replaceChildren();   // fetched once per selection, not on a poll -- see the API note
+
+  const meta = element("p", "conv-detail-meta");
+  const metaBits = [detail.channel, detail.start, detail.end,
+                     detail.confidence ? `confidence ${detail.confidence}` : null]
+    .filter((bit) => bit);
+  setText(meta, metaBits.join(" · ") || "—");
+  body.append(meta);
+
+  body.append(element("h3", null, "Turns"));
+  const turns = detail.turns || [];
+  if (turns.length) {
+    const list = element("ol", "turn-list");
+    for (const turn of turns) list.append(renderTurn(turn));
+    body.append(list);
+  } else {
+    body.append(element("p", "conv-note", "No turns recorded."));
+  }
+
+  body.append(element("h3", null, "Resolver candidates"));
+  body.append(renderResolverCandidates(detail.resolver_candidates));
+
+  const suggestions = renderSuggestions(detail.suggestions);
+  if (suggestions) body.append(suggestions);
+}
+
+function showConvDetail(open) {
+  $("conv-detail").hidden = !open;
+}
+
+async function selectConversation(id) {
+  convState.selectedId = id;
+  for (const [rowId, view] of convRows) {
+    view.root.classList.toggle("conv-row-selected", rowId === id);
+  }
+  showConvDetail(true);
+  setText($("conv-detail-title"), convLabel(convState.rows.get(id)));
+  const body = $("conv-detail-body");
+  body.replaceChildren(element("p", "conv-note", "Loading…"));
+
+  const generation = ++convState.detailGeneration;
+  try {
+    const detail = await api(`/api/conversations/${encodeURIComponent(id)}`);
+    if (generation !== convState.detailGeneration) return;   // a later selection replaced this
+    renderConvDetail(detail);
+  } catch (error) {
+    if (generation !== convState.detailGeneration) return;
+    body.replaceChildren(element("p", "conv-note note-port", `could not load: ${error.message}`));
+  }
+}
+
 /* -- views and polling ---------------------------------------------------- */
 
 function showBanner(message) {
@@ -521,6 +842,7 @@ function showBanner(message) {
 function showTab(name) {
   state.tab = name;
   $("dashboard").hidden = name !== "dashboard";
+  $("conversations").hidden = name !== "conversations";
   $("logs").hidden = name !== "logs";
   for (const tab of document.querySelectorAll(".tab")) {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
@@ -531,14 +853,18 @@ function showTab(name) {
 function tick() {
   if (document.hidden) return;
   if (state.tab === "dashboard") refreshDashboard().catch(() => {});
+  else if (state.tab === "conversations") refreshConversations().catch(() => {});
   else tabLog.pull().catch(() => {});
 }
 
 function startPolling() {
   stopPolling();
   // The dashboard is cheap and answers "is it still running?"; the log is the faster of the
-  // two because it is being read while something is happening.
+  // two because it is being read while something is happening. Conversations sit between them:
+  // the webapp itself only refreshes its copy every 15s (CONVERSATIONS_TTL_SEC), so polling
+  // faster than that would just re-fetch the same cached answer.
   state.timers.push(setInterval(() => { if (state.tab === "dashboard") tick(); }, 3000));
+  state.timers.push(setInterval(() => { if (state.tab === "conversations") tick(); }, 5000));
   state.timers.push(setInterval(() => { if (state.tab === "logs") tick(); }, 2000));
 }
 
@@ -606,6 +932,24 @@ $("log-filter").addEventListener("input", () => tabLog.paint());
 $("dialog-filter").addEventListener("input", () => popupLog.paint());
 
 $("lamp-test").addEventListener("click", lampTest);
+
+$("conv-identified").addEventListener("change", () => convFiltersChanged(true));
+$("conv-channel").addEventListener("input", () => convFiltersChanged(false));
+$("conv-text").addEventListener("input", () => convFiltersChanged(false));
+$("conv-prev").addEventListener("click", () => {
+  convState.offset = Math.max(0, convState.offset - convState.limit);
+  refreshConversations().catch(() => {});
+});
+$("conv-next").addEventListener("click", () => {
+  convState.offset += convState.limit;
+  refreshConversations().catch(() => {});
+});
+$("conv-detail-close").addEventListener("click", () => {
+  convState.selectedId = null;
+  convState.detailGeneration += 1;   // abandon whatever detail fetch might still be in flight
+  for (const view of convRows.values()) view.root.classList.remove("conv-row-selected");
+  showConvDetail(false);
+});
 
 $("dialog-close").addEventListener("click", () => dialog.close());
 // Escape closes a <dialog> without going through the button, so the polling is stopped on the
