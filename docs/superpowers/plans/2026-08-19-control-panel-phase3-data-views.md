@@ -81,9 +81,9 @@ Alternatively wrap the handler to log entry, post-lock, post-dumps and post-writ
 
 - [ ] **Step 2: Only once the blocking line is known, write the failing test and the fix**
 
-The test must reproduce the mechanism found in Step 1, not the one guessed here. If — and only if — Step 1 shows a reader waiting on `_cache_lock`, the sketch in Steps 3–5 applies; if it shows something else (a socket write blocking, a timeout in an unrelated thread starving the GIL, a handler-level timeout), discard that sketch and design against what was measured. **Report the finding before implementing.**
+The test must reproduce the mechanism found in Step 1, not the one guessed here. If — and only if — Step 1 shows a reader waiting on `_cache_lock`, the sketch in Steps 3-6 applies; if it shows something else (a socket write blocking, a timeout in an unrelated thread starving the GIL, a handler-level timeout), discard that sketch and design against what was measured. **Report the finding before implementing.**
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 3: Write the failing test**
 
 ```python
 # server/tests/test_ais_cache_read.py
@@ -128,12 +128,12 @@ def test_a_snapshot_is_available_while_a_long_write_is_in_progress(monkeypatch):
     assert worst < 1.0, f"a read waited {worst:.1f}s behind the writer"
 ```
 
-- [ ] **Step 3: Run it and watch it fail**
+- [ ] **Step 4: Run it and watch it fail**
 
 Run: `py -m pytest tests/test_ais_cache_read.py -v`
 Expected: FAIL — `ais.snapshot` and `ais.reset_for_test` do not exist yet.
 
-- [ ] **Step 4: Add a bounded snapshot accessor — ONLY if Step 1 showed lock starvation**
+- [ ] **Step 5: Add a bounded snapshot accessor — ONLY if Step 1 showed lock starvation**
 
 The sketch below is a *candidate* fix for one specific cause: a reader competing for the write lock. It is written out because it is cheap and defensible on its own merits — a 1.8 MB read should never contend with the feed regardless — but it is **not yet known to fix the measured symptom**. If Step 1 found something else, this belongs in a separate piece of work, not here.
 
@@ -161,7 +161,7 @@ def _publish() -> None:
 
 Call `_publish()` at the end of `record()` and `set_in_scope()`, inside the existing `_cache_lock` block. Add `reset_for_test()` clearing `_vessel_cache`, `_published` and the name index.
 
-- [ ] **Step 5: Point the endpoint at it**
+- [ ] **Step 6: Point the endpoint at it**
 
 ```python
 # server/whisper-proxy.py, replacing the _cache_lock block in the /api/ais-cache handler
@@ -171,12 +171,12 @@ Call `_publish()` at the end of `record()` and `set_in_scope()`, inside the exis
                 data = json.dumps(ais.snapshot()).encode("utf-8")
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 7: Run the tests**
 
 Run: `py -m pytest tests/test_ais_cache_read.py tests/test_aishub.py -v`
 Expected: PASS.
 
-- [ ] **Step 7: Verify against the running proxy**
+- [ ] **Step 8: Verify against the running proxy**
 
 Restart the proxy from the panel, then run the probe for one full poll interval:
 
@@ -192,7 +192,7 @@ for i in range(30):
 
 Expected: every request under 1 s, including across an `[AISHub] N vessels` log line. Record the worst time in the commit message.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add server/stt_proxy/ais.py server/whisper-proxy.py server/tests/test_ais_cache_read.py
