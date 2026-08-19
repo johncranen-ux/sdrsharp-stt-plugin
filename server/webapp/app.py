@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from webapp import (config_store, conversations_view, credentials,
-                    health as health_module, logs, registry, vessels_view)
+                    health as health_module, logs, registry, settings_api, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
 from webapp.proxy_data import ProxyData
 from webapp.supervisor import ProcessState, Supervisor, SupervisorError
@@ -203,6 +203,23 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         records, _snap = data.conversations()
         entry["conversations"] = vessels_view.conversations_for(records, mmsi)
         return entry
+
+    @guarded.get("/api/settings")
+    def read_settings() -> dict:
+        return settings_api.form(values())
+
+    @mutating.post("/api/settings")
+    def write_settings(body: dict[str, str]) -> dict:
+        try:
+            applied = settings_api.apply(values(), body)
+        except settings_api.Invalid as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        # Only the keys that actually changed are written -- an untouched secret is never
+        # round-tripped through this call, and config_store.save's merge leaves every other
+        # stored value exactly as it was.
+        if applied.changed:
+            config_store.save(config_path, {key: applied.values[key] for key in applied.changed})
+        return {"changed": sorted(applied.changed), "restart_needed": sorted(applied.restart_needed)}
 
     app.include_router(open_routes)
     app.include_router(guarded)

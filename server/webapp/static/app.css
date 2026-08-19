@@ -621,6 +621,88 @@ body {
 }
 .vessel-conv-link:hover { color: var(--dial); }
 
+/* -- settings ------------------------------------------------------------- */
+/*
+ * A secret field never shows a value -- only a set/not-set marker -- so nothing here needs a
+ * "reveal" affordance, and the pending-clear state gets its own visible accent because Clear is
+ * staged, not immediate: the field must look different from an ordinary edit until Save is
+ * actually pressed.
+ */
+
+.settings-form { display: flex; flex-direction: column; gap: calc(var(--step) * 3); }
+.settings-group { margin: 0; }
+.settings-group-title { margin-bottom: calc(var(--step) * 2); }
+
+.settings-field { padding: calc(var(--step) * 1.5) 0; border-bottom: 1px solid var(--sea-800); }
+.settings-field:last-child { border-bottom: 0; }
+.settings-field-head { margin-bottom: 2px; }
+.settings-field-label { margin-bottom: 3px; }
+.settings-desc { margin: 0; color: var(--fog); font-size: 12.5px; max-width: 64ch; }
+
+.settings-field-pending-clear {
+  border-left: 2px solid var(--port);
+  padding-left: calc(var(--step) * 1.5);
+  margin-left: calc(var(--step) * -1.5 - 2px);
+}
+
+.settings-control {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: var(--step);
+  flex-wrap: wrap;
+}
+.settings-input, .settings-select {
+  padding: 8px 10px;
+  background: var(--sea-900);
+  border: 1px solid var(--sea-600);
+  border-radius: var(--radius);
+  color: var(--chart);
+  font: inherit;
+  min-width: 220px;
+  flex: 1 1 260px;
+}
+input[type="number"].settings-input { min-width: 100px; flex: 0 1 140px; }
+.settings-select { flex: 0 1 260px; }
+
+.settings-secret-status {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--sea-600);
+  color: var(--fog);
+}
+.settings-secret-status.is-set { color: var(--starboard); border-color: var(--starboard); }
+.settings-field-pending-clear .settings-secret-status { color: var(--port); border-color: var(--port); }
+
+.settings-mark { font-family: var(--mono); }
+.settings-mark-ok { color: var(--starboard); }
+.settings-mark-bad { color: var(--port); }
+
+.settings-actions {
+  display: flex;
+  gap: var(--step);
+  margin-top: calc(var(--step) * 2);
+  padding-top: calc(var(--step) * 2);
+  border-top: 1px solid var(--sea-700);
+}
+
+.settings-result { margin-top: calc(var(--step) * 3); }
+.settings-result-summary { margin: 0 0 var(--step); }
+.settings-result-error { color: var(--port); }
+.settings-restart-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--sea-800);
+}
+.settings-restart-row:last-child { border-bottom: 0; }
+.settings-restart-line { margin: 0; color: var(--fog); }
+
 /* -- logs --------------------------------------------------------------- */
 
 .log-controls {
@@ -748,6 +830,18 @@ body {
   .conv-pager { flex-wrap: wrap; }
   .cand-pass { margin-left: 0; }
   .vessel-fields { grid-template-columns: 1fr 1fr; }
+  .settings-control { flex-direction: column; align-items: stretch; }
+  /* flex: none overrides the desktop rule's flex-basis (260px) -- in a row-direction flex
+   * container that sets a WIDTH, but flex-direction just became column here, where the same
+   * basis sets a HEIGHT instead, stretching every text/password input to 260px tall. */
+  .settings-input, .settings-select { min-width: 0; width: 100%; flex: none; }
+  /* Same fix, same reason, for the higher-specificity number-input rule above (min-width:100px;
+   * flex: 0 1 140px) -- without repeating the selector here it stays undefeated by the rule
+   * above at equal specificity is not enough; this one has to match it. */
+  input[type="number"].settings-input { min-width: 0; width: 100%; flex: none; }
+  .settings-actions { flex-wrap: wrap; }
+  .settings-actions .button { flex: 1; }
+  .settings-restart-row { flex-direction: column; align-items: stretch; }
 }
 
 @media (prefers-reduced-motion: reduce) {

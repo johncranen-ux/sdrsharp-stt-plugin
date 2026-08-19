@@ -243,6 +243,10 @@ def test_a_known_vessel_carries_its_conversations(client):
 
 
 @pytest.mark.parametrize("path", ["/api/conversations", "/api/conversations/x",
-                                  "/api/vessels", "/api/vessels/1"])
+                                  "/api/vessels", "/api/vessels/1", "/api/settings"])
 def test_the_data_routes_reject_an_unauthenticated_request(unauthenticated_client, path):
     assert unauthenticated_client.get(path).status_code == 401
+
+
+def test_posting_settings_unauthenticated_is_rejected(unauthenticated_client):
+    assert unauthenticated_client.post("/api/settings", json={}).status_code == 401

@@ -1137,6 +1137,263 @@ async function selectVessel(mmsi) {
   }
 }
 
+/* -- settings ----------------------------------------------------------------- */
+/*
+ * The schema (39 settings across 9 groups) is fixed for the life of the page, so the form is
+ * built once from the first GET /api/settings answer and every later load -- including after a
+ * save -- only updates values in place, the same cardViews/feedViews shape used everywhere else
+ * here. Unlike Conversations and Vessels, this screen is never polled: a timer overwriting a
+ * field the operator is mid-edit would be worse than a stale read, so it loads once per visit
+ * and only Reload or a completed Save re-fetches it.
+ *
+ * The one rule that matters: settings_api.form() never sends a secret's value, only whether one
+ * is set (spec.set), and nothing here invents a way around that -- there is no "reveal" control.
+ * An empty password box submits nothing for that key at all, which the server reads as "leave
+ * it alone"; Clear stages the CLEAR_SENTINEL, which must stay byte-for-byte equal to
+ * settings_api.CLEAR on the server.
+ */
+const CLEAR_SENTINEL = "__CLEAR__";
+const settingsFieldViews = new Map();   // key -> field view
+const settingsState = { loaded: false, built: false, fields: {}, paths: new Map(), processes: [] };
+
+function buildSettingsControl(spec) {
+  const wrap = element("div", "settings-control");
+
+  if (spec.type === "secret") {
+    const input = element("input", "settings-input");
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.placeholder = "leave blank to keep the current value";
+    const status = element("span", "settings-secret-status");
+    const clearButton = element("button", "button button-quiet settings-clear", "Clear");
+    clearButton.type = "button";
+    const control = { wrap, input, status, clearButton, clearRequested: false };
+    // Toggle, not fire-and-forget: Clear only STAGES the sentinel, so a save still reports what
+    // changed and whether anything needs a restart, exactly like every other field here.
+    clearButton.addEventListener("click", () => {
+      control.clearRequested = !control.clearRequested;
+      input.value = "";
+      setText(clearButton, control.clearRequested ? "Undo clear" : "Clear");
+      wrap.closest(".settings-field")
+        ?.classList.toggle("settings-field-pending-clear", control.clearRequested);
+    });
+    wrap.append(input, status, clearButton);
+    return control;
+  }
+
+  if (spec.type === "bool") {
+    const label = element("label", "check");
+    const input = element("input");
+    input.type = "checkbox";
+    label.append(input, element("span", null, "on"));
+    wrap.append(label);
+    return { wrap, input };
+  }
+
+  if (spec.type === "enum") {
+    const input = element("select", "settings-select");
+    for (const choice of spec.choices || []) {
+      const option = element("option", null, choice);
+      option.value = choice;
+      input.append(option);
+    }
+    wrap.append(input);
+    return { wrap, input };
+  }
+
+  const input = element("input", "settings-input");
+  input.type = spec.type === "int" ? "number" : "text";
+  if (spec.type === "int") {
+    if (spec.minimum !== undefined && spec.minimum !== null) input.min = String(spec.minimum);
+    if (spec.maximum !== undefined && spec.maximum !== null) input.max = String(spec.maximum);
+  }
+  wrap.append(input);
+  // Only a PATH field carries a resolve mark -- the same fact the Dashboard's path strip shows,
+  // reused rather than recomputed client-side (see updateSettingsField).
+  let mark = null;
+  if (spec.type === "path") {
+    mark = element("span", "settings-mark");
+    mark.hidden = true;
+    wrap.append(mark);
+  }
+  return { wrap, input, mark };
+}
+
+function buildSettingsField(key, spec) {
+  const row = element("div", "settings-field");
+  row.dataset.key = key;
+  const head = element("div", "settings-field-head");
+  head.append(element("span", "legend settings-field-label", spec.label));
+  head.append(element("p", "settings-desc", spec.description));
+  row.append(head);
+
+  const control = buildSettingsControl(spec);
+  row.append(control.wrap);
+  return { root: row, ...control };
+}
+
+function buildSettingsForm(groups, fields) {
+  const root = $("settings-groups");
+  root.replaceChildren();
+  settingsFieldViews.clear();
+  for (const group of groups) {
+    const section = element("section", "settings-group card");
+    section.append(element("h2", "legend settings-group-title", group.name));
+    for (const key of group.keys) {
+      const view = buildSettingsField(key, fields[key]);
+      settingsFieldViews.set(key, view);
+      section.append(view.root);
+    }
+    root.append(section);
+  }
+}
+
+function updateSettingsField(key, view, spec) {
+  if (spec.type === "secret") {
+    view.input.value = "";
+    view.clearRequested = false;
+    setText(view.status, spec.set ? "set" : "not set");
+    view.status.className = `settings-secret-status ${spec.set ? "is-set" : "is-unset"}`;
+    setText(view.clearButton, "Clear");
+    view.clearButton.disabled = !spec.set;
+    view.root.classList.remove("settings-field-pending-clear");
+    return;
+  }
+  if (spec.type === "bool") {
+    view.input.checked = (spec.value || "off").toLowerCase() === "on";
+    return;
+  }
+  view.input.value = spec.value ?? "";
+  if (view.mark) {
+    const check = settingsState.paths.get(key);
+    view.mark.hidden = !check;
+    if (check) {
+      setText(view.mark, check.resolves ? "✓" : "✗");
+      view.mark.className = `settings-mark ${check.resolves ? "settings-mark-ok" : "settings-mark-bad"}`;
+    }
+  }
+}
+
+function collectSettingsSubmission() {
+  const body = {};
+  for (const [key, view] of settingsFieldViews) {
+    const spec = settingsState.fields[key];
+    if (!spec) continue;
+    if (spec.type === "secret") {
+      if (view.clearRequested) body[key] = CLEAR_SENTINEL;
+      else if (view.input.value !== "") body[key] = view.input.value;
+      // Otherwise omitted entirely: an untouched secret must not even be named in the request,
+      // let alone carry a value -- see the module comment.
+    } else if (spec.type === "bool") {
+      body[key] = view.input.checked ? "on" : "off";
+    } else {
+      body[key] = view.input.value;
+    }
+  }
+  return body;
+}
+
+async function refreshSettings() {
+  let form, health, processes;
+  try {
+    [form, health, processes] = await Promise.all([
+      api("/api/settings"),
+      api("/api/health"),
+      api("/api/processes"),
+    ]);
+  } catch (error) {
+    $("settings-fetch-error").textContent = `could not reach the panel: ${error.message}`;
+    $("settings-fetch-error").hidden = false;
+    return;
+  }
+  $("settings-fetch-error").hidden = true;
+  settingsState.processes = processes.processes;
+  settingsState.paths = new Map((health.paths || []).map((p) => [p.key, p]));
+  settingsState.fields = form.fields;
+
+  if (!settingsState.built) {
+    buildSettingsForm(form.groups, form.fields);
+    settingsState.built = true;
+  }
+  for (const [key, view] of settingsFieldViews) {
+    updateSettingsField(key, view, form.fields[key]);
+  }
+  settingsState.loaded = true;
+}
+
+async function restartFromSettings(name, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/processes/${encodeURIComponent(name)}/restart`, { method: "POST" });
+    setText(button, "Restarted");
+  } catch (error) {
+    showBanner(error.message);
+    setText(button, `Restart ${processLabel(settingsState.processes, name)}`);
+    button.disabled = false;
+  }
+}
+
+function showSettingsResult(result) {
+  const panel = $("settings-result");
+  const summary = $("settings-result-summary");
+  const restartList = $("settings-restart-list");
+  restartList.replaceChildren();
+
+  if (result.error) {
+    setText(summary, result.error);
+    summary.className = "settings-result-summary settings-result-error";
+    panel.hidden = false;
+    scrollConvIntoView(panel);
+    return;
+  }
+
+  const changed = result.changed || [];
+  setText(summary, changed.length ? `Saved. Changed: ${changed.join(", ")}.` : "Saved. Nothing changed.");
+  summary.className = "settings-result-summary";
+
+  // Said explicitly, one line per process: a setting a process only reads at its own startup is
+  // not in effect until that process restarts, and this is where a reader would otherwise never
+  // be told that.
+  for (const name of result.restart_needed || []) {
+    if (name === "panel") {
+      restartList.append(element("p", "settings-restart-line",
+        "Restart the control panel itself for this to take effect -- there is no button for "
+        + "that here; stop and start py -m webapp by hand."));
+      continue;
+    }
+    const label = processLabel(settingsState.processes, name);
+    const row = element("div", "settings-restart-row");
+    row.append(element("p", "settings-restart-line", `Restart ${label} for this to take effect.`));
+    const button = element("button", "button button-primary", `Restart ${label}`);
+    button.type = "button";
+    button.addEventListener("click", () => restartFromSettings(name, button));
+    row.append(button);
+    restartList.append(row);
+  }
+
+  panel.hidden = false;
+  scrollConvIntoView(panel);
+}
+
+$("settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const saveButton = $("settings-save");
+  saveButton.disabled = true;
+  try {
+    const body = collectSettingsSubmission();
+    const result = await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+    showSettingsResult(result);
+    await refreshSettings();   // reflect exactly what is now stored, including any Clear
+  } catch (error) {
+    showSettingsResult({ error: error.message });
+  } finally {
+    saveButton.disabled = false;
+  }
+});
+
+$("settings-reload").addEventListener("click", () => { refreshSettings().catch(() => {}); });
+$("settings-result-close").addEventListener("click", () => { $("settings-result").hidden = true; });
+
 /* -- views and polling ---------------------------------------------------- */
 
 function showBanner(message) {
@@ -1151,6 +1408,7 @@ function showTab(name) {
   $("conversations").hidden = name !== "conversations";
   $("vessels").hidden = name !== "vessels";
   $("logs").hidden = name !== "logs";
+  $("settings").hidden = name !== "settings";
   for (const tab of document.querySelectorAll(".tab")) {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   }
@@ -1162,7 +1420,10 @@ function tick() {
   if (state.tab === "dashboard") refreshDashboard().catch(() => {});
   else if (state.tab === "conversations") refreshConversations().catch(() => {});
   else if (state.tab === "vessels") refreshVessels().catch(() => {});
-  else tabLog.pull().catch(() => {});
+  else if (state.tab === "logs") tabLog.pull().catch(() => {});
+  // Settings is deliberately not polled -- see the module comment above refreshSettings --
+  // so it loads once per visit rather than on every tick.
+  else if (state.tab === "settings" && !settingsState.loaded) refreshSettings().catch(() => {});
 }
 
 function startPolling() {

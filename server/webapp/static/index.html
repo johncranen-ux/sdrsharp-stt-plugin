@@ -45,6 +45,7 @@ py -m webapp.set_password</pre>
       <button class="tab" role="tab" data-tab="conversations" aria-selected="false">Conversations</button>
       <button class="tab" role="tab" data-tab="vessels" aria-selected="false">Vessels</button>
       <button class="tab" role="tab" data-tab="logs" aria-selected="false">Logs</button>
+      <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
     </nav>
     <button id="signout" class="button button-quiet" type="button">Sign out</button>
   </header>
@@ -198,6 +199,36 @@ py -m webapp.set_password</pre>
       </label>
     </div>
     <pre id="log-view" class="log" tabindex="0"></pre>
+  </main>
+
+  <main id="settings" class="view" hidden>
+    <!-- config.json, by hand, until this screen existed. Six of these are SECRET: the form
+         never shows what one is set to, only whether it is -- see updateSettingsField in
+         app.js and settings_api.form() on the server, which is the only place that decides
+         what a secret's field is allowed to carry. -->
+    <p class="prose">Every setting the proxy, the AIS counter and this panel read. A secret
+      shows only whether it is set, never its value; Clear stages the explicit sentinel the
+      server reads as "remove this key" -- an empty box on its own means "leave it alone",
+      because the form has no way to show what is already stored.</p>
+
+    <p id="settings-fetch-error" class="note note-port" hidden></p>
+
+    <form id="settings-form" class="settings-form">
+      <div id="settings-groups"></div>
+      <div class="settings-actions">
+        <button id="settings-save" class="button button-primary" type="submit">Save changes</button>
+        <button id="settings-reload" class="button button-quiet" type="button">Reload</button>
+      </div>
+    </form>
+
+    <section id="settings-result" class="settings-result card" hidden aria-label="Save result">
+      <div class="conv-detail-head">
+        <h2 class="conv-detail-title">Save result</h2>
+        <button id="settings-result-close" class="button button-quiet" type="button">Close</button>
+      </div>
+      <p id="settings-result-summary" class="settings-result-summary"></p>
+      <div id="settings-restart-list" class="settings-restart-list"></div>
+    </section>
   </main>
 </div>
 
