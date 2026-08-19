@@ -69,3 +69,19 @@ def test_the_response_says_which_processes_must_be_restarted():
     exported = next(s.key for s in SETTINGS if s.exported and s.type is SettingType.BOOL)
     applied = settings_api.apply(_values(), {exported: "off"})
     assert "proxy" in applied.restart_needed
+
+
+def test_every_exported_setting_maps_to_a_process_to_restart():
+    """_restart_targets() decides who to restart by matching a setting's KEY against a string
+    prefix -- AIS_STATION_ -> counter, WEBAPP_ -> panel, otherwise proxy for anything exported.
+    That is correct for today's 39 settings, but nothing stops a fortieth from falling through
+    all three cases and mapping to no process at all -- which would not fail, it would just
+    tell the operator no restart is needed when one is. Walking the whole catalogue here means
+    adding such a setting fails this test immediately, instead of staying silently wrong until
+    someone notices a change never took effect.
+    """
+    for spec in SETTINGS:
+        if not spec.exported:
+            continue
+        assert settings_api._restart_targets(spec.key, spec), (
+            f"{spec.key} is exported but settings_api._restart_targets() maps it to no process")
