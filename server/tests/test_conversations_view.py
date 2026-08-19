@@ -112,3 +112,26 @@ def test_a_shared_name_is_reported_with_its_mmsi_rather_than_by_name_alone():
     """Spec Section 5: seven labelled conversations were distorted by a name collision."""
     row = view.summarise(_record(vessel="SEA STAR", mmsi="311000111"))
     assert row["label"] == "SEA STAR (311000111)"
+
+
+def test_detail_drops_confidence_on_unidentified_records():
+    """Spec Section 5: the confidence describes the resolver's reasoning, and printed
+    beside "unidentified" it reads as a contradiction."""
+    detail_out = view.detail(_record(vessel=None, mmsi=None, confidence="high"))
+    assert detail_out["identified"] is False
+    assert detail_out["confidence"] is None
+
+
+def test_records_with_missing_start_sort_to_the_end():
+    """The sort key and conversation_id both null-guard start: records without a start
+    should sort to the end rather than crashing."""
+    records = [
+        _record(start="2026-08-19T10:02:00"),
+        _record(start=None),
+        _record(start="2026-08-19T10:01:00"),
+    ]
+    page = view.query(records)
+    # Newest first (reverse sort), but None sorts to the end
+    assert page.rows[0]["start"] == "2026-08-19T10:02:00"
+    assert page.rows[1]["start"] == "2026-08-19T10:01:00"
+    assert page.rows[2]["start"] is None
