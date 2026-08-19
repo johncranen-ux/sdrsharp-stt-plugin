@@ -114,6 +114,15 @@ def test_a_shared_name_is_reported_with_its_mmsi_rather_than_by_name_alone():
     assert row["label"] == "SEA STAR (311000111)"
 
 
+def test_detail_also_carries_the_shared_name_safe_label():
+    """A caller that only ever fetches detail() -- the Vessels screen's conversation links are
+    exactly this -- must see the same NAME (MMSI) form summarise() gives the list, not the bare
+    `vessel` field. Regression pin: detail() used to omit `label` entirely, and the one caller
+    that reached it without also holding a fresh list fell back to the ambiguous bare name."""
+    detail_out = view.detail(_record(vessel="SEA STAR", mmsi="311000111"))
+    assert detail_out["label"] == "SEA STAR (311000111)"
+
+
 def test_detail_drops_confidence_on_unidentified_records():
     """Spec Section 5: the confidence describes the resolver's reasoning, and printed
     beside "unidentified" it reads as a contradiction."""

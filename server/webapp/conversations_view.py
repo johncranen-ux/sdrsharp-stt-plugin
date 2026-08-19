@@ -26,6 +26,18 @@ def _identified(record: dict) -> bool:
     return bool(record.get("mmsi") or record.get("vessel"))
 
 
+def _label(identified: bool, vessel: str | None, mmsi: str | None) -> str:
+    """Never the bare name: where two cached vessels share one, the name is not an
+    identification and reading it as one distorted seven labelled conversations.
+
+    Shared by summarise() (the list) and detail() (a single record) so a detail response can
+    never fall back to the bare, ambiguous name just because it reached the API by a path that
+    forgot to compute this."""
+    if identified and vessel and mmsi:
+        return f"{vessel} ({mmsi})"
+    return vessel or mmsi or "unidentified"
+
+
 def summarise(record: dict) -> dict:
     identified = _identified(record)
     vessel, mmsi = record.get("vessel"), record.get("mmsi")
@@ -36,10 +48,7 @@ def summarise(record: dict) -> dict:
         "channel": record.get("channel"),
         "vessel": vessel,
         "mmsi": mmsi,
-        # Never the bare name: where two cached vessels share one, the name is not an
-        # identification and reading it as one distorted seven labelled conversations.
-        "label": f"{vessel} ({mmsi})" if identified and vessel and mmsi
-                 else (vessel or mmsi or "unidentified"),
+        "label": _label(identified, vessel, mmsi),
         "type": record.get("type"),
         "destination": record.get("destination"),
         "identified": identified,
@@ -74,10 +83,15 @@ def _turn(turn: dict) -> dict:
 def detail(record: dict) -> dict:
     out = dict(record)
     out["id"] = conversation_id(record)
-    out["identified"] = _identified(record)
+    identified = _identified(record)
+    out["identified"] = identified
     out["turns"] = [_turn(t) for t in (record.get("turns") or [])]
-    if not out["identified"]:
+    if not identified:
         out["confidence"] = None
+    # Same computation as summarise()'s row -- a caller that only fetched detail (the vessel ->
+    # conversation link on the Vessels screen is exactly this) must see the same shared-name-safe
+    # title the list would have shown, not the raw `vessel` field.
+    out["label"] = _label(identified, record.get("vessel"), record.get("mmsi"))
     return out
 
 

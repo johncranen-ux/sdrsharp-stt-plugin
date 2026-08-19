@@ -772,12 +772,17 @@ function renderSuggestions(list) {
 }
 
 function renderConvDetail(detail) {
-  // Prefer the list row's label (it already carries the "shared name -> show the MMSI too"
-  // rule from conversations_view.summarise); fall back to the detail record's own fields for
-  // a conversation that scrolled off the current page while its detail was loading.
-  const summary = convState.rows.get(detail.id);
-  setText($("conv-detail-title"), summary ? convLabel(summary)
-    : (detail.vessel || (detail.identified ? "identified" : "unidentified")));
+  // detail.label is computed server-side by conversations_view.detail() the same way
+  // summarise() computes a list row's label -- shared-name-safe by construction, never the
+  // bare `vessel` field. This used to fall back to the LIST row (convState.rows.get(detail.id))
+  // and only then to detail.vessel; that second fallback was reachable whenever the
+  // Conversations tab's loaded page didn't include this conversation -- which the Vessels
+  // screen's "open this conversation" link can do on the very first click, not just as a
+  // stale-cache edge case -- and it showed the bare, ambiguous name, permanently, for that
+  // render. Reading detail.label directly removes that path entirely; the fallback here only
+  // covers a record that genuinely has neither a vessel name nor an MMSI.
+  setText($("conv-detail-title"),
+    detail.label || (detail.identified ? "identified" : "unidentified"));
 
   const body = $("conv-detail-body");
   body.replaceChildren();   // fetched once per selection, not on a poll -- see the API note
