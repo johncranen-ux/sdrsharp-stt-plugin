@@ -810,12 +810,27 @@ function showConvDetail(open) {
   $("conv-detail").hidden = !open;
 }
 
+// With the list at its default 50 rows, the detail panel opens roughly two and a half screens
+// below the fold -- a reader who clicks a row and sees only the row highlight has no reason to
+// think anything happened. This is the only place that scrolls: the poll path (refreshConversations
+// / renderConvRows) never calls it, so a poll landing while the detail is open cannot move the
+// reader's viewport -- only an actual click (here, or the Close handler below) does.
+function scrollConvIntoView(el) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+}
+
 async function selectConversation(id) {
   convState.selectedId = id;
   for (const [rowId, view] of convRows) {
     view.root.classList.toggle("conv-row-selected", rowId === id);
   }
   showConvDetail(true);
+  const detailEl = $("conv-detail");
+  // Scrolled immediately, before the detail fetch resolves: the click itself needs a visible
+  // response, and "Loading..." arriving in view is that response -- the reader should not have
+  // to wait on the network to learn the click registered.
+  scrollConvIntoView(detailEl);
   setText($("conv-detail-title"), convLabel(convState.rows.get(id)));
   const body = $("conv-detail-body");
   body.replaceChildren(element("p", "conv-note", "Loading…"));
@@ -825,9 +840,14 @@ async function selectConversation(id) {
     const detail = await api(`/api/conversations/${encodeURIComponent(id)}`);
     if (generation !== convState.detailGeneration) return;   // a later selection replaced this
     renderConvDetail(detail);
+    // The panel is much taller full of turns and candidates than it was showing "Loading...",
+    // so the scroll aimed at the placeholder undershoots once the real content lands -- observed
+    // settling with only the title bar in view. Re-aim now that the final height is known.
+    scrollConvIntoView(detailEl);
   } catch (error) {
     if (generation !== convState.detailGeneration) return;
     body.replaceChildren(element("p", "conv-note note-port", `could not load: ${error.message}`));
+    scrollConvIntoView(detailEl);
   }
 }
 
@@ -949,6 +969,10 @@ $("conv-detail-close").addEventListener("click", () => {
   convState.detailGeneration += 1;   // abandon whatever detail fetch might still be in flight
   for (const view of convRows.values()) view.root.classList.remove("conv-row-selected");
   showConvDetail(false);
+  // Hiding the (possibly long) detail panel collapses the page under the reader's scroll
+  // position, which can leave them staring at whatever now-empty space took its place. Land
+  // back on the pager, right above where the detail was, rather than nowhere in particular.
+  scrollConvIntoView($("conv-pager"));
 });
 
 $("dialog-close").addEventListener("click", () => dialog.close());
