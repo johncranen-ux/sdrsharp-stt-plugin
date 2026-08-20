@@ -72,15 +72,20 @@ function element(tag, className, text) {
 // them choose twice.
 const VESSELFINDER_URL = "https://www.vesselfinder.com/vessels/details/";
 
-/** The MMSI, linked to its VesselFinder page. Null when there is nothing to link. */
-function vesselFinderLink(mmsi, className) {
+/** The MMSI (or `text`, when given) linked to its VesselFinder page. Null when nothing to link.
+ *
+ * The old proxy page links the vessel NAME, so the list rows here pass the row label as text
+ * to match it; everywhere the MMSI itself is on screen, the MMSI is the link text. Either way
+ * the href is keyed on the MMSI -- the name is exactly the field that cannot identify a ship. */
+function vesselFinderLink(mmsi, className, text) {
   const id = String(mmsi === null || mmsi === undefined ? "" : mmsi).trim();
   // Digits only. An MMSI is nine digits by definition, and a blank or an em dash placeholder
   // would build a details URL for nothing -- a link that goes nowhere useful is worse than the
   // plain text it replaced. Kept as "all digits" rather than exactly nine so a cache entry with
   // an odd-length identifier still links rather than silently losing the affordance.
   if (!/^\d+$/.test(id)) return null;
-  const link = element("a", className ? `${className} vf-link` : "vf-link", id);
+  const link = element("a", className ? `${className} vf-link` : "vf-link",
+                       text === undefined || text === null || text === "" ? id : String(text));
   link.href = VESSELFINDER_URL + encodeURIComponent(id);
   link.target = "_blank";
   // noreferrer as well as noopener: this is the only place the panel reaches the public web,
@@ -88,6 +93,24 @@ function vesselFinderLink(mmsi, className) {
   link.rel = "noopener noreferrer";
   link.title = `Open MMSI ${id} on VesselFinder`;
   return link;
+}
+
+/** Fill a table cell with `text`, linked when the MMSI supports it.
+ *
+ * Both tables reuse their row objects across renders, so a cell has to be able to go back to
+ * plain text when the next row in that slot has no MMSI -- setting textContent alone would
+ * leave the previous row's link in place. And every row here is itself a click target that
+ * opens a detail panel, so the link stops the click propagating: following it should not also
+ * open, select and scroll to a detail nobody asked for.
+ */
+function setLinkedVesselCell(cell, mmsi, text) {
+  const link = vesselFinderLink(mmsi, null, text);
+  if (!link) {
+    setText(cell, text);
+    return;
+  }
+  link.addEventListener("click", (event) => event.stopPropagation());
+  cell.replaceChildren(link);
 }
 
 /* -- the watch and the gauges -------------------------------------------- */
@@ -593,7 +616,10 @@ function updateConvRow(view, row) {
   view.root.classList.toggle("conv-row-unidentified", !row.identified);
   setText(view.cells.start, row.start || "—");
   setText(view.cells.channel, row.channel || "—");
-  setText(view.cells.vessel, row.label || "unidentified");
+  // Matches the proxy's own /conversations page, which has linked the vessel in every listing
+  // row since the AISHub work. This panel had it only in the detail panel, which is where the
+  // reader least needs it -- the list is what gets scanned.
+  setLinkedVesselCell(view.cells.vessel, row.mmsi, row.label || "unidentified");
   setText(view.cells.type, row.type || "—");
   setText(view.cells.destination, row.destination || "—");
   setText(view.cells.confidence, row.confidence || "—");
@@ -966,7 +992,7 @@ function updateVesselRow(view, row) {
   // The mark itself: a name two MMSIs share cannot be trusted alone, and it has to read that
   // way right here, not only after opening detail.
   view.badge.hidden = !row.name_shared;
-  setText(view.cells.mmsi, row.mmsi || "—");
+  setLinkedVesselCell(view.cells.mmsi, row.mmsi, row.mmsi || "—");
   setText(view.cells.callsign, row.callsign || "—");
   setText(view.cells.type, row.type || "—");
   setText(view.cells.destination, row.destination || "—");
