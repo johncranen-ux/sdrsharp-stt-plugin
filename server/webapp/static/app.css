@@ -132,6 +132,34 @@ body {
 
 /* -- top bar ------------------------------------------------------------ */
 
+/* The pinned head: topbar, banner and watch travel together.
+ *
+ * One sticky wrapper rather than sticking the two bars separately, because separate ones would
+ * need the topbar's exact height hard-coded as the watch's `top` -- and that height changes with
+ * the viewport, the banner appearing, and the gauges wrapping.
+ *
+ * An opaque background is not optional. The wrapper's own children are opaque, but the gap the
+ * banner leaves when hidden is not, and content would scroll through it. */
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--sea-900);
+}
+
+/* A sticky head covers whatever scrollIntoView brings to the top of the viewport -- opening a
+ * conversation would have parked its title underneath the watch. --head-h is measured in JS
+ * (the head's height is not knowable here: the gauges wrap and the banner comes and goes), and
+ * the fallback is roughly a two-row head for the moment before the first measurement lands. */
+html { scroll-padding-top: var(--head-h, 210px); }
+
+/* On a short window the head would eat most of the screen, and pinning something that leaves no
+ * room to read is worse than not pinning it. Below this the head scrolls away normally. */
+@media (max-height: 620px) {
+  .page-head { position: static; }
+  html { scroll-padding-top: 0; }
+}
+
 .topbar {
   display: flex;
   align-items: center;

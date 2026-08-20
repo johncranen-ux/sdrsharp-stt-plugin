@@ -95,6 +95,30 @@ function vesselFinderLink(mmsi, className, text) {
   return link;
 }
 
+/** Keep --head-h equal to the pinned head's real height.
+ *
+ * The CSS cannot know it: the gauges wrap at narrow widths and the banner appears and
+ * disappears, both of which change the height while the page is open. scroll-padding-top reads
+ * this, so without it an opened detail panel parks underneath the head instead of below it.
+ */
+let headObserved = false;
+
+function trackHeadHeight() {
+  const head = document.querySelector(".page-head");
+  if (!head) return;
+  const measure = () =>
+    document.documentElement.style.setProperty("--head-h", `${head.offsetHeight}px`);
+  measure();
+  // showPanel() is reachable from boot and from a sign-in, so this can run twice in one page
+  // life; observing twice would leave an observer attached to nothing useful.
+  if (headObserved) return;
+  headObserved = true;
+  // ResizeObserver rather than a resize listener: the banner appearing changes the head's
+  // height without the window changing size at all.
+  if (typeof ResizeObserver === "function") new ResizeObserver(measure).observe(head);
+  else window.addEventListener("resize", measure);
+}
+
 /** Fill a table cell with `text`, linked when the MMSI supports it.
  *
  * Both tables reuse their row objects across renders, so a cell has to be able to go back to
@@ -1563,6 +1587,9 @@ function showGate(passwordSet = true) {
 function showPanel() {
   $("login").hidden = true;
   $("panel").hidden = false;
+  // After the panel is visible: a hidden element measures 0, and the head's height is what
+  // keeps scrolled-to detail panels clear of it.
+  trackHeadHeight();
   showTab("dashboard");
   startPolling();
 }

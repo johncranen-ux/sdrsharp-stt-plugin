@@ -35,6 +35,11 @@ py -m webapp.set_password</pre>
 
 <!-- Panel --------------------------------------------------------------- -->
 <div id="panel" hidden>
+  <!-- The topbar, the banner and the watch stay pinned together while the views scroll under
+       them. The watch is the signature instrument -- whether audio is arriving is exactly the
+       thing you want still on screen halfway down a list of 6000 vessels -- and the banner
+       lives inside the pinned block so an error can never scroll out of sight. -->
+  <div class="page-head">
   <header class="topbar">
     <div class="brand">
       <span class="legend">SDR# control panel</span>
@@ -64,6 +69,7 @@ py -m webapp.set_password</pre>
     </div>
     <dl class="gauges" id="gauges"></dl>
   </section>
+  </div><!-- /.page-head -->
 
   <main id="dashboard" class="view">
     <!-- The annunciator: a process being up and its data still arriving are two different
