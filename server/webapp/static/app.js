@@ -803,9 +803,53 @@ function passLabel(candidate) {
   return "name hint";
 }
 
+/** A play control for one turn, or null when nothing was captured for it.
+ *
+ * One <audio> per turn, created only when there is a clip and left with no src until the first
+ * click: a conversation can run to dozens of turns, and pointing an audio element at each one
+ * up front would have the browser fetching WAVs nobody asked to hear.
+ *
+ * The button reads the transcript's own audio, so it is the fastest way to settle whether a
+ * strange line was mis-heard or genuinely said. Only the _sent clip is served -- what the model
+ * was actually given, after VAD trimming and normalisation.
+ */
+function renderTurnAudio(turn) {
+  if (!turn.clip || !turn.clip_day) return null;
+
+  const wrap = element("span", "turn-audio");
+  const button = element("button", "button button-quiet turn-play", "🔊");
+  button.type = "button";
+  button.title = `Play the audio captured at ${turn.time || "this turn"}`;
+  button.setAttribute("aria-label", button.title);
+
+  const player = document.createElement("audio");
+  player.preload = "none";
+  player.controls = true;
+  player.hidden = true;
+  player.src = `/api/clips/${encodeURIComponent(turn.clip_day)}/${encodeURIComponent(turn.clip)}`;
+
+  button.addEventListener("click", () => {
+    // Reveal the real controls on first use: scrubbing back over a garbled word is the whole
+    // point, and a bare play button cannot do it.
+    player.hidden = false;
+    button.hidden = true;
+    player.play().catch(() => {
+      // Autoplay refusal or a clip pruned since the page loaded. The controls are already
+      // visible, so the reader can press play themselves; nothing is silently broken.
+    });
+  });
+
+  wrap.append(button, player);
+  return wrap;
+}
+
 function renderTurn(turn) {
   const item = element("li", "turn");
-  item.append(element("span", "turn-time", turn.time || "—"));
+  const head = element("div", "turn-head");
+  head.append(element("span", "turn-time", turn.time || "—"));
+  const audio = renderTurnAudio(turn);
+  if (audio) head.append(audio);
+  item.append(head);
 
   const chain = element("div", "turn-chain");
   chain.append(chainStep("raw", turn.raw, false));

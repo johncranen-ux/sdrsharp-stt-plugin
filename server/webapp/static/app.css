@@ -516,11 +516,30 @@ html { scroll-padding-top: var(--head-h, 210px); }
   border-bottom: 1px solid var(--sea-800);
 }
 .turn:last-child { border-bottom: 0; }
+/* The turn's time, and its audio when the plugin captured any. */
+.turn-head {
+  display: flex;
+  align-items: center;
+  gap: var(--step);
+  margin-bottom: 4px;
+}
 .turn-time {
-  display: block;
   color: var(--fog);
   font-size: 12.5px;
-  margin-bottom: 4px;
+}
+.turn-audio { display: inline-flex; align-items: center; }
+.turn-play {
+  padding: 0 6px;
+  line-height: 1.6;
+  font-size: 13px;
+}
+/* The browser's own controls, toned down to sit in a dimmed instrument panel rather than
+ * glaring out of it. Chromium exposes no part selectors for these, so a filter is the only
+ * lever; the player is small and appears one at a time, so this stays cheap. */
+.turn-audio audio {
+  height: 30px;
+  max-width: 260px;
+  filter: invert(0.9) hue-rotate(180deg) saturate(0.4) contrast(0.9);
 }
 .turn-chain {
   display: flex;

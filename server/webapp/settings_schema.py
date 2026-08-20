@@ -251,7 +251,9 @@ SETTINGS: list[SettingSpec] = [
                 default=r"D:\SDR\SDRSharp\Plugins\SttPlugin\captures", group="Paths",
                 exported=False,
                 description="Where the plugin writes captured audio, in dated subdirectories. "
-                            "Checked for existence only; the panel never reads it."),
+                            "The Conversations screen reads it to offer a play button on any "
+                            "turn whose audio was captured, matched by time within 2 seconds. "
+                            "Leave empty to serve no audio at all."),
     SettingSpec(key="WHISPER_BACKEND_HOST", type=SettingType.TEXT, default="localhost",
                 group="Paths",
                 description="Host of the local whisper.cpp server, used only when "

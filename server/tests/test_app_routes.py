@@ -278,3 +278,86 @@ def test_the_data_routes_reject_an_unauthenticated_request(unauthenticated_clien
 
 def test_posting_settings_unauthenticated_is_rejected(unauthenticated_client):
     assert unauthenticated_client.post("/api/settings", json={}).status_code == 401
+
+
+# -- captured audio ---------------------------------------------------------------
+#
+# The play button on a turn. Every one of these builds its app over a config whose CAPTURES_DIR
+# is under tmp_path: the catalogue default is the operator's real 1.5 GB capture directory, and
+# conftest refuses to read it.
+
+
+def _captures(tmp_path, day="2026-08-19", index=0, stamp="2026-08-19T10:15:05"):
+    root = tmp_path / "captures"
+    (root / day).mkdir(parents=True)
+    (root / day / f"{index:04d}_sent.wav").write_bytes(b"RIFF$\x00\x00\x00WAVEfmt ")
+    (root / day / f"{index:04d}_raw.wav").write_bytes(b"RIFF-raw")
+    (root / day / "index.jsonl").write_text(
+        '{"index": %d, "timestamp": "%s"}\n' % (index, stamp), encoding="utf-8-sig")
+    return root
+
+
+def _client_with_captures(tmp_path, root):
+    from webapp import config_store
+
+    config_store.save(tmp_path / "config.json", {"CAPTURES_DIR": str(root)})
+    app, _fake = _build_app(tmp_path)
+    client = TestClient(app)
+    client.headers[CSRF_HEADER] = client.post(
+        "/api/login", json={"password": PASSWORD}).json()["csrf_token"]
+    return client
+
+
+def test_a_turn_carries_the_clip_captured_for_it(tmp_path):
+    # The fixture conversation starts 2026-08-19 10:15:00 with a turn at 10:15:05.
+    client = _client_with_captures(tmp_path, _captures(tmp_path))
+    listed = client.get("/api/conversations").json()["rows"]
+    detail = client.get(f"/api/conversations/{listed[0]['id']}").json()
+    assert detail["turns"][0]["clip"] == "0000"
+    assert detail["turns"][0]["clip_day"] == "2026-08-19"
+
+
+def test_a_turn_with_no_capture_says_so_rather_than_offering_a_dead_button(tmp_path):
+    client = _client_with_captures(tmp_path, _captures(tmp_path, stamp="2026-08-19T23:00:00"))
+    listed = client.get("/api/conversations").json()["rows"]
+    detail = client.get(f"/api/conversations/{listed[0]['id']}").json()
+    assert detail["turns"][0]["clip"] is None
+
+
+def test_the_clip_endpoint_returns_the_sent_audio(tmp_path):
+    client = _client_with_captures(tmp_path, _captures(tmp_path))
+    response = client.get("/api/clips/2026-08-19/0000")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    # _sent, not _raw: what the model was actually given.
+    assert response.content == b"RIFF$\x00\x00\x00WAVEfmt "
+
+
+def test_the_clip_endpoint_refuses_a_traversal(tmp_path):
+    client = _client_with_captures(tmp_path, _captures(tmp_path))
+    for day, clip in (("..", "0000"), ("2026-08-19", "../../../etc/passwd"),
+                      ("2026-08-19", "0000_raw"), ("....", "0000")):
+        assert client.get(f"/api/clips/{day}/{clip}").status_code in (404, 405), (day, clip)
+
+
+def test_the_clip_endpoint_is_a_404_when_nothing_was_captured(tmp_path):
+    client = _client_with_captures(tmp_path, _captures(tmp_path))
+    assert client.get("/api/clips/2026-08-01/0000").status_code == 404
+
+
+def test_no_captures_directory_configured_leaves_turns_unplayable(tmp_path):
+    from webapp import config_store
+
+    config_store.save(tmp_path / "config.json", {"CAPTURES_DIR": ""})
+    app, _fake = _build_app(tmp_path)
+    client = TestClient(app)
+    client.headers[CSRF_HEADER] = client.post(
+        "/api/login", json={"password": PASSWORD}).json()["csrf_token"]
+    listed = client.get("/api/conversations").json()["rows"]
+    detail = client.get(f"/api/conversations/{listed[0]['id']}").json()
+    assert detail["turns"][0]["clip"] is None
+    assert client.get("/api/clips/2026-08-19/0000").status_code == 404
+
+
+def test_clip_audio_needs_a_session(unauthenticated_client):
+    assert unauthenticated_client.get("/api/clips/2026-08-19/0000").status_code == 401

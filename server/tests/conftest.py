@@ -39,3 +39,29 @@ def _never_manage_live_processes(monkeypatch):
         original_init(self, paths, load_values)
 
     monkeypatch.setattr(supervisor_module.Supervisor, "__init__", guarded_init)
+
+
+@pytest.fixture(autouse=True)
+def _never_read_the_real_captures(monkeypatch):
+    """Refuse to serve audio out of the operator's real capture directory.
+
+    Same reasoning as the supervisor guard above. CAPTURES_DIR's catalogue default is a real
+    path on the operator's machine, and a test that builds an app over a config file which does
+    not exist gets every setting's default -- so a route test would happily read, and return,
+    an hour of recorded radio traffic. That directory is 1.5 GB of received transmissions and
+    is gitignored for legal reasons (NL Telecommunicatiewet 18.13); no test may touch it.
+    """
+    from webapp import clips as clips_module
+    from webapp.settings_schema import BY_KEY
+
+    real = Path(BY_KEY["CAPTURES_DIR"].default).resolve()
+    original = clips_module.clip_path
+
+    def guarded_clip_path(captures_root, day, clip):
+        if captures_root is not None and Path(captures_root).resolve() == real:
+            raise AssertionError(
+                f"this test read the real capture directory {real} -- 1.5 GB of received radio "
+                f"traffic. Give the app a config whose CAPTURES_DIR is under tmp_path.")
+        return original(captures_root, day, clip)
+
+    monkeypatch.setattr(clips_module, "clip_path", guarded_clip_path)

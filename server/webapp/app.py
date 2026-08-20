@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from webapp import (config_store, conversations_view, credentials,
+from webapp import (clips, config_store, conversations_view, credentials,
                     health as health_module, logs, registry, settings_api, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
 from webapp.proxy_data import ProxyData
@@ -180,13 +180,46 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
             records, identified=identified, channel=channel, text=text,
             limit=limit, offset=offset), snap)
 
+    def _captures_root():
+        """The configured capture directory, or None when it is unset or not there.
+
+        Resolved per request rather than held: capture is turned on and off at the plugin, and
+        the directory can appear, be pruned or be repointed while the panel keeps running.
+        """
+        configured = (values().get("CAPTURES_DIR") or "").strip()
+        if not configured:
+            return None
+        root = Path(configured)
+        return root if root.is_dir() else None
+
     @guarded.get("/api/conversations/{conversation_id:path}")
     def read_conversation(conversation_id: str) -> dict:
         records, _snap = data.conversations()
         for record in records:
             if conversations_view.conversation_id(record) == conversation_id:
-                return conversations_view.detail(record)
+                found = conversations_view.detail(record)
+                # Turns are matched to captured audio here rather than in conversations_view,
+                # which is pure and reads nothing from disk. Every turn gets a clip or None, so
+                # the UI shows a play button only where there is something to play.
+                found["turns"] = clips.annotate(found.get("turns") or [],
+                                                record.get("start"), _captures_root())
+                return found
         raise HTTPException(status_code=404, detail="no such conversation")
+
+    @guarded.get("/api/clips/{day}/{clip}")
+    def read_clip(day: str, clip: str) -> FileResponse:
+        """The captured audio for one turn.
+
+        clips.clip_path is the only thing that turns these two path segments into a filename,
+        and it refuses anything that is not a bare date and a four-digit id inside the captures
+        root. 404 for every failure alike: which of "capture was off", "the day was pruned" and
+        "that is not a valid id" applies is not something this endpoint should disclose.
+        """
+        path = clips.clip_path(_captures_root(), day, clip)
+        if path is None:
+            raise HTTPException(status_code=404, detail="no audio for that turn")
+        return FileResponse(path, media_type="audio/wav",
+                            filename=f"{day}_{clip}.wav")
 
     @guarded.get("/api/vessels")
     def read_vessels(text: str | None = None, limit: int = 50, offset: int = 0) -> dict:
