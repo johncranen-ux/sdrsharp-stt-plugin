@@ -23,11 +23,19 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # pip-system-certs is a Windows certificate-store shim and is not needed (or
-        # installable) here, so the runtime requirements are installed explicitly.
+        # Installed FROM server/requirements.txt, not from a list repeated here. The list that
+        # used to sit in this step named five packages and silently stopped matching the
+        # project: the control panel added fastapi, pydantic, psutil, argon2-cffi and httpx,
+        # and the IQ work added numpy and scipy. Eleven test modules then failed to import on
+        # every push, for months, with ModuleNotFoundError rather than anything to do with the
+        # commit that triggered the run.
+        #
+        # pip-system-certs is filtered out and only that: it is a Windows certificate-store
+        # shim, needed on the developer's machine and meaningless on a Linux runner.
         run: |
+          grep -v '^pip-system-certs' server/requirements.txt > /tmp/ci-requirements.txt
           python -m pip install --upgrade pip
-          python -m pip install rapidfuzz anthropic websockets certifi pytest pyflakes
+          python -m pip install -r /tmp/ci-requirements.txt pytest pyflakes
 
       - name: Check for undefined names
         # Splitting whisper-proxy.py into stt_proxy/ left three names used but never
