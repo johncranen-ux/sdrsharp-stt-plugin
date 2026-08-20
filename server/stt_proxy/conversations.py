@@ -833,6 +833,11 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
             "mmsi": ais.get("mmsi") if ais else None,
             "callsign": ais.get("callsign") if ais else None,
             "type": _get_ship_type_name(ais.get("type")) if ais else None,
+            # The raw code as well as the name. The name is the category -- a tanker carrying
+            # hazardous category B is just "Tanker" -- and the code is the only thing that can
+            # still say which. The control panel reads it for the type tooltip. Rows stored
+            # before this existed simply lack the key, and fall back to the name alone.
+            "type_code": ais.get("type") if ais else None,
             "via_callsign": bool(ais and ais.get("via_callsign")),
             "evidence": str(ex.get("evidence") or "")[:200],
             "confidence": ex.get("confidence") if ex.get("confidence") in ("high", "medium", "low") else "low",
@@ -852,6 +857,7 @@ def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> l
                     "name": c.get("name"),
                     "mmsi": c.get("mmsi"),
                     "type": _get_ship_type_name(c.get("type")),
+                    "type_code": c.get("type"),
                     "km": (_km_from_maas(c["latitude"], c["longitude"])
                            if c.get("latitude") is not None
                            and c.get("longitude") is not None else None),

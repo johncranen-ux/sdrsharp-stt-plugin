@@ -145,3 +145,31 @@ def test_a_wildcard_pattern_is_compiled_once_not_per_entry():
     finally:
         re.compile = original
     assert len(calls) == 1
+
+
+# -- type tooltips ----------------------------------------------------------------
+#
+# The Vessels screen shows the bare AIS code, which is unreadable on its own. The row carries
+# the full ITU reading so the UI can put it in a tooltip without shipping the table twice.
+
+
+def test_a_row_carries_the_readable_type_beside_the_code():
+    page = view.search([_vessel(type=80)])
+    assert page.rows[0]["type"] == 80
+    assert page.rows[0]["type_detail"] == "Tanker — all ships of this type (AIS type 80)"
+
+
+def test_the_hazard_digit_survives_into_the_tooltip():
+    page = view.search([_vessel(type=82)])
+    assert "category B" in page.rows[0]["type_detail"]
+
+
+def test_a_vessel_broadcasting_no_type_has_no_tooltip_rather_than_a_guess():
+    page = view.search([_vessel(type=None)])
+    assert page.rows[0]["type_detail"] is None
+
+
+def test_a_string_type_code_is_read_the_same_as_an_int():
+    # AISHub delivers TYPE as a string.
+    assert view.search([_vessel(type="70")]).rows[0]["type_detail"] == \
+           view.search([_vessel(type=70)]).rows[0]["type_detail"]

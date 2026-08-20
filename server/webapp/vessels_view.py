@@ -5,6 +5,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 
+import ship_types
 from webapp.conversations_view import Page, summarise
 
 _FIELDS = ("mmsi", "name", "callsign", "destination")
@@ -51,6 +52,10 @@ def _row(entry: dict, shared: dict[str, list[str]]) -> dict:
         "name": entry.get("name"),
         "callsign": entry.get("callsign"),
         "type": entry.get("type"),
+        # The screen shows the bare AIS code, which says nothing on its own. The full ITU
+        # reading rides along for the tooltip, computed from the shared table rather than
+        # duplicated into the browser.
+        "type_detail": ship_types.describe(entry.get("type")),
         "destination": entry.get("destination"),
         "draught": entry.get("draught"),
         "last_seen": entry.get("last_seen"),
@@ -79,7 +84,12 @@ def search(entries: list[dict], *, text: str | None = None,
 def detail(entries: list[dict], mmsi: str) -> dict | None:
     for entry in entries:
         if str(entry.get("mmsi") or "") == str(mmsi):
-            return dict(entry)
+            found = dict(entry)
+            # Same reading of the type the list row offers. Rendered as the Type field's
+            # tooltip, not as a field of its own -- the detail panel lists whatever the cache
+            # entry holds, so this has to be excluded there by name.
+            found["type_detail"] = ship_types.describe(entry.get("type"))
+            return found
     return None
 
 

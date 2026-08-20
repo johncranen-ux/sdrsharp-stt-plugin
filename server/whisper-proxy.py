@@ -154,7 +154,6 @@ from stt_proxy.ais import (  # noqa: E402
     AIS_HINT_FILTER,
     AIS_HINT_MIN_SCORE,
     AIS_SAVE_INTERVAL,
-    AIS_SHIP_TYPES,
     ROTTERDAM_BBOX,
     _ais_thread,
     _cache_size,

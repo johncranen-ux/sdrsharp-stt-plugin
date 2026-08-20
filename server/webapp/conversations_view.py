@@ -6,6 +6,7 @@ opened.
 """
 from __future__ import annotations
 
+import ship_types
 from pydantic import BaseModel
 
 
@@ -50,6 +51,10 @@ def summarise(record: dict) -> dict:
         "mmsi": mmsi,
         "label": _label(identified, vessel, mmsi),
         "type": record.get("type"),
+        # The stored `type` is the category, which has already dropped the hazard digit. The
+        # code is what still carries it, and the proxy only began storing it on 2026-08-20 --
+        # so this is None on every older record rather than a reading invented from the word.
+        "type_detail": ship_types.describe(record.get("type_code")),
         "destination": record.get("destination"),
         "identified": identified,
         # Dropped on unidentified rows: the confidence describes the reasoning, and printed
@@ -92,6 +97,9 @@ def detail(record: dict) -> dict:
     # conversation link on the Vessels screen is exactly this) must see the same shared-name-safe
     # title the list would have shown, not the raw `vessel` field.
     out["label"] = _label(identified, record.get("vessel"), record.get("mmsi"))
+    # Same reason as label: a screen reached only through detail must offer the same reading of
+    # the type as the list row would.
+    out["type_detail"] = ship_types.describe(record.get("type_code"))
     return out
 
 

@@ -580,6 +580,15 @@ html { scroll-padding-top: var(--head-h, 210px); }
 /* A flex sibling of the search field, and .conv-filters aligns items to their bottom edge --
  * the bottom margin lifts the hint off that line so it reads level with the input's text
  * rather than hanging below the box. It wraps onto its own row on a narrow screen. */
+/* Something explains itself on hover. A dotted underline is the long-standing convention for
+ * it, and it is the only marking on the page that costs nothing when ignored -- the value still
+ * reads normally. help rather than pointer: nothing is clickable here. */
+.has-detail {
+  text-decoration: underline dotted var(--sea-600);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
 .vessel-search-hint { margin: 0 0 6px; text-transform: none; letter-spacing: 0; }
 .vessel-search-hint code {
   font-family: var(--mono);

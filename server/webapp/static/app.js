@@ -127,6 +127,27 @@ function trackHeadHeight() {
  * opens a detail panel, so the link stops the click propagating: following it should not also
  * open, select and scroll to a detail nobody asked for.
  */
+/** Show the type, with the full ITU reading of the code on hover.
+ *
+ * The two screens hold different halves of it: Conversations stores the category as a word
+ * ("Tanker") and Vessels shows the bare code (82). Neither is self-explanatory -- the word has
+ * already dropped the hazard digit, and the number says nothing at all -- so both get the same
+ * tooltip, computed server-side from one shared table.
+ *
+ * The title is cleared, not skipped, when there is no detail: rows are reused across renders,
+ * and a leftover tooltip would describe the previous ship.
+ */
+function setTypeCell(cell, text, detail) {
+  setText(cell, text);
+  if (detail) {
+    cell.title = detail;
+    cell.classList.add("has-detail");
+  } else {
+    cell.removeAttribute("title");
+    cell.classList.remove("has-detail");
+  }
+}
+
 function setLinkedVesselCell(cell, mmsi, text) {
   const link = vesselFinderLink(mmsi, null, text);
   if (!link) {
@@ -644,7 +665,7 @@ function updateConvRow(view, row) {
   // row since the AISHub work. This panel had it only in the detail panel, which is where the
   // reader least needs it -- the list is what gets scanned.
   setLinkedVesselCell(view.cells.vessel, row.mmsi, row.label || "unidentified");
-  setText(view.cells.type, row.type || "—");
+  setTypeCell(view.cells.type, row.type || "—", row.type_detail);
   setText(view.cells.destination, row.destination || "—");
   setText(view.cells.confidence, row.confidence || "—");
   setText(view.cells.turns, String(row.turn_count));
@@ -1018,7 +1039,7 @@ function updateVesselRow(view, row) {
   view.badge.hidden = !row.name_shared;
   setLinkedVesselCell(view.cells.mmsi, row.mmsi, row.mmsi || "—");
   setText(view.cells.callsign, row.callsign || "—");
-  setText(view.cells.type, row.type || "—");
+  setTypeCell(view.cells.type, row.type || "—", row.type_detail);
   setText(view.cells.destination, row.destination || "—");
   setText(view.cells.draught,
     row.draught === null || row.draught === undefined ? "—" : `${row.draught} m`);
@@ -1158,8 +1179,10 @@ function renderVesselFields(detail) {
     // "the full cached entry" -- a field this screen did not anticipate is still shown, not
     // silently dropped, only "conversations" and its snapshot (rendered separately below,
     // resp. consulted by it) are excluded.
+    // type_detail joins the excluded set: it is the Type field's tooltip, not a field of its
+    // own, and listing it would print the same sentence twice.
     if (key !== "conversations" && key !== "conversations_snapshot" &&
-        !VESSEL_FIELD_ORDER.includes(key)) {
+        key !== "type_detail" && !VESSEL_FIELD_ORDER.includes(key)) {
       keys.push(key);
     }
   }
@@ -1174,7 +1197,13 @@ function renderVesselFields(detail) {
       dd.append(link);
       row.append(dd);
     } else {
-      row.append(element("dd", null, vesselFieldValue(key, detail[key])));
+      const dd = element("dd", null, vesselFieldValue(key, detail[key]));
+      // The Type field is an AIS code and reads as a bare number without this.
+      if (key === "type" && detail.type_detail) {
+        dd.title = detail.type_detail;
+        dd.classList.add("has-detail");
+      }
+      row.append(dd);
     }
     dl.append(row);
   }

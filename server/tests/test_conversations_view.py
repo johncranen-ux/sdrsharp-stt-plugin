@@ -144,3 +144,28 @@ def test_records_with_missing_start_sort_to_the_end():
     assert page.rows[0]["start"] == "2026-08-19T10:02:00"
     assert page.rows[1]["start"] == "2026-08-19T10:01:00"
     assert page.rows[2]["start"] is None
+
+
+# -- type tooltips ----------------------------------------------------------------
+#
+# A conversation stores the type CATEGORY as a word ("Tanker"), which loses the hazard digit.
+# The proxy now stores type_code alongside it, so the panel can offer the full reading. Records
+# written before that simply have no code, and must degrade rather than invent one.
+
+
+def test_a_row_carries_the_full_type_reading_when_the_code_was_stored():
+    row = view.summarise({"vessel": "PASHA", "mmsi": "244123456",
+                          "type": "Tanker", "type_code": 82})
+    assert row["type"] == "Tanker"
+    assert "category B" in row["type_detail"]
+
+
+def test_an_older_record_without_a_code_has_no_tooltip_rather_than_a_wrong_one():
+    row = view.summarise({"vessel": "PASHA", "mmsi": "244123456", "type": "Tanker"})
+    assert row["type"] == "Tanker"
+    assert row["type_detail"] is None
+
+
+def test_the_detail_view_offers_the_same_reading_as_the_row():
+    record = {"vessel": "PASHA", "mmsi": "244123456", "type": "Cargo", "type_code": 70}
+    assert view.detail(record)["type_detail"] == view.summarise(record)["type_detail"]

@@ -34,6 +34,8 @@ import time
 import websockets
 from rapidfuzz import fuzz as rf_fuzz, process as rf_process
 
+import ship_types
+
 # Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
 ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
 
@@ -54,23 +56,10 @@ AIS_SAVE_INTERVAL = 300
 
 # ---------------------------------------------------------------------------
 
-AIS_SHIP_TYPES = {
-    30: "Fishing", 31: "Tug", 32: "Tug", 33: "Military ops", 34: "Dive ops",
-    35: "Medical transport", 36: "Sailing", 37: "Pleasure craft",
-    40: "Pilot vessel", 41: "Search & rescue", 42: "Tug", 43: "Port tender",
-    50: "Pilot vessel", 51: "Search & rescue", 52: "Tug", 53: "Port tender",
-    60: "Passenger ship", 61: "Cargo ship", 62: "Tanker", 70: "Tanker",
-    71: "Tanker", 72: "Tanker", 73: "Tanker", 74: "Tanker", 75: "Tanker",
-    76: "Tanker", 77: "Tanker", 78: "Tanker", 80: "General cargo",
-    81: "General cargo", 82: "General cargo", 83: "General cargo",
-    84: "General cargo", 85: "General cargo", 86: "General cargo",
-    87: "General cargo", 88: "General cargo", 89: "Other",
-    90: "Container ship", 91: "Container ship", 92: "Container ship",
-    93: "Container ship", 94: "Container ship", 95: "Container ship",
-    96: "Container ship", 97: "Container ship", 98: "Container ship",
-    100: "Bulk carrier", 101: "Bulk carrier", 102: "Bulk carrier",
-    103: "Bulk carrier", 104: "Bulk carrier", 105: "Bulk carrier",
-}
+# The table that used to live here was wrong: shifted by ten across the whole 60-99 block and
+# scrambled between 33 and 43, so cargo read as "Tanker" and tankers as "General cargo". It now
+# comes from ship_types, which follows ITU-R M.1371 and is shared with the control panel so the
+# two cannot drift again. See that module for the full account.
 
 def _clean_destination(raw: str) -> str | None:
     """The destination a ship broadcasts, with its AIS padding removed.
@@ -85,9 +74,7 @@ def _clean_destination(raw: str) -> str | None:
 
 
 def _get_ship_type_name(type_code) -> str | None:
-    if type_code is None:
-        return None
-    return AIS_SHIP_TYPES.get(type_code, f"Type {type_code}")
+    return ship_types.coarse_name(type_code)
 
 
 # ---------------------------------------------------------------------------
@@ -768,9 +755,13 @@ def _index_name(entry: dict) -> None:
 # How likely a vessel of this type is to be working Maas Approach. Used only to break ties
 # between ships that share a name, never to exclude anything: a sailing yacht CAN call, it is
 # just the least likely of several candidates at the same place.
+# Re-keyed 2026-08-20 onto ship_types' corrected categories. The intent is unchanged --
+# commercial traffic is what works this channel -- but the correction moves real ships: type 79
+# (846 cached vessels) and type 89 (280) were falling through to the default 2 because the old
+# table had no entry for them, and type 90-99 "Other" (361) was being scored 3 as though it were
+# a container ship.
 _TYPE_PLAUSIBILITY = {
-    "Tanker": 3, "General cargo": 3, "Container ship": 3, "Bulk carrier": 3,
-    "Cargo ship": 3, "Passenger ship": 3,
+    "Cargo": 3, "Tanker": 3, "Passenger": 3,
     "Sailing": 1, "Pleasure craft": 1,
 }
 _TYPE_PLAUSIBILITY_DEFAULT = 2
