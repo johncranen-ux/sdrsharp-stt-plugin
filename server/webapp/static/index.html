@@ -150,6 +150,12 @@ py -m webapp.set_password</pre>
         <span class="legend">Search</span>
         <input id="vessel-text" type="search" placeholder="name, MMSI, callsign, destination…">
       </label>
+      <!-- Spelled out rather than left to be discovered: a wildcard nobody knows about is the
+           same as no wildcard, and P?QQ is exactly the shape a half-heard callsign takes. -->
+      <p class="legend vessel-search-hint">
+        Wildcards: <code>?</code> for one character, <code>*</code> for any run — e.g.
+        <code>P?QQ</code>
+      </p>
     </div>
 
     <p id="vessel-stale" class="note note-port" hidden></p>

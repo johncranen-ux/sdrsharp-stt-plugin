@@ -64,3 +64,84 @@ def test_conversations_for_a_vessel_are_found_by_mmsi_not_by_name():
                 "channel": "CH01", "turns": []}]
     found = view.conversations_for(records, "244123456")
     assert len(found) == 1 and found[0]["vessel"] == "PASHA"
+
+
+# -- wildcards ------------------------------------------------------------------
+#
+# Callsigns are spelled out letter by letter over VHF and a single character is the usual
+# thing to lose, so "the callsign was P-something-Q-Q" has to be expressible. `?` standing for
+# exactly one character is the part that matters; `*` is the convenience.
+
+
+def test_a_question_mark_stands_for_exactly_one_character():
+    entries = [_vessel(mmsi="1", callsign="PBQQ"), _vessel(mmsi="2", callsign="PQQ"),
+               _vessel(mmsi="3", callsign="PBBQQ")]
+    assert [r["mmsi"] for r in view.search(entries, text="P?QQ").rows] == ["1"]
+
+
+def test_a_star_stands_for_any_run_including_none():
+    entries = [_vessel(mmsi="1", callsign="PBQQ"), _vessel(mmsi="2", callsign="PQQ"),
+               _vessel(mmsi="3", callsign="PBBBQQ"), _vessel(mmsi="4", callsign="XYZ")]
+    found = {r["mmsi"] for r in view.search(entries, text="P*QQ").rows}
+    assert found == {"1", "2", "3"}
+
+
+def test_a_wildcard_search_still_matches_inside_a_field():
+    # Substring semantics, not full-match: plain text already behaves this way, and a pattern
+    # that suddenly demanded the whole field would be a trap rather than a refinement.
+    entries = [_vessel(mmsi="1", callsign="PBQQ1")]
+    assert view.search(entries, text="P?QQ").total == 1
+
+
+def test_wildcards_work_across_every_searchable_field():
+    entries = [_vessel(mmsi="244123456", name="PASHA", callsign="PBZL", destination="NLRTM")]
+    for needle in ("244*456", "P?SHA", "PB?L", "NL*M"):
+        assert view.search(entries, text=needle).total == 1, needle
+
+
+def test_wildcard_matching_is_case_insensitive_like_plain_text():
+    assert view.search([_vessel(callsign="PBQQ")], text="p?qq").total == 1
+
+
+def test_regex_metacharacters_are_literal_not_patterns():
+    # A vessel name really can contain brackets or a dot, and a needle like "." must not
+    # quietly become "match any character" and return the whole cache.
+    entries = [_vessel(mmsi="1", name="CONDOR (II)"), _vessel(mmsi="2", name="PASHA")]
+    assert [r["mmsi"] for r in view.search(entries, text="(II)").rows] == ["1"]
+    assert view.search(entries, text=".").total == 0
+    assert view.search(entries, text="c+").total == 0
+
+
+def test_a_plain_search_is_unchanged_by_the_wildcard_support():
+    entries = [_vessel(mmsi="1", name="PASHA"), _vessel(mmsi="2", name="CONDOR")]
+    assert [r["mmsi"] for r in view.search(entries, text="pash").rows] == ["1"]
+
+
+def test_a_pattern_that_matches_nothing_returns_nothing_rather_than_everything():
+    entries = [_vessel(mmsi="1", callsign="PBQQ")]
+    assert view.search(entries, text="Z?ZZ").total == 0
+
+
+def test_a_bare_star_matches_every_entry():
+    entries = [_vessel(mmsi="1"), _vessel(mmsi="2")]
+    assert view.search(entries, text="*").total == 2
+
+
+def test_a_wildcard_pattern_is_compiled_once_not_per_entry():
+    # ~6000 cache entries x 4 fields on every debounced keystroke: recompiling inside the loop
+    # would put 24000 compiles behind each one.
+    import re
+
+    entries = [_vessel(mmsi=str(n)) for n in range(50)]
+    original, calls = re.compile, []
+
+    def counting_compile(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    re.compile = counting_compile
+    try:
+        view.search(entries, text="P?SHA")
+    finally:
+        re.compile = original
+    assert len(calls) == 1

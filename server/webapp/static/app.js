@@ -66,6 +66,30 @@ function element(tag, className, text) {
   return node;
 }
 
+// Mirrors stt_proxy/markup.py's _vessel_link, which the proxy's own /conversations page has
+// always had and this panel was built without. The details path rather than the search path:
+// this is read where someone is choosing between candidates, and a search results page makes
+// them choose twice.
+const VESSELFINDER_URL = "https://www.vesselfinder.com/vessels/details/";
+
+/** The MMSI, linked to its VesselFinder page. Null when there is nothing to link. */
+function vesselFinderLink(mmsi, className) {
+  const id = String(mmsi === null || mmsi === undefined ? "" : mmsi).trim();
+  // Digits only. An MMSI is nine digits by definition, and a blank or an em dash placeholder
+  // would build a details URL for nothing -- a link that goes nowhere useful is worse than the
+  // plain text it replaced. Kept as "all digits" rather than exactly nine so a cache entry with
+  // an odd-length identifier still links rather than silently losing the affordance.
+  if (!/^\d+$/.test(id)) return null;
+  const link = element("a", className ? `${className} vf-link` : "vf-link", id);
+  link.href = VESSELFINDER_URL + encodeURIComponent(id);
+  link.target = "_blank";
+  // noreferrer as well as noopener: this is the only place the panel reaches the public web,
+  // and there is no reason to tell vesselfinder.com which local page sent the reader.
+  link.rel = "noopener noreferrer";
+  link.title = `Open MMSI ${id} on VesselFinder`;
+  return link;
+}
+
 /* -- the watch and the gauges -------------------------------------------- */
 
 function renderWatch(health) {
@@ -746,7 +770,8 @@ function renderResolverCandidates(list) {
   for (const c of list) {
     const li = element("li", "cand-item");
     li.append(element("span", "cand-name", c.name || "?"));
-    li.append(element("span", "cand-mmsi", c.mmsi || "—"));
+    li.append(vesselFinderLink(c.mmsi, "cand-mmsi")
+              || element("span", "cand-mmsi", c.mmsi || "—"));
     const bits = [];
     if (c.latitude !== null && c.latitude !== undefined
         && c.longitude !== null && c.longitude !== undefined) {
@@ -772,7 +797,8 @@ function renderSuggestions(list) {
   for (const s of list) {
     const li = element("li", "suggest-item");
     li.append(element("span", "cand-name", s.name || "?"));
-    li.append(element("span", "cand-mmsi", s.mmsi || "—"));
+    li.append(vesselFinderLink(s.mmsi, "cand-mmsi")
+              || element("span", "cand-mmsi", s.mmsi || "—"));
     li.append(element("span", "suggest-score",
       s.score === null || s.score === undefined ? "—" : String(Math.round(s.score))));
     if (s.heard) li.append(element("span", "suggest-heard", `heard “${s.heard}”`));
@@ -803,6 +829,16 @@ function renderConvDetail(detail) {
                      detail.confidence ? `confidence ${detail.confidence}` : null]
     .filter((bit) => bit);
   setText(meta, metaBits.join(" · ") || "—");
+  // The identified vessel's VesselFinder page. In the meta line rather than the title, because
+  // the title is a shared-name-safe LABEL computed server-side and turning it into a link
+  // would invite reading the label itself as confirmation of the ship.
+  const identityLink = vesselFinderLink(detail.mmsi);
+  if (identityLink) {
+    // The separator is unconditional: with no meta bits the line still reads "—", so the link
+    // would otherwise be jammed against the dash.
+    meta.append(document.createTextNode(" · "));
+    meta.append(identityLink);
+  }
   body.append(meta);
 
   body.append(element("h3", null, "Turns"));
@@ -1080,7 +1116,16 @@ function renderVesselFields(detail) {
   for (const key of keys) {
     const row = element("div", "vessel-field");
     row.append(element("dt", "legend", VESSEL_FIELD_LABELS[key] || key));
-    row.append(element("dd", null, vesselFieldValue(key, detail[key])));
+    // The MMSI row carries the VesselFinder link, since the MMSI is what the lookup is keyed
+    // on -- the name is exactly the field that cannot be trusted to identify a ship here.
+    const link = key === "mmsi" ? vesselFinderLink(detail[key]) : null;
+    if (link) {
+      const dd = element("dd", null);
+      dd.append(link);
+      row.append(dd);
+    } else {
+      row.append(element("dd", null, vesselFieldValue(key, detail[key])));
+    }
     dl.append(row);
   }
   return dl;

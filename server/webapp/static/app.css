@@ -534,6 +534,32 @@ body {
 .cand-item:last-child { border-bottom: 0; }
 .cand-name { font-weight: 600; }
 .cand-mmsi { color: var(--fog); }
+
+/* The only link on this page that leaves the machine. It inherits its surroundings' colour
+ * rather than taking one of its own -- amber is reserved for live readings, and an MMSI that
+ * lit up like a gauge would read as a measurement. A dotted underline is the whole signal,
+ * brightening to chart-paper on hover, which is enough to say "this goes somewhere" without
+ * putting a second accent colour on the page. */
+.vf-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.vf-link:hover,
+.vf-link:focus-visible { color: var(--chart); text-decoration: underline solid; }
+.vf-link:focus-visible { outline: 1px solid var(--dial); outline-offset: 2px; }
+
+/* A flex sibling of the search field, and .conv-filters aligns items to their bottom edge --
+ * the bottom margin lifts the hint off that line so it reads level with the input's text
+ * rather than hanging below the box. It wraps onto its own row on a narrow screen. */
+.vessel-search-hint { margin: 0 0 6px; text-transform: none; letter-spacing: 0; }
+.vessel-search-hint code {
+  font-family: var(--mono);
+  color: var(--chart);
+  background: var(--sea-800);
+  padding: 0 4px;
+  border-radius: var(--radius);
+}
 .cand-meta { color: var(--fog); overflow-wrap: anywhere; }
 .cand-pass {
   margin-left: auto;
