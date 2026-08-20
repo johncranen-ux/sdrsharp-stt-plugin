@@ -119,14 +119,6 @@ function trackHeadHeight() {
   else window.addEventListener("resize", measure);
 }
 
-/** Fill a table cell with `text`, linked when the MMSI supports it.
- *
- * Both tables reuse their row objects across renders, so a cell has to be able to go back to
- * plain text when the next row in that slot has no MMSI -- setting textContent alone would
- * leave the previous row's link in place. And every row here is itself a click target that
- * opens a detail panel, so the link stops the click propagating: following it should not also
- * open, select and scroll to a detail nobody asked for.
- */
 /** Show the type, with the full ITU reading of the code on hover.
  *
  * The two screens hold different halves of it: Conversations stores the category as a word
@@ -146,16 +138,6 @@ function setTypeCell(cell, text, detail) {
     cell.removeAttribute("title");
     cell.classList.remove("has-detail");
   }
-}
-
-function setLinkedVesselCell(cell, mmsi, text) {
-  const link = vesselFinderLink(mmsi, null, text);
-  if (!link) {
-    setText(cell, text);
-    return;
-  }
-  link.addEventListener("click", (event) => event.stopPropagation());
-  cell.replaceChildren(link);
 }
 
 /* -- the watch and the gauges -------------------------------------------- */
@@ -661,10 +643,13 @@ function updateConvRow(view, row) {
   view.root.classList.toggle("conv-row-unidentified", !row.identified);
   setText(view.cells.start, row.start || "—");
   setText(view.cells.channel, row.channel || "—");
-  // Matches the proxy's own /conversations page, which has linked the vessel in every listing
-  // row since the AISHub work. This panel had it only in the detail panel, which is where the
-  // reader least needs it -- the list is what gets scanned.
-  setLinkedVesselCell(view.cells.vessel, row.mmsi, row.label || "unidentified");
+  // Plain text, deliberately. This cell was briefly a VesselFinder link, to match the proxy's
+  // own /conversations page -- but that page is a document, and this row is a button: clicking
+  // it opens the conversation. The vessel name is the obvious thing to aim at, so making it a
+  // link meant the natural click left the panel for vesselfinder.com instead of opening the
+  // detail, every time. The link lives on the detail's meta line, where nothing competes with
+  // it. Reported by the operator 2026-08-20.
+  setText(view.cells.vessel, row.label || "unidentified");
   setTypeCell(view.cells.type, row.type || "—", row.type_detail);
   setText(view.cells.destination, row.destination || "—");
   setText(view.cells.confidence, row.confidence || "—");
@@ -1109,7 +1094,10 @@ function updateVesselRow(view, row) {
   // The mark itself: a name two MMSIs share cannot be trusted alone, and it has to read that
   // way right here, not only after opening detail.
   view.badge.hidden = !row.name_shared;
-  setLinkedVesselCell(view.cells.mmsi, row.mmsi, row.mmsi || "—");
+  // Plain text, for the same reason as the conversation row above: this row is a button that
+  // opens the vessel, and a link inside it steals the click. The VesselFinder link is on the
+  // MMSI field of the detail panel.
+  setText(view.cells.mmsi, row.mmsi || "—");
   setText(view.cells.callsign, row.callsign || "—");
   setTypeCell(view.cells.type, row.type || "—", row.type_detail);
   setText(view.cells.destination, row.destination || "—");
