@@ -232,3 +232,48 @@ def test_a_match_seen_after_the_call_is_still_confirmed():
     # The cache is written asynchronously, so a fix stamped a little after the turn is normal
     # and must not read as a negative age that fails the comparison.
     assert _turn_row(live_seen="2026-08-20 14:45:00")["live_match"] == "ais-confirmed"
+
+
+# -- the confirmation threshold follows the operator's setting --------------------
+#
+# AIS_LIVE_MATCH_MAX_AGE_MIN is what the RESOLVER uses to decide a live match is too stale to
+# promote. The screen must use the same number, or changing the setting makes the two disagree
+# silently: the resolver would refuse a match the screen still calls confirmed.
+
+
+def _row_with(threshold_h, live_seen):
+    turn = {"time": "14:41:59", "live_vessel": "AUGUSTA", "live_mmsi": "244850771",
+            "live_seen": live_seen}
+    return view.detail({"start": "2026-08-20 14:41:59", "turns": [turn]},
+                       confirm_max_age_h=threshold_h)["turns"][0]
+
+
+def test_a_tightened_setting_tightens_the_label():
+    # 120 minutes: a two-and-a-half-hour-old fix is no longer a confirmation.
+    assert _row_with(2.0, "2026-08-20 12:11:00")["live_match"] == "ais-stale"
+    assert _row_with(2.0, "2026-08-20 13:11:00")["live_match"] == "ais-confirmed"
+
+
+def test_a_loosened_setting_loosens_it_too():
+    assert _row_with(24.0, "2026-08-19 20:00:00")["live_match"] == "ais-confirmed"
+
+
+def test_the_default_is_the_resolvers_own_360_minutes():
+    assert view.confirm_max_age_hours({}) == 6.0
+    assert view.confirm_max_age_hours({"AIS_LIVE_MATCH_MAX_AGE_MIN": ""}) == 6.0
+
+
+def test_the_setting_is_read_in_minutes():
+    assert view.confirm_max_age_hours({"AIS_LIVE_MATCH_MAX_AGE_MIN": "120"}) == 2.0
+
+
+def test_disabling_the_resolvers_bound_does_not_make_the_screen_assert_more():
+    # 0 means "no bound" to the resolver -- a rollback lever for identification behaviour.
+    # It is not an instruction to call a week-old fix a confirmation, so the DISPLAY keeps the
+    # default. The alternative would restore exactly the misleading label this replaced.
+    assert view.confirm_max_age_hours({"AIS_LIVE_MATCH_MAX_AGE_MIN": "0"}) == 6.0
+
+
+def test_a_nonsense_setting_falls_back_rather_than_crashing_the_screen():
+    for bad in ("abc", "-5", "  ", None):
+        assert view.confirm_max_age_hours({"AIS_LIVE_MATCH_MAX_AGE_MIN": bad}) == 6.0

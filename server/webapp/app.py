@@ -197,7 +197,12 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         records, _snap = data.conversations()
         for record in records:
             if conversations_view.conversation_id(record) == conversation_id:
-                found = conversations_view.detail(record)
+                # The confirmation threshold comes from AIS_LIVE_MATCH_MAX_AGE_MIN, the same
+                # setting the resolver uses to decide a live match is too stale to promote.
+                # Read per request, because it can be changed in the Settings screen while the
+                # panel is running.
+                found = conversations_view.detail(
+                    record, conversations_view.confirm_max_age_hours(values()))
                 # Turns are matched to captured audio here rather than in conversations_view,
                 # which is pure and reads nothing from disk. Every turn gets a clip or None, so
                 # the UI shows a play button only where there is something to play.

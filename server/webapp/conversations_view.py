@@ -68,9 +68,29 @@ def summarise(record: dict) -> dict:
 
 
 # The resolver refuses to promote a live match whose ship was not seen inside
-# LIVE_MATCH_MAX_AGE_MIN (360). The screen uses the same six hours, so the two cannot disagree
-# about whether a match is worth anything.
-LIVE_CONFIRM_MAX_AGE_H = 6.0
+# AIS_LIVE_MATCH_MAX_AGE_MIN. That is an operator SETTING, so the screen reads the same setting
+# rather than hard-coding its default: a hard-coded six hours agreed with the resolver only
+# while nobody changed it, and the moment it was tightened the screen would go on calling a
+# match confirmed that the resolver had already refused. Same fact, one source.
+LIVE_CONFIRM_DEFAULT_MIN = 360
+
+
+def confirm_max_age_hours(values: dict | None) -> float:
+    """How old a live match may be and still be called confirmed, in hours.
+
+    0 means "no bound" to the resolver -- a rollback lever for identification behaviour. It is
+    NOT an instruction to call a week-old fix a confirmation, so the display keeps its default
+    there; honouring it would restore exactly the misleading label this replaced. Anything
+    unparseable falls back the same way: a bad setting must not decide what the screen asserts.
+    """
+    raw = (values or {}).get("AIS_LIVE_MATCH_MAX_AGE_MIN")
+    try:
+        minutes = int(str(raw).strip())
+    except (TypeError, ValueError):
+        minutes = LIVE_CONFIRM_DEFAULT_MIN
+    if minutes <= 0:
+        minutes = LIVE_CONFIRM_DEFAULT_MIN
+    return minutes / 60.0
 
 
 def _live_age_hours(start, live_seen) -> float | None:
@@ -99,7 +119,7 @@ def _parse_stamp(value):
         return None
 
 
-def _live_match(live_vessel, live_mmsi, age_hours) -> str | None:
+def _live_match(live_vessel, live_mmsi, age_hours, confirm_max_age_h) -> str | None:
     """What the screen is allowed to claim about a per-turn AIS match.
 
     The per-turn matcher runs at AIS_NAME_MIN_SCORE=76 with no recency check, so "confirmed"
@@ -120,10 +140,10 @@ def _live_match(live_vessel, live_mmsi, age_hours) -> str | None:
         return "heard-only"
     if age_hours is None:
         return "ais-matched"
-    return "ais-confirmed" if age_hours <= LIVE_CONFIRM_MAX_AGE_H else "ais-stale"
+    return "ais-confirmed" if age_hours <= confirm_max_age_h else "ais-stale"
 
 
-def _turn(turn: dict, start=None) -> dict:
+def _turn(turn: dict, start=None, confirm_max_age_h: float = LIVE_CONFIRM_DEFAULT_MIN / 60.0) -> dict:
     raw, text = turn.get("raw"), turn.get("text")
     conv = turn.get("conv")
     live_vessel, live_mmsi = turn.get("live_vessel"), turn.get("live_mmsi")
@@ -139,19 +159,20 @@ def _turn(turn: dict, start=None) -> dict:
         "changed_by_llm": bool(conv is not None and conv != text),
         "live_vessel": live_vessel,
         "live_mmsi": live_mmsi,
-        "live_match": _live_match(live_vessel, live_mmsi, age_hours),
+        "live_match": _live_match(live_vessel, live_mmsi, age_hours, confirm_max_age_h),
         # Shown beside a stale match, because "last seen 174 hours before this call" is the
         # whole argument -- the label alone would just look like hedging.
         "live_age_hours": age_hours,
     }
 
 
-def detail(record: dict) -> dict:
+def detail(record: dict, confirm_max_age_h: float = LIVE_CONFIRM_DEFAULT_MIN / 60.0) -> dict:
     out = dict(record)
     out["id"] = conversation_id(record)
     identified = _identified(record)
     out["identified"] = identified
-    out["turns"] = [_turn(t, record.get("start")) for t in (record.get("turns") or [])]
+    out["turns"] = [_turn(t, record.get("start"), confirm_max_age_h)
+                    for t in (record.get("turns") or [])]
     if not identified:
         out["confidence"] = None
     # Same computation as summarise()'s row -- a caller that only fetched detail (the vessel ->

@@ -29,7 +29,10 @@ _CONVERSATIONS = [
         "turns": [
             {"time": "2026-08-19T10:15:05+00:00", "raw": "Pasha Approach",
              "text": "Pasha Bulker", "conv": None,
-             "live_vessel": "PASHA BULKER", "live_mmsi": "244123456"},
+             "live_vessel": "PASHA BULKER", "live_mmsi": "244123456",
+             # 3h15m before the call: confirmed under the 360-minute default, stale under a
+             # tightened setting. That difference is what the threshold test below asserts.
+             "live_seen": "2026-08-19 07:00:00"},
         ],
         "resolver_candidates": [],
     },
@@ -361,3 +364,29 @@ def test_no_captures_directory_configured_leaves_turns_unplayable(tmp_path):
 
 def test_clip_audio_needs_a_session(unauthenticated_client):
     assert unauthenticated_client.get("/api/clips/2026-08-19/0000").status_code == 401
+
+
+def _label_with_setting(tmp_path, minutes):
+    from webapp import config_store
+
+    config_store.save(tmp_path / "config.json", {"AIS_LIVE_MATCH_MAX_AGE_MIN": minutes})
+    app, _fake = _build_app(tmp_path)
+    client = TestClient(app)
+    client.headers[CSRF_HEADER] = client.post(
+        "/api/login", json={"password": PASSWORD}).json()["csrf_token"]
+    listed = client.get("/api/conversations").json()["rows"]
+    detail = client.get(f"/api/conversations/{listed[0]['id']}").json()
+    return detail["turns"][0]["live_match"]
+
+
+def test_the_route_honours_the_operators_freshness_setting(tmp_path):
+    """The screen's "confirmed" must follow AIS_LIVE_MATCH_MAX_AGE_MIN, the same setting the
+    resolver uses to refuse a stale live match. Hard-coding the default agreed with the resolver
+    only until someone changed it -- and then the screen would keep calling a match confirmed
+    that the resolver had already thrown out."""
+    # The fixture turn's ship was last seen 3h15m before the call.
+    assert _label_with_setting(tmp_path, "360") == "ais-confirmed"
+
+
+def test_tightening_the_setting_tightens_what_the_screen_claims(tmp_path):
+    assert _label_with_setting(tmp_path, "120") == "ais-stale"
