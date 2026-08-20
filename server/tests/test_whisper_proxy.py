@@ -72,6 +72,17 @@ def test_is_hallucination_false(text):
     ("what is your cosine", "Callsign"),
     ("what is your call sign", "Callsign"),
     ("motor tanker Neptune", "Motortanker Neptune"),
+    # The table normalised motor tanker but never its far commoner sibling: the decoder
+    # produced "motor vessel" 17 times across the benchmarked corpora against ground truth
+    # that always writes "Motorvessel", so every one of them scored as a WER error too.
+    ("motor vessel Neptune", "Motorvessel Neptune"),
+    # ...and the ways it arrives when the channel eats it. "motor vision" is the one that
+    # cost an identification: VISION is a real cached vessel, so the garbled stopword became
+    # a name probe and won at 90.0, which is how BERGE TOWNSEND was reported as VISION on
+    # 2026-08-07. VETS/VESEL/VEHICLE/TIME are the rest of the family, none of them cached.
+    ("motor vision, calling you over", "Motorvessel, calling you over"),
+    ("motor vets calling", "Motorvessel calling"),
+    ("motor vesel calling", "Motorvessel calling"),
     ("draft twelve metres", "draught twelve metres"),
     ("watch out for the boys", "watch out for the buoys"),
     ("mars approach, over", "Maas Approach"),
