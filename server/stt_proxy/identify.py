@@ -216,6 +216,11 @@ def enrich_with_ais(result: dict, raw_text: str = "") -> dict:
     enriched = dict(result)
     enriched.update({
         "vessel": ais["name"], "mmsi": ais["mmsi"], "match_method": method,
+        # When this ship was last actually seen. Carried so the record of a turn can say how
+        # much its match is worth: this matcher runs at 76 with no recency check, and on
+        # 2026-08-20 one labelled turn in five named a ship the resolver had already refused
+        # as stale -- AUGUSTA, seven days old, matched off "Gustav" by 0.9 of a point.
+        "ais_last_seen": ais.get("last_seen"),
         "type": ais.get("type"), "imo": ais.get("imo"),
         "length": ais.get("length"), "beam": ais.get("beam"),
         "draught": ais.get("draught"), "destination": ais.get("destination"),

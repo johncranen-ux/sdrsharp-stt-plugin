@@ -6,6 +6,8 @@ opened.
 """
 from __future__ import annotations
 
+import datetime
+
 import ship_types
 from pydantic import BaseModel
 
@@ -65,10 +67,67 @@ def summarise(record: dict) -> dict:
     }
 
 
-def _turn(turn: dict) -> dict:
+# The resolver refuses to promote a live match whose ship was not seen inside
+# LIVE_MATCH_MAX_AGE_MIN (360). The screen uses the same six hours, so the two cannot disagree
+# about whether a match is worth anything.
+LIVE_CONFIRM_MAX_AGE_H = 6.0
+
+
+def _live_age_hours(start, live_seen) -> float | None:
+    """Hours between the ship's last AIS fix and the call, or None if that cannot be known.
+
+    Negative ages clamp to zero rather than failing the freshness test: the cache is written
+    asynchronously, so a fix stamped a little after the turn is ordinary, not suspicious.
+    """
+    began, seen = _parse_stamp(start), _parse_stamp(live_seen)
+    if began is None or seen is None:
+        return None
+    return max(0.0, (began - seen).total_seconds() / 3600.0)
+
+
+def _parse_stamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.fromisoformat(text).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _live_match(live_vessel, live_mmsi, age_hours) -> str | None:
+    """What the screen is allowed to claim about a per-turn AIS match.
+
+    The per-turn matcher runs at AIS_NAME_MIN_SCORE=76 with no recency check, so "confirmed"
+    was being printed for ships days away -- 21% of labelled turns on the live store, AUGUSTA
+    among them at seven days old, matched off the fragment "Gustav" by 0.9 of a point. The
+    resolver had already rejected that same match as stale. Four states, because "we cannot
+    tell" is genuinely different from "it is stale":
+
+      heard-only    the model heard a name and AIS has no such ship
+      ais-confirmed matched, and the ship was there around the time of the call
+      ais-stale     matched, but the ship's last fix is old enough that it means little
+      ais-matched   matched, age unknown -- every turn stored before 2026-08-20. Silence
+                    about the age is not evidence of freshness, so it does not get "confirmed".
+    """
+    if not live_vessel:
+        return None
+    if not live_mmsi:
+        return "heard-only"
+    if age_hours is None:
+        return "ais-matched"
+    return "ais-confirmed" if age_hours <= LIVE_CONFIRM_MAX_AGE_H else "ais-stale"
+
+
+def _turn(turn: dict, start=None) -> dict:
     raw, text = turn.get("raw"), turn.get("text")
     conv = turn.get("conv")
     live_vessel, live_mmsi = turn.get("live_vessel"), turn.get("live_mmsi")
+    age_hours = _live_age_hours(start, turn.get("live_seen"))
     return {
         "time": turn.get("time"),
         "raw": raw,
@@ -80,8 +139,10 @@ def _turn(turn: dict) -> dict:
         "changed_by_llm": bool(conv is not None and conv != text),
         "live_vessel": live_vessel,
         "live_mmsi": live_mmsi,
-        "live_match": None if not live_vessel
-                      else ("ais-confirmed" if live_mmsi else "heard-only"),
+        "live_match": _live_match(live_vessel, live_mmsi, age_hours),
+        # Shown beside a stale match, because "last seen 174 hours before this call" is the
+        # whole argument -- the label alone would just look like hedging.
+        "live_age_hours": age_hours,
     }
 
 
@@ -90,7 +151,7 @@ def detail(record: dict) -> dict:
     out["id"] = conversation_id(record)
     identified = _identified(record)
     out["identified"] = identified
-    out["turns"] = [_turn(t) for t in (record.get("turns") or [])]
+    out["turns"] = [_turn(t, record.get("start")) for t in (record.get("turns") or [])]
     if not identified:
         out["confidence"] = None
     # Same computation as summarise()'s row -- a caller that only fetched detail (the vessel ->

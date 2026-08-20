@@ -565,7 +565,13 @@ html { scroll-padding-top: var(--head-h, 210px); }
   margin-top: 6px;
   font-size: 12.5px;
 }
+/* Green means a fact, per the palette note at the top: the ship was there. A match to a ship
+ * that was days away is not that fact, so it must not wear the same colour -- that green was
+ * doing the misleading as much as the word "confirmed" was. Fog for both weaker claims: they
+ * are information, not confirmation. */
 .turn-match-ais-confirmed { color: var(--starboard); }
+.turn-match-ais-stale { color: var(--fog); }
+.turn-match-ais-matched { color: var(--fog); }
 .turn-match-heard-only { color: var(--dial); }
 
 .cand-list { list-style: none; margin: 0; padding: 0; }

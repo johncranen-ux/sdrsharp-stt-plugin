@@ -134,6 +134,11 @@ def _record_chunk(channel: str, raw_text: str, result: dict,
             "corrected": result.get("text") or raw_text,
             "live_vessel": result.get("vessel"),
             "live_mmsi": result.get("mmsi"),
+            # The matched ship's last AIS fix, so the age of the match survives into the
+            # stored turn. Same argument as live_mmsi beside it: without this the page cannot
+            # tell a ship that was there from one that was days away, and it was calling both
+            # "AIS-confirmed".
+            "live_seen": result.get("ais_last_seen"),
             "callsign": result.get("callsign"),
         }
         _conversation_chunks.append(chunk)
@@ -764,47 +769,80 @@ def _boilerplate_filter(rows: list[dict]):
 
 
 def _attach_suggestions(row: dict) -> None:
-    """Add `row["suggestions"]` when, and only when, the conversation named nobody.
+    """Add `row["suggestions"]`: the closest names, whether or not anyone was named.
 
-    Mutates in place and leaves `vessel` and `mmsi` alone -- see the note above. Attached to
-    the stored row so the page needs no extra lookup, the same way `candidates` is, and
-    absent entirely when there is nothing to offer: an empty block would train the reader
-    to skip the one that matters.
+    Until 2026-08-20 this returned early on an identified row, reasoning that a named
+    conversation is answered and a shortlist beside it invites second-guessing an
+    identification carrying evidence the shortlist lacks.
+
+    LISTA/LISCA NERA M disproved the premise. The resolver named LISTA -- three days stale --
+    because the single probe "LIST" scored 88.9. The ship actually calling, LISCA NERA M, had
+    been seen five minutes earlier and scored 78.3 on "LIST CANERA", below the cutoff of 85.
+    The identification carried no evidence the shortlist lacked; it was one short probe
+    against a stale name, and the shortlist holding the right answer was suppressed precisely
+    BECAUSE that wrong answer was confident. A wrong confident answer is when the near misses
+    are worth most.
+
+    Mutates in place and leaves `vessel` and `mmsi` alone -- see the note above. Nothing here
+    is ever asserted, so the precision the cutoff protects is untouched by construction.
+    Absent entirely when there is nothing to offer: an empty block would train the reader to
+    skip the one that matters.
     """
-    if not SUGGEST or row.get("vessel"):
+    if not SUGGEST:
         return
     with _resolved_lock:
         corpus = list(_resolved)
     if len(corpus) < SUGGEST_MIN_DOCS:
         return
     text = " ".join((t.get("conv") or t.get("text") or "") for t in row.get("turns") or [])
-    found = suggest_vessels(text, probe_filter=_boilerplate_filter(corpus), n=SUGGEST_N)
+    named = str(row.get("mmsi") or "")
+    # One more than needed when a ship was named, so dropping it below does not leave the
+    # shortlist a name short.
+    found = suggest_vessels(text, probe_filter=_boilerplate_filter(corpus),
+                            n=SUGGEST_N + 1 if named else SUGGEST_N)
+    if named:
+        # The answer does not belong in its own list of alternatives: a slot spent restating
+        # it is a slot not spent on the ship that might be right instead.
+        found = [s for s in found if str(s.get("mmsi") or "") != named][:SUGGEST_N]
     if found:
         row["suggestions"] = found
 
 
 def _format_suggestions(row: dict) -> str:
-    """The shortlist for an unidentified conversation, or "" when there is none.
+    """The shortlist of closest names, or "" when there is none.
 
     The remark is not a caption -- it is what separates this block from an identification.
     Every row stored before this feature existed simply lacks the key.
+
+    Two remarks, because the block answers two different questions. With nobody named it is
+    "nothing cleared the bar; here is what came closest". With a ship named it is "here is what
+    else was close" -- which is the LISTA/LISCA NERA M case, where the named ship was wrong and
+    the right one sat just under the cutoff. Printing the unidentified wording beside a name
+    would be a plain falsehood.
     """
     suggestions = row.get("suggestions") or []
     if not suggestions:
         return ""
-
-    items = []
-    for i, s in enumerate(suggestions, 1):
-        items.append(
-            f'<li><span class="srank">{i}</span>'
-            f'{_vessel_link(s.get("name", "?"), s.get("mmsi"))} '
-            f'<span class="sscore">{float(s.get("score", 0)):.0f}</span> '
-            f'<span class="sheard">heard &ldquo;{_html_escape(str(s.get("heard", "")).title())}'
-            f'&rdquo;</span></li>')
+    if row.get("vessel"):
+        return ('<div class="suggest"><span class="slabel">Others that came close &mdash; these '
+                'scored <em>below the identification cutoff</em>, so they were not considered. '
+                'Check them if the name above looks wrong:'
+                f'</span><ol>{"".join(_suggestion_items(suggestions))}</ol></div>')
 
     return ('<div class="suggest"><span class="slabel">Possible matches &mdash; these scored '
             '<em>below the identification cutoff</em>, so nobody was named. Unconfirmed:'
-            f'</span><ol>{"".join(items)}</ol></div>')
+            f'</span><ol>{"".join(_suggestion_items(suggestions))}</ol></div>')
+
+
+def _suggestion_items(suggestions: list[dict]) -> list[str]:
+    """One <li> per suggestion. Shared by both remarks above so the rows cannot diverge."""
+    return [
+        f'<li><span class="srank">{i}</span>'
+        f'{_vessel_link(s.get("name", "?"), s.get("mmsi"))} '
+        f'<span class="sscore">{float(s.get("score", 0)):.0f}</span> '
+        f'<span class="sheard">heard &ldquo;{_html_escape(str(s.get("heard", "")).title())}'
+        f'&rdquo;</span></li>'
+        for i, s in enumerate(suggestions, 1)]
 
 
 def _validate_exchanges(exchanges: list, chunks: list[dict], by_name: dict) -> list[dict]:
@@ -935,7 +973,11 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
                    # -- a matcher problem versus a cache-membership problem -- and only the
                    # MMSI separates them. Its absence blocked the BORIS SOKOLOV diagnosis
                    # on 2026-08-13 and the same question again five days later.
-                   "live_mmsi": t.get("live_mmsi")}
+                   "live_mmsi": t.get("live_mmsi"),
+                   # And when that ship was last seen, so "AIS-confirmed" has to be earned
+                   # rather than assumed. Turns stored before 2026-08-20 lack it and are
+                   # shown as a match of unknown age, never as a confirmation.
+                   "live_seen": t.get("live_seen")}
             fix = corrections.get(t["id"])
             # Absent rather than equal-to-text when nothing was corrected, so the page can
             # tell "not corrected" from "corrected to the same thing".

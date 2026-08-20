@@ -81,7 +81,11 @@ def test_a_heard_name_with_no_ais_match_is_distinguished_from_a_confirmed_one():
               "live_mmsi": "244123456"}]
     out = view.detail(_record(turns=turns))["turns"]
     assert out[0]["live_match"] == "heard-only"
-    assert out[1]["live_match"] == "ais-confirmed"
+    # "ais-matched", not "ais-confirmed", since 2026-08-20: neither turn here carries
+    # live_seen, and without it the age of the ship's last fix is unknown. A match to a ship
+    # that was days away is not a confirmation, and not knowing which it is cannot be allowed
+    # to read as the good case. See _live_match.
+    assert out[1]["live_match"] == "ais-matched"
 
 
 def test_filtering_by_identified_and_by_channel():
@@ -169,3 +173,62 @@ def test_an_older_record_without_a_code_has_no_tooltip_rather_than_a_wrong_one()
 def test_the_detail_view_offers_the_same_reading_as_the_row():
     record = {"vessel": "PASHA", "mmsi": "244123456", "type": "Cargo", "type_code": 70}
     assert view.detail(record)["type_detail"] == view.summarise(record)["type_detail"]
+
+
+# -- how confident the per-turn AIS match may sound ---------------------------------
+#
+# The per-turn matcher runs at AIS_NAME_MIN_SCORE=76 with no recency check at all, while the
+# resolver retrieves at 85 and refuses to promote a live match whose ship was not seen inside
+# LIVE_MATCH_MAX_AGE_MIN. Measured on the live store on 2026-08-20: 34 of 161 turns labelled
+# "AIS-confirmed" (21%) named a ship the resolver would have refused as stale -- AUGUSTA seven
+# days old, VIPER 109 hours, NELLIE 108. The word "confirmed" has to be earned.
+
+
+def _turn_row(**over):
+    turn = {"time": "14:41:59", "raw": "Kung Gustav", "text": "Kung Gustav",
+            "live_vessel": "AUGUSTA", "live_mmsi": "244850771",
+            "live_seen": "2026-08-20 14:30:00"}
+    turn.update(over)
+    return view.detail({"start": "2026-08-20 14:41:59", "turns": [turn]})["turns"][0]
+
+
+def test_a_recent_match_is_confirmed():
+    assert _turn_row()["live_match"] == "ais-confirmed"
+
+
+def test_a_stale_match_is_not_called_confirmed():
+    # AUGUSTA's real case: matched at 76.9 off "Gustav", last seen seven days earlier.
+    row = _turn_row(live_seen="2026-08-13 09:02:51")
+    assert row["live_match"] == "ais-stale"
+    assert round(row["live_age_hours"]) == 174
+
+
+def test_the_boundary_is_the_resolvers_own_freshness_rule():
+    assert _turn_row(live_seen="2026-08-20 08:45:00")["live_match"] == "ais-confirmed"
+    assert _turn_row(live_seen="2026-08-20 08:35:00")["live_match"] == "ais-stale"
+
+
+def test_a_record_stored_before_the_age_was_kept_claims_no_confirmation():
+    # Every turn written before 2026-08-20 lacks live_seen. Silence about the age is not
+    # evidence of freshness, so those must not keep the strongest wording.
+    row = _turn_row(live_seen=None)
+    assert row["live_match"] == "ais-matched"
+    assert row["live_age_hours"] is None
+
+
+def test_a_name_with_no_mmsi_is_still_heard_only():
+    assert _turn_row(live_mmsi=None, live_seen=None)["live_match"] == "heard-only"
+
+
+def test_no_live_vessel_means_no_claim_at_all():
+    assert _turn_row(live_vessel=None, live_mmsi=None)["live_match"] is None
+
+
+def test_an_unparseable_timestamp_does_not_become_a_confirmation():
+    assert _turn_row(live_seen="not a date")["live_match"] == "ais-matched"
+
+
+def test_a_match_seen_after_the_call_is_still_confirmed():
+    # The cache is written asynchronously, so a fix stamped a little after the turn is normal
+    # and must not read as a negative age that fails the comparison.
+    assert _turn_row(live_seen="2026-08-20 14:45:00")["live_match"] == "ais-confirmed"

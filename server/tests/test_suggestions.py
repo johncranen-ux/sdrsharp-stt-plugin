@@ -194,14 +194,54 @@ def test_an_unidentified_row_gets_suggestions(cache, corpus):
     assert [s["name"] for s in row["suggestions"]] == ["MELTEMI I"]
 
 
-def test_an_identified_row_gets_no_suggestions(cache, corpus):
-    """A named conversation is answered. A shortlist beside it invites second-guessing
-    an identification that carries evidence the shortlist does not have."""
+def test_an_identified_row_ALSO_gets_suggestions(cache, corpus):
+    """Reversed 2026-08-20. This used to assert the opposite.
+
+    The original reasoning was that a named conversation is answered, and a shortlist beside
+    it invites second-guessing an identification carrying evidence the shortlist does not
+    have. LISTA/LISCA NERA M disproved the premise. At 14:42 the resolver named LISTA -- a
+    ship three days stale -- because the single probe "LIST" scored 88.9 against it. The ship
+    actually calling, LISCA NERA M, had been seen five minutes earlier and scored 78.3 on the
+    probe "LIST CANERA", under the cutoff of 85. It was in the cache, it was fresh, it was
+    correct, and the shortlist that would have surfaced it was suppressed precisely BECAUSE
+    the wrong answer had been named confidently.
+
+    A wrong confident answer is when the near misses are worth most, not least. Nothing here
+    is asserted, so precision is untouched by construction.
+    """
+    cache([_v("MELTEMI I", "111")])
+    row = {"vessel": "SOMETHING ELSE", "mmsi": "999",
+           "turns": [{"text": "Maas Approach, meld them in"}]}
+    conv._attach_suggestions(row)
+    assert [s["name"] for s in row["suggestions"]] == ["MELTEMI I"]
+
+
+def test_the_named_vessel_is_not_listed_among_its_own_near_misses(cache, corpus):
+    """A slot spent restating the answer is a slot not spent on the alternative."""
     cache([_v("MELTEMI I", "111")])
     row = {"vessel": "MELTEMI I", "mmsi": "111",
            "turns": [{"text": "Maas Approach, meld them in"}]}
     conv._attach_suggestions(row)
-    assert "suggestions" not in row
+    assert "111" not in [s["mmsi"] for s in row.get("suggestions") or []]
+
+
+def test_excluding_the_named_vessel_does_not_shorten_the_list(cache, corpus):
+    """Ask for one more than needed, so dropping the named ship still fills the shortlist."""
+    cache([_v("MELTEMI I", "111"), _v("MELTEM", "222"), _v("MELDEM IN", "333"),
+           _v("MELTEMI II", "444")])
+    row = {"vessel": "MELTEMI I", "mmsi": "111",
+           "turns": [{"text": "Maas Approach, meld them in"}]}
+    conv._attach_suggestions(row)
+    assert len(row["suggestions"]) == conv.SUGGEST_N
+
+
+def test_an_identified_row_still_keeps_its_identification(cache, corpus):
+    """The reversal must not touch what was named -- only what is offered beside it."""
+    cache([_v("MELTEMI I", "111")])
+    row = {"vessel": "SOMETHING ELSE", "mmsi": "999",
+           "turns": [{"text": "Maas Approach, meld them in"}]}
+    conv._attach_suggestions(row)
+    assert row["vessel"] == "SOMETHING ELSE" and row["mmsi"] == "999"
 
 
 def test_suggestions_never_name_the_vessel(cache, corpus):

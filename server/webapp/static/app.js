@@ -843,6 +843,14 @@ function renderTurnAudio(turn) {
   return wrap;
 }
 
+/** An age in hours, said the way a person would. "109 hours" is arithmetic, not information. */
+function formatAge(hours) {
+  if (hours === null || hours === undefined) return "an unknown time";
+  if (hours < 1) return `${Math.round(hours * 60)} min`;
+  if (hours < 48) return `${Math.round(hours)} h`;
+  return `${Math.round(hours / 24)} days`;
+}
+
 function renderTurn(turn) {
   const item = element("li", "turn");
   const head = element("div", "turn-head");
@@ -867,9 +875,21 @@ function renderTurn(turn) {
   item.append(chain);
 
   // Words carry the claim; the colour in app.css only underlines it.
+  //
+  // Four claims, not two. The per-turn matcher runs at 76 with no recency check, so
+  // "AIS-confirmed" was being printed for ships days away -- 21% of labelled turns on the
+  // live store, AUGUSTA at seven days old among them, while the resolver had already thrown
+  // that same match out as stale. The age is the argument, so it is printed.
   if (turn.live_match === "ais-confirmed") {
     item.append(element("span", "turn-match turn-match-ais-confirmed",
       `AIS-confirmed: ${turn.live_vessel}`));
+  } else if (turn.live_match === "ais-stale") {
+    item.append(element("span", "turn-match turn-match-ais-stale",
+      `AIS name match: ${turn.live_vessel} — but last seen ${formatAge(turn.live_age_hours)} ` +
+      `before this call, so it was not there`));
+  } else if (turn.live_match === "ais-matched") {
+    item.append(element("span", "turn-match turn-match-ais-matched",
+      `AIS name match: ${turn.live_vessel} — age of the match unknown`));
   } else if (turn.live_match === "heard-only") {
     item.append(element("span", "turn-match turn-match-heard-only",
       `Heard only: “${turn.live_vessel}” — no such ship in the AIS cache`));
@@ -904,10 +924,18 @@ function renderResolverCandidates(list) {
 
 // The heading text is not decoration -- without it a below-cutoff guess reads as an
 // identification, which is the exact misreading this framing exists to prevent.
-function renderSuggestions(list) {
+//
+// Two headings, because the block answers two questions. With nobody named: nothing cleared
+// the bar, here is what came closest. With a ship named: here is what else was close -- the
+// LISTA/LISCA NERA M case, where the named ship was three days stale and the ship actually
+// calling sat 6.7 points under the cutoff. Saying "nobody was named" beside a name would be
+// a plain falsehood.
+function renderSuggestions(list, identified) {
   if (!list || !list.length) return null;
   const wrap = element("div", "suggest-block");
-  wrap.append(element("p", "legend suggest-heading", "Scored below the identification cutoff"));
+  wrap.append(element("p", "legend suggest-heading",
+    identified ? "Others that came close — check these if the name above looks wrong"
+               : "Scored below the identification cutoff"));
   const ol = element("ol", "suggest-list");
   for (const s of list) {
     const li = element("li", "suggest-item");
@@ -969,7 +997,7 @@ function renderConvDetail(detail) {
   body.append(element("h3", null, "Resolver candidates"));
   body.append(renderResolverCandidates(detail.resolver_candidates));
 
-  const suggestions = renderSuggestions(detail.suggestions);
+  const suggestions = renderSuggestions(detail.suggestions, detail.identified);
   if (suggestions) body.append(suggestions);
 }
 
