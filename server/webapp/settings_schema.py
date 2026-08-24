@@ -173,6 +173,15 @@ SETTINGS: list[SettingSpec] = [
                 description="Decide vessel identity after each exchange ends, from the whole "
                             "exchange rather than one transmission. Never touches the live "
                             "transcript."),
+    SettingSpec(key="CONVERSATIONS_KEEP", type=SettingType.INT, default="300",
+                group="Identification", minimum=1, maximum=5000,
+                description="How many recent conversations the Conversations screen holds. "
+                            "This is a DISPLAY setting, not a retention one: everything ever "
+                            "resolved is kept permanently in the archive (CONVERSATIONS_DB) "
+                            "regardless. Raising it costs more than it looks -- the panel "
+                            "re-fetches the whole list every 15 seconds, about 3.3 KB per "
+                            "conversation, and the proxy rewrites the whole file on every "
+                            "resolve. Lowering it is free and makes the screen lighter."),
     SettingSpec(key="AIS_HINT_FILTER", type=SettingType.BOOL, default="on",
                 group="Identification",
                 description="Stops ordinary speech ('good day') being matched to real ships."),
