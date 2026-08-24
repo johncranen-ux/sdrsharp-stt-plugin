@@ -49,6 +49,7 @@ def client(tmp_path):
         "PROXY_PORT": str(port),
         "AIS_CACHE_FILE": str(tmp_path / "ais_cache.json"),
         "CONVERSATIONS_FILE": str(tmp_path / "conversations.json"),
+        "CONVERSATIONS_DB": str(tmp_path / "conversations.db"),
         "VESSELS_LOG_FILE": str(tmp_path / "identified_vessels.html"),
         "LOG_DIR": str(tmp_path / "logs"),
         "AIS_SOURCE": "off",

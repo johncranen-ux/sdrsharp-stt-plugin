@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import conversation_archive
 from webapp import (clips, config_store, conversations_view, credentials,
                     health as health_module, logs, registry, settings_api, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
@@ -176,9 +177,27 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
     def read_conversations(identified: bool | None = None, channel: str | None = None,
                            text: str | None = None, limit: int = 50, offset: int = 0) -> dict:
         records, snap = data.conversations()
-        return _envelope(conversations_view.query(
+        page = conversations_view.query(
             records, identified=identified, channel=channel, text=text,
-            limit=limit, offset=offset), snap)
+            limit=limit, offset=offset)
+        # The rows still come from the proxy's 15s snapshot; the comments are joined on here in
+        # ONE query over the page's ids, never one per row -- this list is polled.
+        with conversation_archive.open_db(_archive_db()) as conn:
+            found = conversation_archive.comments_for(conn, [row["id"] for row in page.rows])
+        for row in page.rows:
+            comment = found.get(row["id"])
+            row["has_comment"] = comment is not None
+            row["truth"] = comment["truth"] if comment else None
+        return _envelope(page, snap)
+
+    def _archive_db():
+        """Where the conversation archive lives, resolved per request.
+
+        Per request rather than held, for the same reason _captures_root is: the path is a
+        setting, and the Settings screen can change it while the panel is running.
+        """
+        return conversation_archive.resolve_db_path(
+            values().get("CONVERSATIONS_DB"), server_dir)
 
     def _captures_root():
         """The configured capture directory, or None when it is unset or not there.
@@ -208,6 +227,9 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
                 # the UI shows a play button only where there is something to play.
                 found["turns"] = clips.annotate(found.get("turns") or [],
                                                 record.get("start"), _captures_root())
+                with conversation_archive.open_db(_archive_db()) as conn:
+                    found["comment"] = conversation_archive.get_comment(
+                        conn, conversation_id)
                 return found
         raise HTTPException(status_code=404, detail="no such conversation")
 

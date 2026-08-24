@@ -36,6 +36,7 @@ def client(tmp_path):
     config_store.save(tmp_path / "config.json", {
         "LOG_DIR": str(tmp_path / "logs"),
         "PROXY_PORT": str(_free_port()),
+        "CONVERSATIONS_DB": str(tmp_path / "conversations.db"),
     })
     app = create_app(server_dir=_SERVER_DIR,
                      config_path=tmp_path / "config.json",

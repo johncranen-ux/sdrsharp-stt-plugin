@@ -38,6 +38,9 @@ identified_vessels.html
 # snapshots. The store holds full transcripts of real traffic, so a snapshot leaks as
 # much as the live file.
 conversations*.json
+# The archive and its WAL sidecars. Same reason as conversations*.json above: received radio
+# traffic is user data (NL Telecommunicatiewet 18.13) and never belongs in the repo.
+conversations.db*
 # ...and the timestamped backups a backfill leaves beside it, which the pattern above misses
 # because the name does not end in .json. Same transcripts, same leak.
 conversations.json.bak-*

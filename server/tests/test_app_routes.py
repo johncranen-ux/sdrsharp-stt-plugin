@@ -105,9 +105,17 @@ class _FakeSupervisor:
 
 
 def _build_app(tmp_path):
+    from webapp import config_store
+
     credentials.save_password(tmp_path / "credentials.json", PASSWORD)
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "proxy-2026-08-18.log").write_bytes(b"banner line\n")
+    # config_store.save merges over whatever a caller already wrote (e.g. CAPTURES_DIR in
+    # _client_with_captures) rather than replacing the file -- a plain write here would
+    # silently drop those keys for every test that configures something before calling us.
+    config_store.save(tmp_path / "config.json", {
+        "CONVERSATIONS_DB": str(tmp_path / "conversations.db"),
+        "LOG_DIR": str(tmp_path / "logs")})
     fake = _FakeSupervisor(tmp_path / "logs")
     proxy_data = _fake_proxy_data(_CONVERSATIONS, _VESSELS)
     app = create_app(server_dir=_SERVER_DIR, config_path=tmp_path / "config.json",
@@ -390,3 +398,30 @@ def test_the_route_honours_the_operators_freshness_setting(tmp_path):
 
 def test_tightening_the_setting_tightens_what_the_screen_claims(tmp_path):
     assert _label_with_setting(tmp_path, "120") == "ais-stale"
+
+
+def test_a_list_row_reports_whether_it_has_a_comment(client, tmp_path):
+    import conversation_archive as archive
+    with archive.open_db(tmp_path / "conversations.db") as conn:
+        archive.upsert_comment(conn, "2026-08-19T10:15:00+00:00|16", "246346000", "clear")
+
+    rows = client.get("/api/conversations").json()["rows"]
+    commented = [r for r in rows if r["has_comment"]]
+    assert len(commented) == 1
+    assert commented[0]["truth"] == "246346000"
+    assert all(r["truth"] is None for r in rows if not r["has_comment"])
+
+
+def test_the_detail_carries_the_whole_comment(client, tmp_path):
+    import conversation_archive as archive
+    with archive.open_db(tmp_path / "conversations.db") as conn:
+        archive.upsert_comment(conn, "2026-08-19T10:15:00+00:00|16", "-", "too much static")
+
+    body = client.get("/api/conversations/2026-08-19T10:15:00%2B00:00%7C16").json()
+    assert body["comment"]["truth"] == "-"
+    assert body["comment"]["note"] == "too much static"
+
+
+def test_a_conversation_with_no_comment_says_so_rather_than_omitting_the_key(client):
+    body = client.get("/api/conversations/2026-08-19T10:15:00%2B00:00%7C16").json()
+    assert body["comment"] is None

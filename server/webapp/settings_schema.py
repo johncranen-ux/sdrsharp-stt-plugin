@@ -233,6 +233,12 @@ SETTINGS: list[SettingSpec] = [
                 description="Where resolved conversations are stored. Empty means "
                             "server/stt_proxy/conversations.json, next to the code. Set it to "
                             "move the data off the install directory before a host migration."),
+    SettingSpec(key="CONVERSATIONS_DB", type=SettingType.PATH, default="", group="Paths",
+                description="The durable conversation archive, which is never truncated. Empty "
+                            "means server/stt_proxy/conversations.db, beside conversations.json. "
+                            "Unlike that file -- which keeps only the newest 300 -- this holds "
+                            "every conversation ever resolved, and the comments recorded "
+                            "against them."),
     SettingSpec(key="VESSELS_LOG_FILE", type=SettingType.PATH, default="", group="Paths",
                 description="The identified-vessels HTML log the proxy writes and serves at "
                             "/. Empty means server/identified_vessels.html."),
