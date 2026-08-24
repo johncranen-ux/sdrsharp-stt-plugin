@@ -19,6 +19,7 @@ import os
 import re
 import threading
 
+import conversation_archive
 from rapidfuzz import fuzz as rf_fuzz
 
 from stt_proxy.ais import (_find_ais_hints, _get_ship_type_name, _hint_probes, _km_from_maas,
@@ -920,6 +921,14 @@ CONVERSATIONS_FILE = os.path.normpath(
     os.environ.get("CONVERSATIONS_FILE", "").strip() or _DEFAULT_CONVERSATIONS_FILE)
 CONVERSATIONS_KEEP = int(os.environ.get("CONVERSATIONS_KEEP", "300"))
 
+# The durable archive, which is NOT truncated. CONVERSATIONS_KEEP above governs only the
+# rolling in-memory window and the JSON file the panel polls; everything ever resolved goes
+# here and stays.
+CONVERSATIONS_DB = os.path.normpath(
+    os.environ.get("CONVERSATIONS_DB", "").strip()
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    conversation_archive.DEFAULT_DB_NAME))
+
 _resolved: list[dict] = []
 _resolved_lock = threading.Lock()
 
@@ -944,6 +953,20 @@ def _save_conversations() -> None:
             json.dump(data, fh, indent=1)
     except Exception as exc:
         print(f"[conv] could not save {CONVERSATIONS_FILE}: {exc}", flush=True)
+
+
+def _archive_rows(rows: list[dict]) -> None:
+    """Copy resolved conversations into the durable archive.
+
+    Wrapped exactly like _save_conversations: a failure here is logged and swallowed. The
+    archive is a record-keeping convenience; live transcription is the job, and no amount of
+    broken disk may stop it.
+    """
+    try:
+        with conversation_archive.open_db(CONVERSATIONS_DB) as conn:
+            conversation_archive.insert_many(conn, rows)
+    except Exception as exc:
+        print(f"[conv] could not archive to {CONVERSATIONS_DB}: {exc}", flush=True)
 
 
 def _store_resolved(window: list[dict], exchanges: list[dict],
@@ -1002,6 +1025,9 @@ def _store_resolved(window: list[dict], exchanges: list[dict],
         _resolved.extend(rows)
         del _resolved[:-CONVERSATIONS_KEEP]
     _save_conversations()
+    # After the rolling store, not before: the archive is the backstop, and a conversation
+    # must never be archived that the live path failed to record.
+    _archive_rows(rows)
 
 
 def _resolve_window(window: list[dict]) -> None:
