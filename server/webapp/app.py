@@ -37,6 +37,12 @@ class SessionInfo(BaseModel):
     password_set: bool
 
 
+class CommentIn(BaseModel):
+    conversation_id: str
+    truth: str = ""
+    note: str = ""
+
+
 def _is_secure(request: Request) -> bool:
     """TLS is terminated outside this app, so the forwarded header is the real signal."""
     forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
@@ -309,6 +315,19 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         if applied.changed:
             config_store.save(config_path, {key: applied.values[key] for key in applied.changed})
         return {"changed": sorted(applied.changed), "restart_needed": sorted(applied.restart_needed)}
+
+    # On `mutating`, not `guarded`, so the enumeration test covers its session and CSRF guards.
+    #
+    # POST /api/comments rather than POST /api/conversations/{id}/comment: the detail route is
+    # registered with a `{conversation_id:path}` converter, which is greedy and would match
+    # ".../comment" too. Putting the id in the body removes that dependence on route ordering,
+    # and the id -- which contains a space and a pipe -- belongs in a body regardless.
+    @mutating.post("/api/comments")
+    def write_comment(body: CommentIn) -> dict:
+        with conversation_archive.open_db(_archive_db()) as conn:
+            stored = conversation_archive.upsert_comment(
+                conn, body.conversation_id, body.truth, body.note)
+        return {"comment": stored}
 
     app.include_router(open_routes)
     app.include_router(guarded)

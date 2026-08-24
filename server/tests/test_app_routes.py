@@ -460,3 +460,38 @@ def test_the_detail_route_degrades_when_the_archive_cannot_be_opened(client, mon
     assert body["comments_error"] is not None
     # The record itself -- which never touches the archive -- must still be intact.
     assert body["vessel"] == "PASHA BULKER"
+
+
+def test_saving_a_comment_stores_it(client):
+    body = client.post("/api/comments", json={
+        "conversation_id": "2026-08-19T10:15:00+00:00|16",
+        "truth": "246346000", "note": "heard clearly"}).json()
+    assert body["comment"]["truth"] == "246346000"
+
+    detail = client.get("/api/conversations/2026-08-19T10:15:00%2B00:00%7C16").json()
+    assert detail["comment"]["note"] == "heard clearly"
+
+
+def test_clearing_both_fields_removes_the_comment(client):
+    client.post("/api/comments", json={"conversation_id": "2026-08-19T10:15:00+00:00|16",
+                                       "truth": "246346000", "note": "x"})
+    body = client.post("/api/comments", json={"conversation_id": "2026-08-19T10:15:00+00:00|16",
+                                              "truth": "", "note": ""}).json()
+    assert body["comment"] is None
+
+    rows = client.get("/api/conversations").json()["rows"]
+    assert all(not r["has_comment"] for r in rows)
+
+
+def test_a_note_with_no_verdict_is_allowed(client):
+    """Purpose 1 is documentation. A note must not require deciding who the vessel was."""
+    body = client.post("/api/comments", json={
+        "conversation_id": "2026-08-19T10:15:00+00:00|16",
+        "truth": "", "note": "could not tell, too much static"}).json()
+    assert body["comment"]["truth"] is None
+    assert body["comment"]["note"] == "could not tell, too much static"
+
+
+def test_posting_a_comment_unauthenticated_is_rejected(unauthenticated_client):
+    assert unauthenticated_client.post(
+        "/api/comments", json={"conversation_id": "x", "truth": "", "note": "y"}).status_code == 401
