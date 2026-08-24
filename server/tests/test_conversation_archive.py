@@ -188,6 +188,57 @@ def test_the_export_is_accepted_by_bench_identify(tmp_path):
     assert labels[0].note == "heard clearly"
 
 
+def test_notes_with_newlines_are_sanitised(tmp_path):
+    """Notes containing newlines corrupt the export: parse_labels joins rows with \\n, so
+    internal newlines emit stray unparseable lines. Newlines in the note field are harmless
+    and wanted in the UI (textarea), but the export must sanitise them to a single space."""
+    import bench_identify
+
+    with archive.open_db(tmp_path / "a.db") as conn:
+        cid = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        # Note with multiple internal newlines and carriage returns
+        note = "heard clearly\nvessel was\rmoving fast"
+        archive.upsert_comment(conn, cid, "246346000", note)
+        text = archive.labels_text(conn)
+
+    # Verify the export is parseable by bench_identify
+    out = tmp_path / "labels.txt"
+    out.write_text(text, encoding="utf-8")
+    labels = bench_identify.parse_labels(out)
+
+    # Verify the newlines were replaced with spaces
+    assert len(labels) == 1
+    assert labels[0].note == "heard clearly vessel was moving fast"
+
+
+def test_conversations_with_missing_end_are_excluded(tmp_path):
+    """A conversation with end=None cannot emit a valid label line: parse_labels requires
+    two consecutive timestamp tokens, and an empty end field produces "<start>\\t\\t<truth>"
+    which fails to match. Rather than guess a zero-length window, exclude such rows."""
+    import bench_identify
+
+    with archive.open_db(tmp_path / "a.db") as conn:
+        # Insert a conversation with end=None manually to test the edge case
+        record_with_end = _record(start="2026-08-24 12:10:55", end="2026-08-24 12:11:23")
+        record_without_end = _record(start="2026-08-24 13:00:00", end=None)
+        archive.insert_conversation(conn, record_with_end)
+        archive.insert_conversation(conn, record_without_end)
+        cid_with_end = archive.conversation_id(record_with_end)
+        cid_without_end = archive.conversation_id(record_without_end)
+        archive.upsert_comment(conn, cid_with_end, "111111111", "complete record")
+        archive.upsert_comment(conn, cid_without_end, "222222222", "incomplete record")
+        text = archive.labels_text(conn)
+
+    # Verify the export is parseable and only contains the row with a valid end
+    out = tmp_path / "labels.txt"
+    out.write_text(text, encoding="utf-8")
+    labels = bench_identify.parse_labels(out)
+
+    assert len(labels) == 1
+    assert labels[0].mmsi == "111111111"
+    assert labels[0].note == "complete record"
+
+
 def test_two_connections_write_different_tables_without_locking(tmp_path):
     """The live arrangement: the proxy inserts conversations while the panel upserts comments,
     from two separate processes into one file. WAL is what makes that safe -- without it the

@@ -200,7 +200,13 @@ def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
     """
     sql = ('SELECT c.start AS start, c."end" AS end, m.truth AS truth, m.note AS note '
            "FROM comments m JOIN conversations c ON c.id = m.conversation_id "
-           "WHERE m.truth IS NOT NULL ")
+           "WHERE m.truth IS NOT NULL "
+           # Rows with a missing end timestamp cannot emit a valid label line: parse_labels
+           # requires two consecutive timestamp tokens and would reject "<start>\t\t<truth>".
+           # Rather than guess a zero-length window (which would corrupt scoring), we skip such
+           # rows entirely. Currently unreachable from _store_resolved (which always sets end),
+           # but reachable by import in the next task's backfill, and the schema permits NULL.
+           "AND c.\"end\" IS NOT NULL AND c.\"end\" != '' ")
     params: list[str] = []
     if day:
         sql += "AND c.start LIKE ? "
@@ -212,8 +218,13 @@ def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
         # A tab ends the vessel and begins the note, so a row with no note must not emit a
         # trailing tab -- parse_labels would read the empty remainder as the note, which is
         # harmless, but a file people hand-edit should not carry invisible whitespace.
-        fields = [row["start"], row["end"] or "", row["truth"]]
+        fields = [row["start"], row["end"], row["truth"]]
         if row["note"]:
-            fields.append(row["note"])
+            # Sanitise newlines in the note: parse_labels joins with \n and _LINE_RE matches
+            # one line at a time, so internal newlines would emit stray unparseable lines.
+            # Replace \r\n, \n, or \r with a single space (tabs are safe -- partition splits
+            # on the first tab only, so internal tabs stay inside the note field).
+            sanitised_note = row["note"].replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+            fields.append(sanitised_note)
         lines.append("\t".join(fields))
     return "\n".join(lines) + "\n"
