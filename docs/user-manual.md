@@ -469,6 +469,56 @@ Also available directly from the proxy:
 | `/api/conversations` | The same data as JSON |
 | `/api/ais-cache` | Current AIS vessel cache |
 
+### The conversation archive
+
+`conversations.json` was never meant as long-term storage: it is rewritten whole on every
+resolve and keeps only the newest 300 conversations, which is still what drives the
+Conversations screen above. Everything older used to be gone the moment it aged out — no
+backup, no recovery. `server/stt_proxy/conversations.db` fixes that: it is **append-only and
+never truncated**, so it holds every conversation ever resolved, for as long as you keep the
+file. Comments (below) live in the same file, in their own table.
+
+It sits beside `conversations.json`, one file per install unless you point `CONVERSATIONS_DB`
+(Settings screen, **Paths** group) somewhere else; empty means the default location. The proxy
+writes conversations there and the panel writes comments there — two processes, two tables,
+one file, safe together under SQLite's WAL mode.
+
+**Backing it up means copying three files**, not one: WAL mode keeps `conversations.db`
+alongside `conversations.db-wal` and `conversations.db-shm`, and a copy missing either of the
+other two is not a usable backup. All three are gitignored (`conversations.db*`).
+
+**Recovering an old `conversations.json` backup into the archive:**
+
+```bash
+cd server
+py conversation_archive.py --import <file>...
+```
+
+Pass files newest-first — on a conversation both files contain, the first one listed wins. The
+import is idempotent (it skips anything already archived), so it's safe to run again whenever
+another old backup turns up; a repeat run against files already imported inserts nothing. This
+is exactly how the archive was first populated: 600 records read across `conversations.json`
+and a 2026-08-18 backup, 519 new, 81 duplicates. The archive now spans 2026-08-07 10:40:14
+through 2026-08-24 13:53:09, while the 300-conversation live window only reaches back to
+2026-08-13 19:55:25 — 219 conversations that exist nowhere else.
+
+**Recording a comment.** Open a conversation's detail view (Conversations screen) to find
+**Real vessel** and **Note** fields below the turns. Note is free text. Real vessel is the
+verdict: type to search the AIS cache and click a match to fill in its MMSI, type `-` if no
+vessel on the channel is identifiable, or leave it blank if you're only leaving a note without
+a verdict yet. **Prefer the MMSI over typing a name** — the search does this for you when you
+click a match. A bare name shared by two vessels resolves arbitrarily wherever it's used
+downstream, which has already cost this project about seven points of measured identification
+accuracy. Clearing both fields deletes the comment.
+
+**Ground-truth export.** `GET /api/labels` on the panel (sign-in required, like everything
+else there) returns every *reviewed* comment — one with a verdict recorded, not just a note —
+as a plain-text file in the format `server/bench_identify.py` reads:
+`<start><TAB><end><TAB><vessel, MMSI, or -><TAB><note>`. Add `?day=YYYY-MM-DD` to export one
+day only. A comment with a note but no verdict is left out entirely rather than exported with
+an empty verdict field — an absent line means "not reviewed yet", not "nobody identifiable";
+that's what the `-` verdict is for.
+
 ### Vessels
 
 Search the whole AIS cache by name, MMSI, callsign or destination as free text. Each row's

@@ -1973,7 +1973,11 @@ identification regresses.
   format, including conventions for uncertain/inaudible audio)
 - Identification accuracy: `py server/bench_identify.py --labels identification-labels.txt`
   (draft the labels with `--make-labels` first, then correct them; add `--resolve` to
-  re-run the resolver and score that, which is how a resolver or prompt change is A/B'd)
+  re-run the resolver and score that, which is how a resolver or prompt change is A/B'd).
+  `GET /api/labels` on the control panel is now a second source of the same file format,
+  built from verdicts recorded against real conversations in the durable archive
+  (`server/conversation_archive.py`) rather than from `--make-labels`' guesses — see the
+  user manual's [conversation archive](user-manual.md#the-conversation-archive) section.
 
 ## Deployment
 
