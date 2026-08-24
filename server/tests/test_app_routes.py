@@ -495,3 +495,47 @@ def test_a_note_with_no_verdict_is_allowed(client):
 def test_posting_a_comment_unauthenticated_is_rejected(unauthenticated_client):
     assert unauthenticated_client.post(
         "/api/comments", json={"conversation_id": "x", "truth": "", "note": "y"}).status_code == 401
+
+
+def test_the_labels_export_is_plain_text_and_parses(client, tmp_path):
+    import conversation_archive as archive
+    with archive.open_db(tmp_path / "conversations.db") as conn:
+        archive.insert_conversation(conn, {
+            "start": "2026-08-19 10:15:00", "end": "2026-08-19 10:16:30",
+            "channel": "16", "vessel": "PASHA BULKER", "mmsi": "244123456"})
+        archive.upsert_comment(conn, "2026-08-19 10:15:00|16", "244123456", "clear")
+
+    response = client.get("/api/labels")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+
+    import bench_identify
+    out = tmp_path / "labels.txt"
+    out.write_text(response.text, encoding="utf-8")
+    assert len(bench_identify.parse_labels(out)) == 1
+
+
+def test_the_labels_export_can_be_narrowed_to_one_day(client, tmp_path):
+    import conversation_archive as archive
+    with archive.open_db(tmp_path / "conversations.db") as conn:
+        for day in ("2026-08-19", "2026-08-20"):
+            archive.insert_conversation(conn, {
+                "start": f"{day} 10:15:00", "end": f"{day} 10:16:30", "channel": "16"})
+            archive.upsert_comment(conn, f"{day} 10:15:00|16", "244123456", "")
+
+    text = client.get("/api/labels?day=2026-08-20").text
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert len(lines) == 1
+    assert lines[0].startswith("2026-08-20")
+
+
+def test_the_labels_export_rejects_an_unauthenticated_request(unauthenticated_client):
+    assert unauthenticated_client.get("/api/labels").status_code == 401
+
+
+def test_the_labels_export_rejects_invalid_day_format(client):
+    assert client.get("/api/labels?day=%").status_code == 400
+    assert client.get("/api/labels?day=2026-08-2_").status_code == 400
+    assert client.get("/api/labels?day=not-a-date").status_code == 400
+    # Valid format should not 400
+    assert client.get("/api/labels?day=2026-08-20").status_code == 200

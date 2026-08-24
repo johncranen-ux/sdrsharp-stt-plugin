@@ -9,11 +9,12 @@ this app's own routes and asserts both -- that is what keeps it true as routes a
 """
 from __future__ import annotations
 
+import re
 import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -298,6 +299,23 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         # fetched", and an empty list reads as the former either way.
         entry["conversations_snapshot"] = conv_snap.model_dump()
         return entry
+
+    @guarded.get("/api/labels", response_class=PlainTextResponse)
+    def read_labels(day: str | None = None) -> str:
+        """The identification ground truth, in the format bench_identify.parse_labels reads.
+
+        Text rather than JSON because its consumer is a file on disk that a human also hand-
+        edits; a JSON round trip would only be in the way.
+        """
+        # Validate day format at the HTTP boundary to prevent LIKE metacharacter injection.
+        # A simple format guard -- not a calendar validity check.
+        if day is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise HTTPException(
+                status_code=400,
+                detail="day must be in YYYY-MM-DD format")
+
+        with conversation_archive.open_db(_archive_db()) as conn:
+            return conversation_archive.labels_text(conn, day=day)
 
     @guarded.get("/api/settings")
     def read_settings() -> dict:
