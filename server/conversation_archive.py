@@ -11,11 +11,13 @@ happened to take. This archive is append-only and never deletes.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import datetime
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -228,3 +230,43 @@ def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
             fields.append(sanitised_note)
         lines.append("\t".join(fields))
     return "\n".join(lines) + "\n"
+
+
+def import_files(db_path, json_paths) -> tuple[int, int]:
+    """Backfill the archive from conversations.json files. Returns (records read, inserted).
+
+    Idempotent by construction: insert_conversation ignores an id already present, so running
+    this again after another backup surfaces adds only what is genuinely new.
+    """
+    read = 0
+    inserted = 0
+    with open_db(db_path) as conn:
+        for path in json_paths:
+            try:
+                records = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(f"{path}: could not be read as JSON: {exc}") from exc
+            if not isinstance(records, list):
+                raise ValueError(f"{path}: expected a list of conversations, "
+                                 f"got {type(records).__name__}")
+            read += len(records)
+            inserted += insert_many(conn, records)
+    return read, inserted
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", default="", help="archive path (default: beside conversations.json)")
+    parser.add_argument("--import", dest="sources", nargs="+", required=True,
+                        metavar="FILE", help="conversations.json files to backfill from")
+    args = parser.parse_args(argv)
+
+    server_dir = Path(__file__).resolve().parent
+    db_path = resolve_db_path(args.db, server_dir)
+    read, inserted = import_files(db_path, args.sources)
+    print(f"{db_path}: read {read}, inserted {inserted}, already present {read - inserted}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

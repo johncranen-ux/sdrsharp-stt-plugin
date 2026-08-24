@@ -1,6 +1,9 @@
 """The SQLite archive: schema, inserts, and the id that joins it to the live store."""
+import json as _json
 import sys
 from pathlib import Path
+
+import pytest
 
 _SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SERVER_DIR))
@@ -251,3 +254,39 @@ def test_two_connections_write_different_tables_without_locking(tmp_path):
             archive.upsert_comment(panel_conn, f"id-{minute}", "246346000", "note")
         assert proxy_conn.execute("SELECT count(*) FROM conversations").fetchone()[0] == 20
         assert panel_conn.execute("SELECT count(*) FROM comments").fetchone()[0] == 20
+
+
+def _write_json(path, records):
+    path.write_text(_json.dumps(records), encoding="utf-8")
+    return path
+
+
+def test_import_reads_a_conversations_file(tmp_path):
+    source = _write_json(tmp_path / "conversations.json",
+                         [_record(), _record(start="2026-08-24 13:00:00")])
+    read, inserted = archive.import_files(tmp_path / "a.db", [source])
+    assert (read, inserted) == (2, 2)
+
+
+def test_importing_twice_changes_nothing(tmp_path):
+    """The operator will run this again when another backup surfaces. It must be safe."""
+    source = _write_json(tmp_path / "conversations.json", [_record()])
+    archive.import_files(tmp_path / "a.db", [source])
+    read, inserted = archive.import_files(tmp_path / "a.db", [source])
+    assert (read, inserted) == (1, 0)
+
+
+def test_overlapping_files_are_deduplicated(tmp_path):
+    """The live file and the backup overlap; the union is what matters, not the sum."""
+    shared = _record(start="2026-08-14 23:52:58")
+    live = _write_json(tmp_path / "live.json", [shared, _record()])
+    backup = _write_json(tmp_path / "backup.json", [shared, _record(start="2026-08-07 10:40:14")])
+    read, inserted = archive.import_files(tmp_path / "a.db", [live, backup])
+    assert read == 4
+    assert inserted == 3
+
+
+def test_import_reports_a_file_it_cannot_read(tmp_path):
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="broken.json"):
+        archive.import_files(tmp_path / "a.db", [tmp_path / "broken.json"])
