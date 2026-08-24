@@ -425,3 +425,38 @@ def test_the_detail_carries_the_whole_comment(client, tmp_path):
 def test_a_conversation_with_no_comment_says_so_rather_than_omitting_the_key(client):
     body = client.get("/api/conversations/2026-08-19T10:15:00%2B00:00%7C16").json()
     assert body["comment"] is None
+
+
+def test_the_list_route_degrades_when_the_archive_cannot_be_opened(client, monkeypatch):
+    """A locked, corrupted or unwritable comment store must not blank the whole screen -- the
+    rows above it came from the healthy proxy snapshot and are fine on their own."""
+    import conversation_archive as archive
+
+    def _boom(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(archive, "connect", _boom)
+
+    response = client.get("/api/conversations")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["comments_error"] is not None
+    assert len(body["rows"]) == 2
+    assert all(row["has_comment"] is False and row["truth"] is None for row in body["rows"])
+
+
+def test_the_detail_route_degrades_when_the_archive_cannot_be_opened(client, monkeypatch):
+    import conversation_archive as archive
+
+    def _boom(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(archive, "connect", _boom)
+
+    response = client.get("/api/conversations/2026-08-19T10:15:00%2B00:00%7C16")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["comment"] is None
+    assert body["comments_error"] is not None
+    # The record itself -- which never touches the archive -- must still be intact.
+    assert body["vessel"] == "PASHA BULKER"

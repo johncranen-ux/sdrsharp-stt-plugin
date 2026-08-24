@@ -182,13 +182,14 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
             limit=limit, offset=offset)
         # The rows still come from the proxy's 15s snapshot; the comments are joined on here in
         # ONE query over the page's ids, never one per row -- this list is polled.
-        with conversation_archive.open_db(_archive_db()) as conn:
-            found = conversation_archive.comments_for(conn, [row["id"] for row in page.rows])
+        found, comments_error = _comments_for_page([row["id"] for row in page.rows])
         for row in page.rows:
             comment = found.get(row["id"])
             row["has_comment"] = comment is not None
             row["truth"] = comment["truth"] if comment else None
-        return _envelope(page, snap)
+        body = _envelope(page, snap)
+        body["comments_error"] = comments_error
+        return body
 
     def _archive_db():
         """Where the conversation archive lives, resolved per request.
@@ -198,6 +199,31 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         """
         return conversation_archive.resolve_db_path(
             values().get("CONVERSATIONS_DB"), server_dir)
+
+    def _comments_for_page(ids: list[str]) -> tuple[dict[str, dict], str | None]:
+        """Every comment for a page of ids, or a degraded empty result with a reason.
+
+        The comment store is an enrichment on rows that already came from the healthy proxy
+        snapshot, so a store that is locked, corrupted or sitting behind an unwritable
+        directory must not take the whole screen down -- the same posture proxy_data.py takes
+        for a fetch failure, and _archive_rows already takes on the write side. Exception,
+        not sqlite3.Error: a bad configured path raises OSError from the mkdir inside
+        conversation_archive.connect, and any of these must degrade the same way.
+        """
+        try:
+            with conversation_archive.open_db(_archive_db()) as conn:
+                return conversation_archive.comments_for(conn, ids), None
+        except Exception as exc:
+            return {}, f"the comment store could not be opened ({type(exc).__name__})"
+
+    def _comment_for(conversation_id: str) -> tuple[dict | None, str | None]:
+        """One conversation's comment, or a degraded None result with a reason. See
+        _comments_for_page for why this must never raise into the route."""
+        try:
+            with conversation_archive.open_db(_archive_db()) as conn:
+                return conversation_archive.get_comment(conn, conversation_id), None
+        except Exception as exc:
+            return None, f"the comment store could not be opened ({type(exc).__name__})"
 
     def _captures_root():
         """The configured capture directory, or None when it is unset or not there.
@@ -227,9 +253,7 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
                 # the UI shows a play button only where there is something to play.
                 found["turns"] = clips.annotate(found.get("turns") or [],
                                                 record.get("start"), _captures_root())
-                with conversation_archive.open_db(_archive_db()) as conn:
-                    found["comment"] = conversation_archive.get_comment(
-                        conn, conversation_id)
+                found["comment"], found["comments_error"] = _comment_for(conversation_id)
                 return found
         raise HTTPException(status_code=404, detail="no such conversation")
 
