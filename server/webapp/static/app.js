@@ -625,7 +625,7 @@ function buildConvRow() {
   tr.tabIndex = 0;
   const cells = {};
   for (const key of ["start", "channel", "vessel", "type", "destination",
-                      "confidence", "turns", "candidates"]) {
+                      "confidence", "turns", "candidates", "review"]) {
     cells[key] = element("td", "conv-cell");
     tr.append(cells[key]);
   }
@@ -655,6 +655,13 @@ function updateConvRow(view, row) {
   setText(view.cells.confidence, row.confidence || "—");
   setText(view.cells.turns, String(row.turn_count));
   setText(view.cells.candidates, String(row.candidate_count));
+  // Plain text, never a control. This row is a button that opens the detail, and putting
+  // anything clickable inside it is the mistake the VesselFinder links made -- the natural
+  // click landed on the inner element every time, and the operator reported it.
+  // "reviewed" means a verdict was recorded; "note" means a note with no verdict, which is a
+  // real and different state -- it says someone looked and could not tell.
+  setText(view.cells.review,
+    row.has_comment ? (row.truth ? "reviewed" : "note") : "—");
 }
 
 function showConvSnapshot(snapshot) {
@@ -936,6 +943,118 @@ function renderSuggestions(list, identified) {
   return wrap;
 }
 
+/* The comment editor.
+ *
+ * Two fields, because the operator asked for two things: what the vessel really was when the
+ * resolver got it wrong, and a free note. The verdict is optional -- a note that says "could
+ * not tell" is a real contribution and must not require naming anyone.
+ *
+ * The vessel field searches the AIS cache and stores the picked vessel's MMSI rather than its
+ * name. Names are not safe as ground truth: a name shared by two MMSIs resolves arbitrarily,
+ * which cost this project about seven precision points before anyone noticed. Free text stays
+ * allowed for dark vessels, which are never in the cache, and for "-".
+ */
+function renderCommentEditor(detail) {
+  const wrap = element("div", "comment-editor");
+  wrap.append(element("h3", null, "Comment"));
+
+  // comments_error means the archive could not be opened -- detail.comment is null and
+  // has_comment is false for reasons that have nothing to do with whether a comment exists.
+  // "we could not ask" must never print as "there is nothing" -- see showConvSnapshot /
+  // renderVesselConversations for the same distinction made elsewhere in this file.
+  if (detail.comments_error) {
+    wrap.append(element("p", "conv-note note-port",
+      `comment could not be read — ${detail.comments_error}`));
+    return wrap;
+  }
+
+  const comment = detail.comment || {};
+
+  const truthRow = element("label", "comment-field");
+  truthRow.append(element("span", "comment-label", "Real vessel"));
+  const truth = document.createElement("input");
+  truth.type = "text";
+  truth.className = "comment-input";
+  truth.placeholder = "name, MMSI, or - for nobody";
+  truth.value = comment.truth || "";
+  truthRow.append(truth);
+  wrap.append(truthRow);
+
+  const matches = element("ul", "comment-matches");
+  wrap.append(matches);
+
+  const noteRow = element("label", "comment-field");
+  noteRow.append(element("span", "comment-label", "Note"));
+  const note = document.createElement("textarea");
+  note.className = "comment-input comment-note";
+  note.rows = 3;
+  note.value = comment.note || "";
+  noteRow.append(note);
+  wrap.append(noteRow);
+
+  const actions = element("div", "comment-actions");
+  const save = element("button", "button", "Save");
+  save.type = "button";
+  const status = element("span", "comment-status",
+    comment.updated_at ? `saved ${comment.updated_at}` : "");
+  actions.append(save, status);
+  wrap.append(actions);
+
+  // Debounced, because this fires per keystroke over a 6,469-entry cache. 250ms is the same
+  // feel as the Vessels screen's search.
+  let searchTimer = null;
+  truth.addEventListener("input", () => {
+    window.clearTimeout(searchTimer);
+    const needle = truth.value.trim();
+    if (needle.length < 2 || needle === "-") { matches.replaceChildren(); return; }
+    searchTimer = window.setTimeout(async () => {
+      try {
+        const body = await api(`/api/vessels?text=${encodeURIComponent(needle)}&limit=6`);
+        matches.replaceChildren();
+        for (const row of body.rows || []) {
+          const item = element("li", "comment-match");
+          const pick = element("button", "comment-pick", `${row.name || "—"} · ${row.mmsi}`);
+          pick.type = "button";
+          // Store the MMSI, show the name. The MMSI is the unambiguous half.
+          pick.addEventListener("click", () => {
+            truth.value = row.mmsi;
+            matches.replaceChildren();
+          });
+          item.append(pick);
+          matches.append(item);
+        }
+      } catch (error) {
+        matches.replaceChildren(element("li", "comment-match", `search failed: ${error.message}`));
+      }
+    }, 250);
+  });
+
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    setText(status, "saving…");
+    try {
+      const body = await api("/api/comments", {
+        method: "POST",
+        body: JSON.stringify({ conversation_id: detail.id, truth: truth.value, note: note.value }),
+      });
+      detail.comment = body.comment;
+      setText(status, body.comment ? `saved ${body.comment.updated_at}` : "cleared");
+      // Keep the list marker honest without waiting for the next poll.
+      const row = convState.rows.get(detail.id);
+      if (row) {
+        row.has_comment = body.comment !== null;
+        row.truth = body.comment ? body.comment.truth : null;
+      }
+    } catch (error) {
+      setText(status, `could not save: ${error.message}`);
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  return wrap;
+}
+
 function renderConvDetail(detail) {
   // detail.label is computed server-side by conversations_view.detail() the same way
   // summarise() computes a list row's label -- shared-name-safe by construction, never the
@@ -984,6 +1103,8 @@ function renderConvDetail(detail) {
 
   const suggestions = renderSuggestions(detail.suggestions, detail.identified);
   if (suggestions) body.append(suggestions);
+
+  body.append(renderCommentEditor(detail));
 }
 
 function showConvDetail(open) {

@@ -935,3 +935,16 @@ input[type="number"].settings-input { min-width: 100px; flex: 0 1 140px; }
 @media (prefers-reduced-motion: reduce) {
   .dot-live { animation: none; }
 }
+
+.comment-editor { margin-top: 1.5rem; }
+.comment-field { display: block; margin-bottom: .75rem; }
+.comment-label { display: block; margin-bottom: .25rem; font-size: .85rem; opacity: .8; }
+.comment-input { width: 100%; box-sizing: border-box; }
+.comment-note { resize: vertical; }
+.comment-matches { list-style: none; margin: 0 0 .75rem; padding: 0; }
+.comment-match { padding: .1rem 0; font-size: .9rem; }
+/* There is no existing link-shaped button class in this stylesheet -- checked. */
+.comment-pick { background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+                color: inherit; text-decoration: underline; }
+.comment-actions { display: flex; align-items: center; gap: .75rem; }
+.comment-status { font-size: .85rem; opacity: .75; }
