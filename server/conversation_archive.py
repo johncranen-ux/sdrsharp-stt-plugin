@@ -179,3 +179,41 @@ def comments_for(conn: sqlite3.Connection, ids: Iterable[str]) -> dict[str, dict
     rows = conn.execute(
         f"SELECT * FROM comments WHERE conversation_id IN ({marks})", wanted).fetchall()
     return {row["conversation_id"]: _row_to_comment(row) for row in rows}
+
+
+_LABELS_HEADER = """\
+# Identification ground truth, exported from the control panel's conversation comments.
+#
+# Format: <start>\t<end>\t<vessel name, MMSI, or - >\t<note>
+#
+# Only REVIEWED conversations appear. A conversation with a note but no verdict is not a
+# label: an empty field 3 is a parse error in bench_identify, not an abstention.
+# '-' is a real answer -- it asserts that naming anyone at all would be wrong.
+"""
+
+
+def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
+    """The bench_identify ground-truth file for every reviewed conversation.
+
+    start and end come from the archived conversation rather than the comment, so a label can
+    never disagree with the record it describes.
+    """
+    sql = ('SELECT c.start AS start, c."end" AS end, m.truth AS truth, m.note AS note '
+           "FROM comments m JOIN conversations c ON c.id = m.conversation_id "
+           "WHERE m.truth IS NOT NULL ")
+    params: list[str] = []
+    if day:
+        sql += "AND c.start LIKE ? "
+        params.append(f"{day}%")
+    sql += "ORDER BY c.start"
+
+    lines = [_LABELS_HEADER]
+    for row in conn.execute(sql, params):
+        # A tab ends the vessel and begins the note, so a row with no note must not emit a
+        # trailing tab -- parse_labels would read the empty remainder as the note, which is
+        # harmless, but a file people hand-edit should not carry invisible whitespace.
+        fields = [row["start"], row["end"] or "", row["truth"]]
+        if row["note"]:
+            fields.append(row["note"])
+        lines.append("\t".join(fields))
+    return "\n".join(lines) + "\n"

@@ -124,6 +124,70 @@ def test_comments_for_handles_an_empty_page(tmp_path):
         assert archive.comments_for(conn, []) == {}
 
 
+def _archived(conn, start, end, channel="160,650", **over):
+    record = _record(start=start, end=end, channel=channel, **over)
+    archive.insert_conversation(conn, record)
+    return archive.conversation_id(record)
+
+
+def test_only_reviewed_rows_export(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        reviewed = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        noted = _archived(conn, "2026-08-24 13:00:00", "2026-08-24 13:00:30")
+        archive.upsert_comment(conn, reviewed, "246346000", "clear")
+        archive.upsert_comment(conn, noted, None, "could not tell")   # note only, no verdict
+        text = archive.labels_text(conn)
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["2026-08-24 12:10:55\t2026-08-24 12:11:23\t246346000\tclear"]
+
+
+def test_nobody_identifiable_exports_as_a_dash(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        cid = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        archive.upsert_comment(conn, cid, "-", "")
+        text = archive.labels_text(conn)
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["2026-08-24 12:10:55\t2026-08-24 12:11:23\t-"]
+
+
+def test_a_day_filter_narrows_to_one_capture_day(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        first = _archived(conn, "2026-08-23 09:00:00", "2026-08-23 09:00:30")
+        second = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        archive.upsert_comment(conn, first, "111111111", "")
+        archive.upsert_comment(conn, second, "222222222", "")
+        text = archive.labels_text(conn, day="2026-08-24")
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["2026-08-24 12:10:55\t2026-08-24 12:11:23\t222222222"]
+
+
+def test_the_export_is_accepted_by_bench_identify(tmp_path):
+    """The whole point of the truth encoding. parse_labels raises on a malformed line, so this
+    proves the export is consumable rather than merely well shaped.
+
+    MMSI and '-' only, deliberately -- do NOT "improve" this by adding a vessel name.
+    bench_identify._resolve_expected raises for a name when called with lookup=None, because
+    resolving one needs the AIS cache; bench_identify.py's own main() supplies that, a bare
+    parse_labels cannot. This is also the strongest argument for the UI storing the MMSI a
+    vessel search returns rather than the name it displays.
+    """
+    import bench_identify
+
+    with archive.open_db(tmp_path / "a.db") as conn:
+        cid = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        nobody = _archived(conn, "2026-08-24 13:00:00", "2026-08-24 13:00:30")
+        archive.upsert_comment(conn, cid, "246346000", "heard clearly")
+        archive.upsert_comment(conn, nobody, "-", "too much static")
+        text = archive.labels_text(conn)
+
+    out = tmp_path / "labels.txt"
+    out.write_text(text, encoding="utf-8")
+    labels = bench_identify.parse_labels(out)
+
+    assert len(labels) == 2
+    assert labels[0].note == "heard clearly"
+
+
 def test_two_connections_write_different_tables_without_locking(tmp_path):
     """The live arrangement: the proxy inserts conversations while the panel upserts comments,
     from two separate processes into one file. WAL is what makes that safe -- without it the
