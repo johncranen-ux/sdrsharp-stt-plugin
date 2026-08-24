@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 
+import conversation_archive
 import ship_types
 from pydantic import BaseModel
 
@@ -21,8 +22,12 @@ class Page(BaseModel):
 
 def conversation_id(record: dict) -> str:
     """Stable within one proxy run. Start instant plus channel: the store has no id of its own,
-    and index position shifts as conversations are added."""
-    return f"{record.get('start') or ''}|{record.get('channel') or ''}"
+    and index position shifts as conversations are added.
+
+    Defined in conversation_archive so the proxy (which cannot import webapp) and this module
+    cannot drift apart -- the archive's primary key and this screen's row id are the same fact.
+    """
+    return conversation_archive.conversation_id(record)
 
 
 def _identified(record: dict) -> bool:
