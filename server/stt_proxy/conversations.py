@@ -940,9 +940,17 @@ def _load_conversations() -> None:
                 _resolved[:] = json.load(fh)[-CONVERSATIONS_KEEP:]
         print(f"[conv] loaded {len(_resolved)} resolved exchanges", flush=True)
     except FileNotFoundError:
-        pass
+        return
     except Exception as exc:
         print(f"[conv] could not load {CONVERSATIONS_FILE}: {exc}", flush=True)
+        return
+    # The restart gap: only NEWLY resolved conversations used to reach the database, so
+    # everything resolved between a backfill and the next restart existed only in the
+    # truncated 300-row conversations.json. Re-archiving what was just loaded closes that
+    # gap on every restart, not just the one that prompted this fix. INSERT OR IGNORE makes
+    # it idempotent -- most of these rows are already archived -- so this is the self-healing
+    # equivalent of running conversation_archive.py --import by hand.
+    _archive_rows(list(_resolved), startup=True)
 
 
 def _save_conversations() -> None:
@@ -955,16 +963,28 @@ def _save_conversations() -> None:
         print(f"[conv] could not save {CONVERSATIONS_FILE}: {exc}", flush=True)
 
 
-def _archive_rows(rows: list[dict]) -> None:
+def _archive_rows(rows: list[dict], *, startup: bool = False) -> None:
     """Copy resolved conversations into the durable archive.
 
     Wrapped exactly like _save_conversations: a failure here is logged and swallowed. The
     archive is a record-keeping convenience; live transcription is the job, and no amount of
     broken disk may stop it.
+
+    The primary key is start|channel, so INSERT OR IGNORE silently drops a row whenever two
+    exchanges from one window share a wall-clock second on the same channel -- rare, but
+    losing a conversation without a trace is the exact failure this feature exists to
+    prevent. `startup` distinguishes the two callers: _store_resolved always passes fresh
+    rows, so any shortfall there is a genuine collision worth logging; _load_conversations
+    (above) re-archives rows that are usually ALREADY present -- that is the whole point of
+    its self-healing re-archive on restart -- so a shortfall there is the expected, normal
+    case and must not print a false alarm.
     """
     try:
         with conversation_archive.open_db(CONVERSATIONS_DB) as conn:
-            conversation_archive.insert_many(conn, rows)
+            written = conversation_archive.insert_many(conn, rows)
+        if written != len(rows) and not startup:
+            print(f"[conv] archive ignored {len(rows) - written} of {len(rows)} rows "
+                  f"(duplicate start|channel)", flush=True)
     except Exception as exc:
         print(f"[conv] could not archive to {CONVERSATIONS_DB}: {exc}", flush=True)
 

@@ -60,15 +60,21 @@ def test_a_proxy_started_from_the_built_environment_serves_requests(tmp_path):
     # Keep the test off the live cache and off the network feed.
     values["AIS_SOURCE"] = "aishub"
     values["AIS_CACHE_FILE"] = str(tmp_path / "test-ais-cache.json")
+    # Unlike CONVERSATIONS_FILE and VESSELS_LOG_FILE below, CONVERSATIONS_DB IS overridable
+    # (exported=True in the settings catalogue), so this child is pointed at a throwaway
+    # archive instead of resolving to the operator's real one. Closed rather than incidental:
+    # see the NOTE below for what "incidental" cost before this line existed.
+    values["CONVERSATIONS_DB"] = str(tmp_path / "conversations.db")
     for key in _NETWORK_SECRETS:
         values[key] = ""
 
     env = build_env(values)
     # NOTE: CONVERSATIONS_FILE and VESSELS_LOG_FILE are hardcoded in the proxy with no env
-    # override, so unlike AIS_CACHE_FILE this child cannot be pointed away from the live
-    # files. It is safe only incidentally: a proxy that receives no audio never mutates the
-    # store it loaded, and terminate() on Windows does not run atexit handlers. Making those
-    # paths configurable belongs to the phase 2 Paths group.
+    # override, so unlike AIS_CACHE_FILE (and now CONVERSATIONS_DB, above) this child cannot
+    # be pointed away from the live files. It is safe only incidentally: a proxy that
+    # receives no audio never mutates the store it loaded, and terminate() on Windows does
+    # not run atexit handlers. Making those paths configurable belongs to the phase 2 Paths
+    # group.
     #
     # stdout goes to a file rather than subprocess.PIPE: an undrained pipe blocks a child that
     # logs enough at startup before it ever binds the port, and the failure would report

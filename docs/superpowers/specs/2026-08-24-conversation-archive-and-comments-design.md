@@ -148,9 +148,12 @@ the database, and WAL mode puts three files on disk (`.db`, `.db-wal`, `.db-shm`
 | **proxy** | `conversations` — one `INSERT OR IGNORE` beside the existing `_save_conversations()` call at line 1004. Never deletes. | nothing |
 | **panel** | `comments` only | both tables |
 
-Separate tables, so the two processes never contend for the same row. `PRAGMA journal_mode=WAL`
-plus a 5 s `busy_timeout` covers the physical overlap. At 33 conversations/day the proxy writes
-roughly once every few minutes and the panel writes only on save; contention is effectively nil.
+SQLite's write lock is database-level, not per-table, so separate tables buy nothing on their
+own — `PRAGMA journal_mode=WAL` is what actually lets one process write while the other reads,
+and a 5 s `busy_timeout` covers the remaining physical overlap where two writes land at once. At
+33 conversations/day the proxy writes roughly once every few minutes and the panel writes only
+on save, so that overlap is rare enough for the timeout to absorb without a caller ever seeing
+"database is locked".
 
 The proxy's insert takes the same posture as `_save_conversations`: wrapped, logs on failure,
 never raises into the resolve path. **Archiving must not be able to break transcription.**

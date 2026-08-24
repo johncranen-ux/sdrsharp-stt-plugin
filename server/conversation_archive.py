@@ -75,8 +75,12 @@ def connect(path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    # WAL: the proxy and the panel are separate processes writing separate tables in this one
-    # file. WAL lets a reader run while a writer holds the write lock.
+    # WAL: the proxy and the panel are separate processes writing this one file, and SQLite's
+    # write lock is database-level -- their writing separate tables buys nothing on its own.
+    # WAL is what actually lets a reader (or the other writer) proceed while one process holds
+    # the write lock, and busy_timeout covers the rare moment both try to write at once: at
+    # roughly 33 conversations/day from the proxy and comments saved only on click from the
+    # panel, real contention is close to nil.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
@@ -142,6 +146,19 @@ def get_comment(conn: sqlite3.Connection, conversation_id: str) -> dict | None:
     return _row_to_comment(row) if row else None
 
 
+def _sanitise_newlines(text: str) -> str:
+    """Collapse \\r\\n, \\r and \\n to a single space.
+
+    Shared by `truth` and `note`: labels_text's SQL join emits one row per line, so a value
+    carrying a raw newline would emit a stray line parse_labels cannot match -- and for
+    `truth`, a bare tab-separated field, that raises on the WHOLE export file, not just the
+    row responsible. Sanitising here, at write time, means every reader of the comments table
+    -- labels_text included -- can rely on neither field ever containing one, rather than each
+    having to re-sanitise on the way out.
+    """
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 def upsert_comment(conn: sqlite3.Connection, conversation_id: str, truth: str | None,
                    note: str, now: str | None = None) -> dict | None:
     """Store a comment, or delete it when it has become empty.
@@ -150,8 +167,8 @@ def upsert_comment(conn: sqlite3.Connection, conversation_id: str, truth: str | 
     "has a comment" marker on a list row that says nothing. Deleting is therefore the correct
     response to clearing both fields, and is how the UI removes one.
     """
-    truth = (truth or "").strip() or None
-    note = (note or "").strip()
+    truth = _sanitise_newlines((truth or "").strip()) or None
+    note = _sanitise_newlines((note or "").strip())
     if truth is None and not note:
         conn.execute("DELETE FROM comments WHERE conversation_id = ?", (conversation_id,))
         conn.commit()
@@ -220,14 +237,16 @@ def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
         # A tab ends the vessel and begins the note, so a row with no note must not emit a
         # trailing tab -- parse_labels would read the empty remainder as the note, which is
         # harmless, but a file people hand-edit should not carry invisible whitespace.
-        fields = [row["start"], row["end"], row["truth"]]
+        #
+        # Both fields are sanitised again here, on the way out, even though upsert_comment
+        # already sanitises on the way in: a belt-and-braces guard for any comment row written
+        # before that fix existed, or written directly against the database rather than
+        # through upsert_comment. parse_labels joins rows with \n and matches one line at a
+        # time, so an internal newline in EITHER field -- not just the note -- would otherwise
+        # emit a stray unparseable line and raise on the whole file, not just this row.
+        fields = [row["start"], row["end"], _sanitise_newlines(row["truth"])]
         if row["note"]:
-            # Sanitise newlines in the note: parse_labels joins with \n and _LINE_RE matches
-            # one line at a time, so internal newlines would emit stray unparseable lines.
-            # Replace \r\n, \n, or \r with a single space (tabs are safe -- partition splits
-            # on the first tab only, so internal tabs stay inside the note field).
-            sanitised_note = row["note"].replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-            fields.append(sanitised_note)
+            fields.append(_sanitise_newlines(row["note"]))
         lines.append("\t".join(fields))
     return "\n".join(lines) + "\n"
 

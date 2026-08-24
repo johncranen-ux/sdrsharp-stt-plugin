@@ -214,6 +214,36 @@ def test_notes_with_newlines_are_sanitised(tmp_path):
     assert labels[0].note == "heard clearly vessel was moving fast"
 
 
+def test_truth_with_a_newline_does_not_corrupt_the_export(tmp_path):
+    """A raw newline in `truth` is more dangerous than one in `note`: written into the
+    tab-separated export it would split ONE logical row across two physical lines, and the
+    second -- lacking timestamps -- fails to match parse_labels' line pattern and raises
+    ValueError for the WHOLE file, not just this row (a note's newline only corrupts the
+    trailing field of an otherwise-valid line). upsert_comment must sanitise `truth` at the
+    source rather than let it reach storage."""
+    import bench_identify
+
+    with archive.open_db(tmp_path / "a.db") as conn:
+        cid = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        second = _archived(conn, "2026-08-24 13:00:00", "2026-08-24 13:00:30")
+        archive.upsert_comment(conn, cid, "246346000\n(uncertain)", "")
+        archive.upsert_comment(conn, second, "111111111", "")
+        text = archive.labels_text(conn)
+
+    # No raw newline reached the file inside a data row: exactly one output line per comment,
+    # never an extra timestamp-less fragment split off from one of them.
+    data_lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert len(data_lines) == 2
+
+    out = tmp_path / "labels.txt"
+    out.write_text(text, encoding="utf-8")
+    lookup = {"246346000 (UNCERTAIN)": "246346000"}
+    labels = bench_identify.parse_labels(out, lookup=lookup)   # must not raise
+
+    assert len(labels) == 2
+    assert labels[0].mmsi == "246346000"
+
+
 def test_conversations_with_missing_end_are_excluded(tmp_path):
     """A conversation with end=None cannot emit a valid label line: parse_labels requires
     two consecutive timestamp tokens, and an empty end field produces "<start>\\t\\t<truth>"

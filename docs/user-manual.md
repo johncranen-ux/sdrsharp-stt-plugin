@@ -483,9 +483,23 @@ It sits beside `conversations.json`, one file per install unless you point `CONV
 writes conversations there and the panel writes comments there — two processes, two tables,
 one file, safe together under SQLite's WAL mode.
 
-**Backing it up means copying three files**, not one: WAL mode keeps `conversations.db`
-alongside `conversations.db-wal` and `conversations.db-shm`, and a copy missing either of the
-other two is not a usable backup. All three are gitignored (`conversations.db*`).
+**Backing it up safely means using `VACUUM INTO`, not a plain file copy.** WAL mode keeps
+`conversations.db` alongside `conversations.db-wal` (uncommitted writes) and
+`conversations.db-shm` (rebuildable shared memory, and should never be copied at all). Copying
+`.db` and then `-wal` while the proxy or the panel is mid-commit can land the pair
+inconsistent with each other — a torn backup that looks fine until you try to restore it. A
+plain file copy of all three is only valid with both processes **stopped**. While either is
+running, take a consistent-by-construction snapshot instead, from `server/`:
+
+```bash
+cd server
+py -c "import sqlite3; sqlite3.connect('stt_proxy/conversations.db').execute(\"VACUUM INTO 'conversations.db.backup'\")"
+```
+
+This produces one self-contained file — no `-wal` or `-shm` companion needed — that is
+guaranteed consistent regardless of what the proxy or panel is doing at the moment it runs.
+Naming the output `conversations.db.<something>` keeps it covered by the existing
+`conversations.db*` gitignore pattern; a different name needs its own gitignore entry.
 
 **Recovering an old `conversations.json` backup into the archive:**
 

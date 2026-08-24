@@ -604,6 +604,8 @@ const convState = {
   rows: new Map(),       // id -> last summary row seen, for the detail header
   selectedId: null,
   detailGeneration: 0,
+  commentsError: null,   // GET /api/conversations' comments_error, or null when the archive
+                          // read cleanly -- see updateConvRow's Review-cell handling.
 };
 let convFilterTimer = null;
 
@@ -659,9 +661,17 @@ function updateConvRow(view, row) {
   // anything clickable inside it is the mistake the VesselFinder links made -- the natural
   // click landed on the inner element every time, and the operator reported it.
   // "reviewed" means a verdict was recorded; "note" means a note with no verdict, which is a
-  // real and different state -- it says someone looked and could not tell.
-  setText(view.cells.review,
-    row.has_comment ? (row.truth ? "reviewed" : "note") : "—");
+  // real and different state -- it says someone looked and could not tell. "?" means the
+  // archive could not be read for this poll -- see convState.commentsError above -- and must
+  // never collapse into "—", which reads as "no comment" and is exactly the false reassurance
+  // renderCommentEditor already avoids on the detail path.
+  if (convState.commentsError) {
+    setText(view.cells.review, "?");
+    view.cells.review.title = `comment could not be read — ${convState.commentsError}`;
+  } else {
+    setText(view.cells.review, row.has_comment ? (row.truth ? "reviewed" : "note") : "—");
+    view.cells.review.removeAttribute("title");
+  }
 }
 
 function showConvSnapshot(snapshot) {
@@ -758,6 +768,9 @@ async function refreshConversations() {
   showConvSnapshot(body.snapshot);
   convState.total = body.total;
   convState.offset = body.offset;
+  // Read before renderConvRows: updateConvRow needs it to tell "the archive could not be
+  // read this poll" apart from "read fine, no comment on this row" in the Review cell.
+  convState.commentsError = body.comments_error || null;
   renderConvRows(body.rows);
   renderConvPager();
 }

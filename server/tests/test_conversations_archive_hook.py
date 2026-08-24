@@ -1,4 +1,5 @@
 """The proxy's archive hook: it must record everything, and must never break a resolve."""
+import json
 import sys
 from pathlib import Path
 
@@ -68,3 +69,47 @@ def test_store_resolved_archives_what_it_stores(tmp_path, monkeypatch):
     with archive.open_db(db) as conn:
         row = conn.execute("SELECT vessel FROM conversations").fetchone()
     assert row["vessel"] == "CAPEWATER"
+
+
+def test_load_conversations_archives_what_it_loads(tmp_path, monkeypatch):
+    """The restart gap: everything resolved since the backfill exists only in the truncated
+    300-row conversations.json until the proxy restarts. _load_conversations must re-archive
+    what it reads, so the archive is self-healing across every future restart -- not just
+    fixed once by hand."""
+    conv_file = tmp_path / "conversations.json"
+    conv_file.write_text(json.dumps(_rows()), encoding="utf-8")
+    db = tmp_path / "a.db"
+    monkeypatch.setattr(conversations, "CONVERSATIONS_FILE", str(conv_file))
+    monkeypatch.setattr(conversations, "CONVERSATIONS_DB", db)
+    monkeypatch.setattr(conversations, "_resolved", [])
+
+    conversations._load_conversations()
+
+    with archive.open_db(db) as conn:
+        assert conn.execute("SELECT count(*) FROM conversations").fetchone()[0] == 1
+
+
+def test_archive_rows_warns_on_a_genuine_duplicate(tmp_path, monkeypatch, capsys):
+    """_store_resolved always hands _archive_rows fresh rows, so a shortfall there means two
+    exchanges collided on start|channel -- a silently lost conversation, which must be
+    logged rather than swallowed without a trace."""
+    monkeypatch.setattr(conversations, "CONVERSATIONS_DB", tmp_path / "a.db")
+    row = _rows()[0]
+    conversations._archive_rows([row])
+    capsys.readouterr()          # discard the first call's output
+    conversations._archive_rows([row])   # same start|channel: INSERT OR IGNORE drops it
+    out = capsys.readouterr().out
+    assert "archive ignored 1 of 1" in out
+
+
+def test_archive_rows_startup_rearchival_does_not_warn(tmp_path, monkeypatch, capsys):
+    """_load_conversations re-archives rows that are usually already present -- that is the
+    entire point of fix 2 -- so the same shortfall that is a genuine collision from
+    _store_resolved must not print a false alarm here."""
+    monkeypatch.setattr(conversations, "CONVERSATIONS_DB", tmp_path / "a.db")
+    row = _rows()[0]
+    conversations._archive_rows([row])
+    capsys.readouterr()
+    conversations._archive_rows([row], startup=True)
+    out = capsys.readouterr().out
+    assert "archive ignored" not in out
