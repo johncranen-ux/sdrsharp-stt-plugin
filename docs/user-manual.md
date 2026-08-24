@@ -472,11 +472,19 @@ Also available directly from the proxy:
 ### The conversation archive
 
 `conversations.json` was never meant as long-term storage: it is rewritten whole on every
-resolve and keeps only the newest 300 conversations, which is still what drives the
-Conversations screen above. Everything older used to be gone the moment it aged out — no
-backup, no recovery. `server/stt_proxy/conversations.db` fixes that: it is **append-only and
-never truncated**, so it holds every conversation ever resolved, for as long as you keep the
-file. Comments (below) live in the same file, in their own table.
+resolve and keeps only the newest `CONVERSATIONS_KEEP` conversations (default 300), which is
+still what drives the Conversations screen above. Everything older used to be gone the moment
+it aged out — no backup, no recovery. `server/stt_proxy/conversations.db` fixes that: it is
+**append-only and never truncated**, so it holds every conversation ever resolved, for as long
+as you keep the file. Comments (below) live in the same file, in their own table.
+
+Because of that, `CONVERSATIONS_KEEP` (Settings screen, **Identification** group) changed
+meaning: it used to decide what was *kept* and what was destroyed, and now it only decides how
+much the Conversations screen shows. Nothing is lost at any value. **Lowering it is free and
+makes the screen lighter** — the panel re-fetches the whole list every 15 seconds at roughly
+3.3 KB per conversation, and the proxy rewrites the whole file on every resolve, so raising it
+costs more than it appears to. It takes effect on the next proxy restart, like every setting
+here.
 
 It sits beside `conversations.json`, one file per install unless you point `CONVERSATIONS_DB`
 (Settings screen, **Paths** group) somewhere else; empty means the default location. The proxy
@@ -510,11 +518,21 @@ py conversation_archive.py --import <file>...
 
 Pass files newest-first — on a conversation both files contain, the first one listed wins. The
 import is idempotent (it skips anything already archived), so it's safe to run again whenever
-another old backup turns up; a repeat run against files already imported inserts nothing. This
-is exactly how the archive was first populated: 600 records read across `conversations.json`
-and a 2026-08-18 backup, 519 new, 81 duplicates. The archive now spans 2026-08-07 10:40:14
-through 2026-08-24 13:53:09, while the 300-conversation live window only reaches back to
-2026-08-13 19:55:25 — 219 conversations that exist nowhere else.
+another old backup turns up; a repeat run against files already imported inserts nothing.
+
+**Import before starting the proxy, not after.** If you restore a `conversations.json` holding
+more than `CONVERSATIONS_KEEP` records, starting the proxy first will not rescue them: it
+truncates the file to the newest `CONVERSATIONS_KEEP` on load and only archives what survived
+that cut, so the excess is dropped without ever reaching the database. Run the import command
+above first, then start the proxy. (In normal running this cannot bite you — the proxy archives
+each conversation as it resolves, and re-archives whatever it loads at every startup, so the
+archive stays ahead of the window on its own.)
+
+This is how the archive was first populated, on 2026-08-24: 600 records read across
+`conversations.json` and a 2026-08-18 backup, 519 new, 81 duplicates. At that point the archive
+spanned 2026-08-07 10:40:14 through 2026-08-24 13:53:09, while the live window — then 300
+conversations — only reached back to 2026-08-13 19:55:25. That gap was 219 conversations which,
+by then, existed nowhere else.
 
 **Recording a comment.** Open a conversation's detail view (Conversations screen) to find
 **Real vessel** and **Note** fields below the turns. Note is free text. Real vessel is the
