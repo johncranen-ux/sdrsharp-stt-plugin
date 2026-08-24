@@ -12,6 +12,7 @@ happened to take. This archive is append-only and never deletes.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import json
 import os
 import sqlite3
@@ -121,3 +122,60 @@ def insert_conversation(conn: sqlite3.Connection, record: dict) -> bool:
 
 def insert_many(conn: sqlite3.Connection, records: Iterable[dict]) -> int:
     return sum(1 for record in records if insert_conversation(conn, record))
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _row_to_comment(row) -> dict:
+    return {"conversation_id": row["conversation_id"], "truth": row["truth"],
+            "note": row["note"], "created_at": row["created_at"],
+            "updated_at": row["updated_at"]}
+
+
+def get_comment(conn: sqlite3.Connection, conversation_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM comments WHERE conversation_id = ?",
+                       (conversation_id,)).fetchone()
+    return _row_to_comment(row) if row else None
+
+
+def upsert_comment(conn: sqlite3.Connection, conversation_id: str, truth: str | None,
+                   note: str, now: str | None = None) -> dict | None:
+    """Store a comment, or delete it when it has become empty.
+
+    An empty note with no verdict is not a comment: leaving the row would put a
+    "has a comment" marker on a list row that says nothing. Deleting is therefore the correct
+    response to clearing both fields, and is how the UI removes one.
+    """
+    truth = (truth or "").strip() or None
+    note = (note or "").strip()
+    if truth is None and not note:
+        conn.execute("DELETE FROM comments WHERE conversation_id = ?", (conversation_id,))
+        conn.commit()
+        return None
+
+    stamp = now or _now()
+    conn.execute(
+        "INSERT INTO comments (conversation_id, truth, note, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(conversation_id) DO UPDATE SET "
+        "  truth = excluded.truth, note = excluded.note, updated_at = excluded.updated_at",
+        (conversation_id, truth, note, stamp, stamp))
+    conn.commit()
+    return get_comment(conn, conversation_id)
+
+
+def comments_for(conn: sqlite3.Connection, ids: Iterable[str]) -> dict[str, dict]:
+    """Every comment for a page of conversation ids, in one query.
+
+    One query rather than one per row: the list is polled every few seconds, and a page is up
+    to 200 rows.
+    """
+    wanted = list(ids)
+    if not wanted:
+        return {}
+    marks = ",".join("?" * len(wanted))
+    rows = conn.execute(
+        f"SELECT * FROM comments WHERE conversation_id IN ({marks})", wanted).fetchall()
+    return {row["conversation_id"]: _row_to_comment(row) for row in rows}

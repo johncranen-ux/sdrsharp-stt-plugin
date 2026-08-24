@@ -67,3 +67,72 @@ def test_insert_many_counts_only_what_was_new(tmp_path):
 def test_wal_is_on_so_two_processes_can_write(tmp_path):
     with archive.open_db(tmp_path / "a.db") as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+def test_a_comment_is_stored_and_read_back(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        stored = archive.upsert_comment(conn, "id-1", "246346000", "heard clearly",
+                                        now="2026-08-24T12:30:00")
+        assert stored["truth"] == "246346000"
+        assert stored["note"] == "heard clearly"
+        assert stored["created_at"] == "2026-08-24T12:30:00"
+        assert archive.get_comment(conn, "id-1")["note"] == "heard clearly"
+
+
+def test_editing_a_comment_keeps_created_at_and_moves_updated_at(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        archive.upsert_comment(conn, "id-1", None, "first", now="2026-08-24T12:00:00")
+        stored = archive.upsert_comment(conn, "id-1", "-", "second", now="2026-08-24T13:00:00")
+    assert stored["created_at"] == "2026-08-24T12:00:00"
+    assert stored["updated_at"] == "2026-08-24T13:00:00"
+    assert stored["truth"] == "-"
+
+
+def test_unreviewed_and_nobody_are_different_answers(tmp_path):
+    """NULL means nobody looked; '-' asserts that naming anyone would be wrong. Collapsing
+    them would turn every conversation nobody reviewed into an assertion."""
+    with archive.open_db(tmp_path / "a.db") as conn:
+        archive.upsert_comment(conn, "unreviewed", None, "just a note")
+        archive.upsert_comment(conn, "nobody", "-", "")
+        assert archive.get_comment(conn, "unreviewed")["truth"] is None
+        assert archive.get_comment(conn, "nobody")["truth"] == "-"
+
+
+def test_saving_an_empty_comment_deletes_the_row(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        archive.upsert_comment(conn, "id-1", None, "something")
+        assert archive.upsert_comment(conn, "id-1", None, "   ") is None
+        assert archive.get_comment(conn, "id-1") is None
+
+
+def test_an_empty_comment_that_never_existed_is_not_an_error(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        assert archive.upsert_comment(conn, "never", None, "") is None
+
+
+def test_comments_for_fetches_a_page_in_one_query(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        archive.upsert_comment(conn, "a", "111", "note a")
+        archive.upsert_comment(conn, "b", None, "note b")
+        found = archive.comments_for(conn, ["a", "b", "missing"])
+    assert set(found) == {"a", "b"}
+    assert found["a"]["truth"] == "111"
+
+
+def test_comments_for_handles_an_empty_page(tmp_path):
+    with archive.open_db(tmp_path / "a.db") as conn:
+        assert archive.comments_for(conn, []) == {}
+
+
+def test_two_connections_write_different_tables_without_locking(tmp_path):
+    """The live arrangement: the proxy inserts conversations while the panel upserts comments,
+    from two separate processes into one file. WAL is what makes that safe -- without it the
+    second writer raises 'database is locked' and the archive silently loses records."""
+    db = tmp_path / "a.db"
+    with archive.open_db(db) as proxy_conn, archive.open_db(db) as panel_conn:
+        for minute in range(20):
+            archive.insert_conversation(
+                proxy_conn, _record(start=f"2026-08-24 12:{minute:02d}:00"))
+            archive.upsert_comment(panel_conn, f"id-{minute}", "246346000", "note")
+        assert proxy_conn.execute("SELECT count(*) FROM conversations").fetchone()[0] == 20
+        assert panel_conn.execute("SELECT count(*) FROM comments").fetchone()[0] == 20
