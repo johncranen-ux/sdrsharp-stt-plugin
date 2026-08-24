@@ -65,3 +65,46 @@ def _never_read_the_real_captures(monkeypatch):
         return original(captures_root, day, clip)
 
     monkeypatch.setattr(clips_module, "clip_path", guarded_clip_path)
+
+
+@pytest.fixture(autouse=True)
+def _never_open_the_real_archive(monkeypatch):
+    """Refuse to open the operator's real conversation archive.
+
+    Same reasoning as the two guards above. CONVERSATIONS_DB's default is a real path, and a
+    test that builds an app over a config file which does not exist gets every setting's
+    default -- so a route test posting a comment would write a verdict into the ground truth
+    the identification benchmark is scored against. Unlike a killed process, that corruption
+    would be silent and might not be noticed for weeks.
+    """
+    import conversation_archive
+
+    real = conversation_archive.default_db_path(_SERVER_DIR).resolve()
+    original = conversation_archive.connect
+
+    def guarded_connect(path):
+        if Path(path).resolve() == real:
+            raise AssertionError(
+                f"this test opened {real} -- the real one, holding the operator's conversation "
+                f"archive and every ground-truth verdict recorded in the panel. Give the app a "
+                f"config whose CONVERSATIONS_DB is under tmp_path.")
+        return original(path)
+
+    monkeypatch.setattr(conversation_archive, "connect", guarded_connect)
+
+
+@pytest.fixture(autouse=True)
+def _archive_resolved_conversations_under_tmp_path(monkeypatch, tmp_path):
+    """Point stt_proxy.conversations' archive writes at a throwaway database.
+
+    The guard above makes reaching the real archive an AssertionError, but _archive_rows (in
+    stt_proxy/conversations.py) swallows every exception and only logs it -- correctly, since
+    live transcription must survive a broken disk. Left alone, the nine _store_resolved /
+    _resolve_window tests in test_whisper_proxy.py would each trip the guard silently and print
+    "[conv] could not archive to ... the real one" on every run. Redirecting CONVERSATIONS_DB
+    keeps their archive behaviour real -- rows still get written, just nowhere that matters --
+    and keeps the suite's output clean.
+    """
+    from stt_proxy import conversations as conversations_module
+
+    monkeypatch.setattr(conversations_module, "CONVERSATIONS_DB", str(tmp_path / "conversations.db"))
