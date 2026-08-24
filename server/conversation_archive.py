@@ -149,12 +149,10 @@ def get_comment(conn: sqlite3.Connection, conversation_id: str) -> dict | None:
 def _sanitise_newlines(text: str) -> str:
     """Collapse \\r\\n, \\r and \\n to a single space.
 
-    Shared by `truth` and `note`: labels_text's SQL join emits one row per line, so a value
-    carrying a raw newline would emit a stray line parse_labels cannot match -- and for
-    `truth`, a bare tab-separated field, that raises on the WHOLE export file, not just the
-    row responsible. Sanitising here, at write time, means every reader of the comments table
-    -- labels_text included -- can rely on neither field ever containing one, rather than each
-    having to re-sanitise on the way out.
+    Used on `truth` at write time (upsert_comment) and on both fields at export time
+    (labels_text) -- see each call site for why those are different cases. NOT used on `note`
+    at write time: the panel's note field is a multi-line textarea and newlines there are a
+    wanted part of the input, not an accident to be silently flattened on save.
     """
     return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
@@ -166,9 +164,19 @@ def upsert_comment(conn: sqlite3.Connection, conversation_id: str, truth: str | 
     An empty note with no verdict is not a comment: leaving the row would put a
     "has a comment" marker on a list row that says nothing. Deleting is therefore the correct
     response to clearing both fields, and is how the UI removes one.
+
+    `truth` is sanitised of newlines here, at the source: a verdict is a bare tab-separated
+    field in the labels_text export, so a raw newline in it would split one logical row across
+    two physical lines and make bench_identify.parse_labels raise on the WHOLE file -- not a
+    shape a "vessel name, MMSI, or -" should ever take, so it's rejected before it is stored
+    rather than merely cleaned up on the way out. `note` is deliberately NOT sanitised here:
+    the panel's note field is a multi-line textarea with no Enter-key interception, so a
+    multi-line note is an intended input the operator typed on purpose, and get_comment must
+    hand it back exactly as entered. Only labels_text -- where the one-line-per-label
+    constraint actually applies -- collapses a note's newlines, and only in the export.
     """
     truth = _sanitise_newlines((truth or "").strip()) or None
-    note = _sanitise_newlines((note or "").strip())
+    note = (note or "").strip()
     if truth is None and not note:
         conn.execute("DELETE FROM comments WHERE conversation_id = ?", (conversation_id,))
         conn.commit()
@@ -238,12 +246,15 @@ def labels_text(conn: sqlite3.Connection, day: str | None = None) -> str:
         # trailing tab -- parse_labels would read the empty remainder as the note, which is
         # harmless, but a file people hand-edit should not carry invisible whitespace.
         #
-        # Both fields are sanitised again here, on the way out, even though upsert_comment
-        # already sanitises on the way in: a belt-and-braces guard for any comment row written
-        # before that fix existed, or written directly against the database rather than
-        # through upsert_comment. parse_labels joins rows with \n and matches one line at a
-        # time, so an internal newline in EITHER field -- not just the note -- would otherwise
-        # emit a stray unparseable line and raise on the whole file, not just this row.
+        # Both fields are sanitised here, on the way out. For `truth` this is belt-and-braces
+        # -- upsert_comment already sanitises it on the way in, so this only matters for a row
+        # written before that fix existed, or written directly against the database. For
+        # `note` this is the ONLY sanitisation point: a multi-line note is a wanted input in
+        # the panel's textarea and upsert_comment deliberately stores it verbatim, so the
+        # one-line-per-label constraint is enforced here, at export, and nowhere earlier.
+        # parse_labels joins rows with \n and matches one line at a time, so an internal
+        # newline in EITHER field would otherwise emit a stray unparseable line and raise on
+        # the whole file, not just this row.
         fields = [row["start"], row["end"], _sanitise_newlines(row["truth"])]
         if row["note"]:
             fields.append(_sanitise_newlines(row["note"]))

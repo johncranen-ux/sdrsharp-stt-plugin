@@ -214,6 +214,41 @@ def test_notes_with_newlines_are_sanitised(tmp_path):
     assert labels[0].note == "heard clearly vessel was moving fast"
 
 
+def test_a_multiline_note_survives_storage_and_still_exports_cleanly(tmp_path):
+    """Pins both halves of the intended design in one test, so neither regresses again:
+
+    the panel's note field is a multi-line textarea with no Enter-key interception, so a
+    note spanning several lines is something the operator typed on purpose, not an accident
+    -- get_comment must hand it back exactly as entered, newlines and all. Only labels_text,
+    where the one-line-per-label export constraint actually applies, may collapse them, and
+    only in what it emits, never in what is stored.
+
+    An earlier version of the fix for the sibling bug above (truth needing sanitisation)
+    over-reached and sanitised note at write time too, silently flattening a multi-line note
+    the moment it was saved -- exactly the regression this test exists to catch.
+    """
+    import bench_identify
+
+    note = "heard clearly\nvessel was\rmoving fast"
+    with archive.open_db(tmp_path / "a.db") as conn:
+        cid = _archived(conn, "2026-08-24 12:10:55", "2026-08-24 12:11:23")
+        archive.upsert_comment(conn, cid, "246346000", note)
+
+        # Stored verbatim: the newline the operator typed survives the round trip.
+        stored = archive.get_comment(conn, cid)
+        assert stored["note"] == note
+
+        # The export, meanwhile, still collapses it to one line and stays parseable.
+        text = archive.labels_text(conn)
+
+    out = tmp_path / "labels.txt"
+    out.write_text(text, encoding="utf-8")
+    labels = bench_identify.parse_labels(out)
+
+    assert len(labels) == 1
+    assert labels[0].note == "heard clearly vessel was moving fast"
+
+
 def test_truth_with_a_newline_does_not_corrupt_the_export(tmp_path):
     """A raw newline in `truth` is more dangerous than one in `note`: written into the
     tab-separated export it would split ONE logical row across two physical lines, and the
