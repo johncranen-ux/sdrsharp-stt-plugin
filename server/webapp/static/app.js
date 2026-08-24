@@ -1001,15 +1001,22 @@ function renderCommentEditor(detail) {
   wrap.append(actions);
 
   // Debounced, because this fires per keystroke over a 6,469-entry cache. 250ms is the same
-  // feel as the Vessels screen's search.
+  // feel as the Vessels screen's search. The debounce timer only cancels a *pending* search --
+  // once a fetch is in flight a later keystroke cannot stop it, so a generation counter guards
+  // against a slow, superseded answer overwriting a newer one. Same shape as
+  // vesselState.generation / convState.detailGeneration elsewhere in this file: capture the
+  // token before the await, bail if it no longer matches after.
   let searchTimer = null;
+  let searchGeneration = 0;
   truth.addEventListener("input", () => {
     window.clearTimeout(searchTimer);
     const needle = truth.value.trim();
     if (needle.length < 2 || needle === "-") { matches.replaceChildren(); return; }
     searchTimer = window.setTimeout(async () => {
+      const generation = ++searchGeneration;
       try {
         const body = await api(`/api/vessels?text=${encodeURIComponent(needle)}&limit=6`);
+        if (generation !== searchGeneration) return;   // a later keystroke's search landed first
         matches.replaceChildren();
         for (const row of body.rows || []) {
           const item = element("li", "comment-match");
@@ -1024,6 +1031,7 @@ function renderCommentEditor(detail) {
           matches.append(item);
         }
       } catch (error) {
+        if (generation !== searchGeneration) return;   // a later keystroke's search landed first
         matches.replaceChildren(element("li", "comment-match", `search failed: ${error.message}`));
       }
     }, 250);
@@ -1039,11 +1047,17 @@ function renderCommentEditor(detail) {
       });
       detail.comment = body.comment;
       setText(status, body.comment ? `saved ${body.comment.updated_at}` : "cleared");
-      // Keep the list marker honest without waiting for the next poll.
+      // Keep the list marker honest without waiting for the next poll. Mutating the row object
+      // alone does not touch the DOM -- the visible cell is only ever written by updateConvRow,
+      // so that has to be called too. The row may not be on the currently loaded page at all
+      // (e.g. opened via the Vessels screen's "open this conversation" link), so both lookups
+      // are guarded the same way.
       const row = convState.rows.get(detail.id);
       if (row) {
         row.has_comment = body.comment !== null;
         row.truth = body.comment ? body.comment.truth : null;
+        const view = convRows.get(detail.id);
+        if (view) updateConvRow(view, row);
       }
     } catch (error) {
       setText(status, `could not save: ${error.message}`);
