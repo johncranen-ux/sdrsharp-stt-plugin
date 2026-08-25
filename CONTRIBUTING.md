@@ -184,11 +184,23 @@ one unique cloner before it was public. And per-day `uniques` **cannot be summed
 dedupes within a day, so a visitor returning on four days counts four times. The report says
 so rather than quoting the sum as a visitor count.
 
-To run it daily on Windows:
+To run it daily on Windows, pick a time the machine is actually **on** -- an overnight slot
+looks tidy and never fires on a desktop that gets shut down, so every run arrives late as a
+catch-up instead:
 
 ```powershell
-schtasks /create /tn "sdrsharp-stt traffic" /tr "py D:\path	o	ools	raffic_snapshot.py" /sc daily /st 03:00
+$action  = New-ScheduledTaskAction -Execute "C:\WINDOWS\py.exe" ``
+           -Argument '"D:\path	o	ools	raffic_snapshot.py"'
+$trigger = New-ScheduledTaskTrigger -Daily -At 1:00pm
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable ``
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+Register-ScheduledTask -TaskName "sdrsharp-stt-traffic" ``
+    -Action $action -Trigger $trigger -Settings $settings
 ```
+
+`-StartWhenAvailable` is the part that matters: without it a run missed because the machine was
+off is skipped outright, and a skipped day is only recoverable while it is still inside
+GitHub's 14-day window.
 
 Release asset download counts, unlike traffic, are all-time and never expire -- they are the
 better long-term signal of actual installs.
