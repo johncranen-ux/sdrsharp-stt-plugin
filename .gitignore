@@ -123,3 +123,7 @@ bench-conv-correct-*
 
 # Release archives built by tools/make-release.ps1
 dist/
+
+# GitHub traffic history accumulated by tools/traffic_snapshot.py. Repo metadata, not
+# source, and it grows forever -- keep it out of the tree.
+traffic/

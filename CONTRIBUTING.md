@@ -138,6 +138,61 @@ unit tests. Both traps pass a clean build.
 4. If you change something that was chosen on evidence, update
    [docs/design-notes.md](docs/design-notes.md) with what you measured.
 
+## Repository tooling
+
+`tools/` holds scripts for maintaining the repository itself. It is deliberately **not** part
+of the release archive, which ships `server/` from the tracked file list.
+
+### `make-release.ps1`
+
+Builds the release ZIP. Takes the server tree from `git ls-files` so nothing gitignored can
+reach it, and asserts the archive contains no SDR# SDK assemblies -- reference resolution
+copies those into `bin\Release` from your local SDR# install, and they are proprietary.
+
+```powershell
+pwsh tools/make-release.ps1 -Version v1.0.0
+```
+
+### `traffic_snapshot.py`
+
+GitHub's traffic API returns only the last **14 days** and permanently deletes what falls out
+of that window. There is no archive and no way to ask for it later, so a repository's traffic
+history exists only if something recorded it at the time.
+
+```bash
+py tools/traffic_snapshot.py             # fetch and merge into traffic/history.json
+py tools/traffic_snapshot.py --report    # ...and print a summary
+py tools/traffic_snapshot.py --report-only   # print from the file, no network
+```
+
+Each run merges the current window into `traffic/history.json` (gitignored -- it is repo
+metadata, not source, and grows without bound). Two rules govern the merge, both covered by
+tests in `server/tests/test_traffic_snapshot.py`:
+
+- **A stored day absent from the fetch is never removed.** Absence means "older than 14 days",
+  which is exactly the data worth keeping. Treating the fetch as authoritative would erase the
+  history on every run while still printing a plausible summary.
+- **A day present in the fetch overwrites the stored value**, because the current day is
+  partial and a later read of it is the better one.
+
+Authentication is delegated to `gh`, which must be logged in with **push access** -- the
+traffic endpoints return 403 for anything less. No token is read or stored by the script.
+
+Two numbers to read carefully. `clones` counts every `actions/checkout`, so CI dominates it:
+four jobs per push means four clones per push, which is why this repo showed 52 clones from
+one unique cloner before it was public. And per-day `uniques` **cannot be summed** -- GitHub
+dedupes within a day, so a visitor returning on four days counts four times. The report says
+so rather than quoting the sum as a visitor count.
+
+To run it daily on Windows:
+
+```powershell
+schtasks /create /tn "sdrsharp-stt traffic" /tr "py D:\path	o	ools	raffic_snapshot.py" /sc daily /st 03:00
+```
+
+Release asset download counts, unlike traffic, are all-time and never expire -- they are the
+better long-term signal of actual installs.
+
 ## Reference data
 
 Do not commit transcripts of received traffic, and note that `references-*.txt` is
