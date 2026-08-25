@@ -165,6 +165,9 @@ def map_ship(ship: dict) -> dict | None:
     }
 
 
+BBOX_DEFAULT = (51.0, 53.2, 2.0, 6.0)
+
+
 def _resolve_bbox() -> tuple[float, float, float, float]:
     """(latmin, latmax, lonmin, lonmax) for the poll.
 
@@ -175,12 +178,7 @@ def _resolve_bbox() -> tuple[float, float, float, float]:
     candidates by proximity rather than trusting the box to disambiguate.
     """
     raw = os.environ.get("AISHUB_BBOX", "51.0,53.2,2.0,6.0")
-    try:
-        latmin, latmax, lonmin, lonmax = (float(p) for p in raw.split(","))
-    except ValueError:
-        print(f"[AISHub] bad AISHUB_BBOX {raw!r}, using the default", flush=True)
-        return (51.0, 53.2, 2.0, 6.0)
-    return (latmin, latmax, lonmin, lonmax)
+    return ais.parse_bbox(raw, BBOX_DEFAULT, label="AISHub")
 
 
 def _resolve_poll_sec() -> int:

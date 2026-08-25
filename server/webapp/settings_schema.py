@@ -137,11 +137,23 @@ SETTINGS: list[SettingSpec] = [
                             "used when STT_BACKEND is whisper_cpp."),
 
     # ---- AIS source ----------------------------------------------------------
-    SettingSpec(key="AIS_SOURCE", type=SettingType.ENUM, default="aishub", group="AIS source",
-                choices=["aishub", "aisstream", "off"],
-                description="Where vessel data comes from. aishub polls a REST API; aisstream "
-                            "is a websocket feed, kept live and tested so reverting works. "
-                            "off disables vessel matching entirely: transcription continues, but no conversation is given a vessel."),
+    SettingSpec(key="AIS_SOURCE", type=SettingType.ENUM, default="aisstream", group="AIS source",
+                choices=["aisstream", "aishub", "off"],
+                description="Where vessel data comes from. aisstream is a websocket feed and "
+                            "the default because its key is free to anyone: AISHub issues "
+                            "credentials only to stations that CONTRIBUTE a feed, so it "
+                            "cannot be the out-of-the-box choice. Switch to aishub if you "
+                            "run a receiver -- it polls a REST API, carries an explicit "
+                            "observation time, and is the better source where it is "
+                            "available. off disables vessel matching entirely: transcription "
+                            "continues, but no conversation is given a vessel."),
+    SettingSpec(key="AIS_BBOX", type=SettingType.BBOX, default="51.4,52.6,2.0,4.25",
+                group="AIS source",
+                description="latmin,latmax,lonmin,lonmax for the aisstream subscription. The "
+                            "sea box, the same one AISHUB_BBOX uses -- see its note for the "
+                            "measurement. Until 2026-08-25 this box was hardcoded to the old "
+                            "wide 51.0,52.85,2.95,6.0, so every aisstream user was on the "
+                            "box measured as carrying 16x the duplicate-name groups."),
     SettingSpec(key="AISHUB_BBOX", type=SettingType.BBOX, default="51.4,52.6,2.0,4.25",
                 group="AIS source",
                 description="latmin,latmax,lonmin,lonmax. The sea box, set 2026-08-13: Maas "
@@ -156,7 +168,7 @@ SETTINGS: list[SettingSpec] = [
                 minimum=60, maximum=86400,
                 description="Seconds between AISHub polls. Values under 60 are refused: AISHub "
                             "answers a faster caller with no data at all."),
-    SettingSpec(key="AIS_SILENCE_WARN_SEC", type=SettingType.INT, default="0", group="AIS source",
+    SettingSpec(key="AIS_SILENCE_WARN_SEC", type=SettingType.INT, default="60", group="AIS source",
                 minimum=0, maximum=86400,
                 description="Warn when a CONNECTED AIS feed stops delivering -- the failure "
                             "that otherwise looks identical to a quiet channel. 0 is off. "

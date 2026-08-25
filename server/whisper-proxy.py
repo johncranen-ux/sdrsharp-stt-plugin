@@ -84,8 +84,6 @@ GROQ_MAX_RETRY_WAIT_S = float(os.environ.get("GROQ_MAX_RETRY_WAIT_S", "5"))
 GROQ_QUOTA_WARN_AT   = int(os.environ.get("GROQ_QUOTA_WARN_AT", "200"))
 GROQ_QUOTA_WARN_STEP = int(os.environ.get("GROQ_QUOTA_WARN_STEP", "50"))
 
-# Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
-ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
 
 AIS_CACHE_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ais_cache.json")
 VESSELS_LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identified_vessels.html")
@@ -298,7 +296,7 @@ def _status_payload() -> dict:
     last_poll = ais._last_poll_at
     return {
         "stt_backend": STT_BACKEND,
-        "ais_source": os.environ.get("AIS_SOURCE", "aishub").strip().lower(),
+        "ais_source": os.environ.get("AIS_SOURCE", "aisstream").strip().lower(),
         "ais_cache_size": cache_size,
         "ais_last_poll_at": last_poll.timestamp() if last_poll else None,
         # Whether the vessel feed is actually alive, which the age above cannot say on its
@@ -555,7 +553,7 @@ if __name__ == "__main__":
     else:
         print("Conversation resolver: disabled (CONVERSATION_RESOLVER=off)", flush=True)
 
-    ais_source = os.environ.get("AIS_SOURCE", "aishub").strip().lower()
+    ais_source = os.environ.get("AIS_SOURCE", "aisstream").strip().lower()
     if ais_source == "aishub":
         aishub_user = os.environ.get("AISHUB_USERNAME", "")
         if aishub_user:
