@@ -1,0 +1,79 @@
+SDR# Speech-to-Text plugin
+==========================
+
+This archive contains a PREBUILT plugin, so you do not need the .NET SDK or the
+SDR# SDK to install it. The full manual is at:
+
+    https://github.com/johncranen-ux/sdrsharp-stt-plugin/blob/master/docs/user-manual.md
+
+
+1. Install the plugin
+---------------------
+Copy the folder
+
+    Plugins\SttPlugin
+
+into your SDR# installation, so that you end up with
+
+    <SDRSharp>\Plugins\SttPlugin\SDRSharp.SttPlugin.dll
+
+That is the whole plugin installation. Current SDR# versions discover plugins by
+scanning Plugins\<Name>\ at startup; there is no registration file to edit.
+(MagicLine.txt is included only for builds old enough to need one. Nothing on a
+modern SDR# reads it.)
+
+
+2. Install the server
+---------------------
+The plugin does the listening; a small Python service does the transcribing.
+Python 3.10 or newer is required.
+
+    cd server
+    py -m pip install -r requirements.txt
+
+
+3. Get a Groq API key
+---------------------
+Sign up at https://console.groq.com/ and create a key. The free tier is enough
+for continuous monitoring. No GPU is needed -- Groq's hosted Whisper is the
+default backend. A local whisper.cpp GPU backend is supported as an alternative.
+
+
+4. Optional: live vessel data (maritime channels)
+-------------------------------------------------
+Vessel identification needs an AIS source. You do not need extra hardware:
+
+  * aisstream  (the default)  -- free API key from https://aisstream.io/
+                                 Nothing else required.
+  * aishub                    -- better data, but AISHub issues credentials only
+                                 to stations that CONTRIBUTE an AIS feed, which
+                                 means running your own AIS receiver 24/7.
+  * off                       -- no vessel data at all.
+
+Without any AIS source the plugin still transcribes, and still reports vessel
+names that were actually spoken on air. What you lose is the MMSI, ship type,
+particulars and the VesselFinder links. Set AIS_SOURCE=off to make that explicit.
+
+
+5. Start it
+-----------
+    cd server
+    py -m webapp.set_password      (first run only -- the panel needs a password)
+    py -m webapp
+
+Open the address it prints (http://127.0.0.1:8787 by default), sign in, enter
+your keys on the Settings screen, and press Start on the Whisper proxy card.
+
+Then start SDR#, tune a voice channel, open the "Speech to Text" panel and tick
+"Enable transcription".
+
+
+Legal note
+----------
+Receiving is generally lawful. RECORDING OR REPUBLISHING the content of
+communications not addressed to you often is not, and the rules vary by country
+(NL: Telecommunicatiewet art. 18.13; ITU Radio Regulations 17.3). Capture
+features are off by default and anything you record stays on your machine.
+
+Licence: MIT (see LICENSE). Third-party components: see NOTICE.md. The SDR# SDK
+is proprietary and is NOT redistributed in this archive.

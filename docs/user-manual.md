@@ -90,8 +90,8 @@ The plugin only ever talks to the proxy, so backends can change without touching
 | **OS** | Windows 10/11 (SDR# is Windows-only) |
 | **SDR#** | A working install with a supported SDR device |
 | **Python** | 3.10 or newer, on `PATH` as `py` |
-| **.NET SDK** | 8 or 9, to build the plugin |
-| **SDR# SDK** | `SDRSharp.Common.dll` and `SDRSharp.Radio.dll` from your SDR# install |
+| **.NET SDK** | 9, to build the plugin. **Not needed** if you install the [prebuilt release](https://github.com/johncranen-ux/sdrsharp-stt-plugin/releases/latest). .NET 8 alone cannot build it — the project targets `net9.0-windows` — even though SDR# hosts the result on the .NET 8 runtime. |
+| **SDR# SDK** | `SDRSharp.Common.dll` and `SDRSharp.Radio.dll` from your SDR# install. **Not needed** for the prebuilt release. |
 | **Groq API key** | Free tier is sufficient — see [limits](#groq-free-tier-limits) |
 
 Optional:
@@ -99,7 +99,8 @@ Optional:
 | | |
 |---|---|
 | **Anthropic API key** | Vessel-name extraction and conversation resolution |
-| **aisstream.io key** | Live AIS positions for vessel matching (free) |
+| **aisstream.io key** | Live AIS positions for vessel matching. Free, available to anyone, and the default source — see [AIS vessel source](#ais-vessel-source). |
+| **AISHub username** | An alternative AIS source with better data, but issued **only to stations contributing their own AIS feed**. Not required. |
 | **AMD/NVIDIA GPU + WSL2** | Only if you want the local whisper.cpp backend |
 
 > **You do not need a GPU.** The default backend is Groq's hosted Whisper. The local GPU
@@ -117,22 +118,29 @@ cd sdrsharp-stt-plugin
 py -m pip install -r server/requirements.txt
 ```
 
-### 2. Point the plugin project at your SDR# SDK
+> **Skipping the build.** The [prebuilt release](https://github.com/johncranen-ux/sdrsharp-stt-plugin/releases/latest)
+> contains the compiled plugin and the whole server tree. Unpack it, copy
+> `Plugins\SttPlugin\` into your SDR# folder, and jump to step 5 — steps 2 and 3 exist only
+> for building from source.
 
-`SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj` references two DLLs from your SDR# install.
-Edit the `<HintPath>` entries if your SDR# is not where the project expects:
+### 2. Find your SDR# SDK
 
-```xml
-<Reference Include="SDRSharp.Common">
-  <HintPath>C:\SDR\SdrSharpSDK\sdrplugins\lib\SDRSharp.Common.dll</HintPath>
-</Reference>
-```
+The plugin compiles against two DLLs from your SDR# install, `SDRSharp.Common.dll` and
+`SDRSharp.Radio.dll`. They are proprietary and are not redistributed here, so you supply them
+from your own copy of SDR#. They live in the SDK download's `sdrplugins\lib\`.
+
+You do **not** edit the project file. Pass the directory on the command line instead — the
+`.csproj` is tracked, and a local path edited into it is a change you can commit by accident.
 
 ### 3. Build the plugin
 
 ```bash
-dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release
+dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release -p:SDRSharpSdkPath=C:\SDR\SdrSharpSDK\sdrplugins\lib
 ```
+
+If the path is wrong the build stops with a message naming the flag, rather than a cascade of
+"type or namespace not found". Omit `-p:SDRSharpSdkPath` and it falls back to the original
+author's layout, which will almost certainly not be yours.
 
 ### 4. Deploy it into SDR#
 
@@ -643,24 +651,88 @@ defaults were measured, not chosen — see `docs/design-notes.md`.
 
 `AIS_SOURCE` selects where vessel data comes from:
 
-| value | meaning |
+| value | needs | notes |
+|---|---|---|
+| `aisstream` **(default)** | `AISSTREAM_API_KEY` | A free key from [aisstream.io](https://aisstream.io/), available to anyone. A websocket feed delivering continuously. **No extra hardware.** |
+| `aishub` | `AISHUB_USERNAME` | Polled every 15 minutes. Better data — see below — but AISHub issues credentials **only to stations contributing an AIS feed**. |
+| `off` | nothing | No vessel enrichment at all. See [Running without AIS](#running-without-ais). |
+
+Set the key from the panel's **Settings** screen — it is stored in `server/config.json`, which
+is gitignored. **Never put it in a tracked file.** Editing `start-all.bat` has no effect on a
+proxy the panel is managing; see [Settings](#settings) and
+[Running without the panel](#running-without-the-panel).
+
+Without a key for the selected source the proxy still starts and transcribes. It prints
+`AIS feed: disabled (AIS_SOURCE=aisstream but AISSTREAM_API_KEY is unset)` and runs without
+vessel enrichment.
+
+#### Which one should you use
+
+**Start with `aisstream`.** It is the default because its key is free and unconditional.
+
+**Switch to `aishub` if you run your own AIS receiver.** AISHub is a crowd-sourced network:
+API credentials go to stations that feed data *in*, and the bar is at least 10 vessels and 90%
+uptime, both averaged over 7 days. Signing up is not enough. If you do meet it, AISHub is the
+better source — it carries an explicit observation time per vessel, so `last_seen` is true to
+when the position was actually reported rather than to when this software heard about it, and
+a 15-minute poll costs far less than holding a socket open.
+
+To switch, set **AIS source → `aishub`** on the Settings screen and fill in `AISHUB_USERNAME`,
+then restart the proxy from the Dashboard. Nothing else changes: both sources merge into the
+same vessel cache through the same code path, so identification behaves identically either
+way, and switching back is the same two fields.
+
+#### Bounding boxes
+
+Both sources take `latmin,latmax,lonmin,lonmax` and both default to the **sea box**,
+`51.4,52.6,2.0,4.25`:
+
+| setting | applies to |
 |---|---|
-| `aishub` (default) | Poll AISHub every 15 minutes. Needs `AISHUB_USERNAME`. |
-| `aisstream` | The original aisstream.io websocket. Needs `AISSTREAM_API_KEY`. Dead since 2026-08-05; kept because it was reliable for a long time and may return. |
-| `off` | No vessel enrichment. |
+| `AIS_BBOX` | the `aisstream` subscription |
+| `AISHUB_BBOX` | the `aishub` poll |
 
-`AISHUB_USERNAME` is the key from AISHub's welcome mail. **Set it from the panel's Settings
-screen — it is stored in `server/config.json`, which is gitignored. Never put it in a tracked
-file.** Editing `start-all.bat` no longer has any effect on a proxy the panel is managing; see
-[Settings](#settings) and [Running without the panel](#running-without-the-panel).
+The eastern edge is the load-bearing number. Maas Approach works ships at sea entering or
+waiting to enter, never river traffic already inside, so stopping at 4.25 keeps out the
+Rhine/Maas inland barge network. The old wide box (`51.0,53.2,2.0,6.0`) carried 8,381 vessels
+with 685 duplicate-name groups against this box's 1,537 and 43 — a 94% cut in exactly the name
+collisions that cause misidentification.
 
-Without `AISHUB_USERNAME` the proxy still starts and transcribes; it prints `AIS feed: disabled`
-and runs without vessel enrichment.
+`aisstream`'s box was hardcoded to the wide one until 2026-08-25 and could not be changed.
+If you are upgrading from an older checkout and had grown used to seeing inland vessels, that
+is why they are gone.
 
-Other settings: `AISHUB_BBOX` (`latmin,latmax,lonmin,lonmax`, default `51.4,52.6,2.0,4.25` —
-the sea box set 2026-08-13, replacing a wider inland-inclusive box; see the Settings screen's
-description for the measured effect) and `AISHUB_POLL_SEC` (default 900; values under 60 are
-raised to 60, because AISHub answers a faster caller with no data at all).
+Also: `AISHUB_POLL_SEC` (default 900; values under 60 are raised to 60, because AISHub answers
+a faster caller with no data at all) and `AIS_SILENCE_WARN_SEC` (default 60) — the latter warns
+when a *connected* aisstream socket stops delivering, which is otherwise indistinguishable
+from a quiet channel. Set it to 0 only to silence a known outage, and put it back afterwards.
+
+### Running without AIS
+
+Set `AIS_SOURCE=off`, or simply leave the key unset. Everything that does not depend on
+knowing which ships are nearby keeps working:
+
+**You keep:**
+
+- All transcription, including the domain corrections and the conversation-level correction
+  pass.
+- **Vessel names that were actually spoken.** Names are extracted from the audio, not from
+  AIS — and by design AIS may only correct the *spelling* of a name someone said, never
+  supply one. So "this is MSC Athens" still yields `MSC Athens`.
+- Conversation grouping, the archive, comments and the whole control panel.
+
+**You lose:**
+
+- The MMSI, ship type, length, draught and destination.
+- The VesselFinder links.
+- Callsign-to-vessel lookup, and the corroboration that makes a partly-garbled callsign
+  usable.
+- The confirmation that the named ship is really in the area — an unmatched name is reported
+  as heard, with nothing standing behind it.
+- The **Vessels** screen, and the "possible matches" block under unidentified conversations.
+
+The accuracy figures quoted for identification elsewhere in these docs are all measured *with*
+an AIS source and do not describe this configuration.
 
 When a heard name fits more than one ship, `/conversations` lists the candidates with
 VesselFinder links instead of choosing. Pick the one that fits what was said — a vessel already
@@ -711,7 +783,7 @@ Turn it off with `AIS_SUGGEST=off`. `AIS_SUGGEST_N` changes how many are listed.
 | `AIS_SUGGEST_TIEBREAK` | `off` | Rank equally-scoring suggestions by plausibility. Off; not yet measurable — see design-notes |
 | `ANTHROPIC_API_KEY` | — | Unset disables identification entirely |
 | `AISSTREAM_API_KEY` | — | Unset disables AIS matching |
-| `AIS_SILENCE_WARN_SEC` | `0` (off) | Warns when a *connected* AIS feed stops delivering — the failure that otherwise looks identical to a quiet channel. Muted by default since 2026-08-11 because aisstream has delivered nothing since 08-05 and it fired every 60 s. **Set it to `60` the moment the feed recovers**; it is the only thing that catches a relapse |
+| `AIS_SILENCE_WARN_SEC` | `60` | Warns when a *connected* AIS feed stops delivering — the failure that otherwise looks identical to a quiet channel. Muted to `0` between 2026-08-11 and 08-25, during an aisstream outage in which it fired every 60 s to no purpose; **restored to `60` once the feed was measured delivering again**, since it is the only thing that catches a relapse. Set it to `0` only for a known outage, and put it back |
 
 ### Conversation correction
 

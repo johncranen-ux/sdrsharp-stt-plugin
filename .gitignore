@@ -120,3 +120,6 @@ WhisperPlugin/
 # bench_conversation_correct.py output. Same restriction as bench-correct-results*.json above,
 # and the same anchoring flaw as above -- unanchored so it matches at any depth.
 bench-conv-correct-*
+
+# Release archives built by tools/make-release.ps1
+dist/

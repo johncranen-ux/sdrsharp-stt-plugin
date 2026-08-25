@@ -24,14 +24,35 @@
     <Optimize>true</Optimize>
   </PropertyGroup>
 
+  <!--
+    Where your SDR# SDK DLLs live. Override without editing this file:
+
+        dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release -p:SDRSharpSdkPath=C:\SDR\SdrSharpSDK\sdrplugins\lib
+
+    The default is the original author's layout and will not match yours. It is a property
+    rather than a literal HintPath so that pointing the build at your own install does not
+    mean editing a TRACKED file, which previously meant every builder carried a local
+    modification they could accidentally commit.
+
+    The DLLs are proprietary (c) Airspy and are not redistributed here; see NOTICE.md.
+  -->
+  <PropertyGroup>
+    <SDRSharpSdkPath Condition="'$(SDRSharpSdkPath)' == ''">..\..\..\..\SDR\SdrSharpSDK\sdrplugins\lib</SDRSharpSdkPath>
+  </PropertyGroup>
+
+  <Target Name="CheckSdrSharpSdk" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(SDRSharpSdkPath)\SDRSharp.Common.dll')"
+           Text="SDR# SDK not found at '$(SDRSharpSdkPath)'. Pass -p:SDRSharpSdkPath=&lt;dir containing SDRSharp.Common.dll&gt;. See docs/user-manual.md#install." />
+  </Target>
+
   <ItemGroup>
     <Reference Include="SDRSharp.Common">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\SDR\SdrSharpSDK\sdrplugins\lib\SDRSharp.Common.dll</HintPath>
+      <HintPath>$(SDRSharpSdkPath)\SDRSharp.Common.dll</HintPath>
     </Reference>
     <Reference Include="SDRSharp.Radio">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\SDR\SdrSharpSDK\sdrplugins\lib\SDRSharp.Radio.dll</HintPath>
+      <HintPath>$(SDRSharpSdkPath)\SDRSharp.Radio.dll</HintPath>
     </Reference>
   </ItemGroup>
 </Project>

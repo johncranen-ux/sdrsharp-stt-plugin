@@ -36,8 +36,50 @@ from rapidfuzz import fuzz as rf_fuzz, process as rf_process
 
 import ship_types
 
-# Rotterdam / Maas Approach bounding box  [SW corner, NE corner]
-ROTTERDAM_BBOX = [[[51.0, 2.95], [52.85, 6.0]]]
+def parse_bbox(raw: str, default: tuple[float, float, float, float], *,
+               label: str) -> tuple[float, float, float, float]:
+    """(latmin, latmax, lonmin, lonmax) from "latmin,latmax,lonmin,lonmax".
+
+    Shared by both feeds on purpose. Each used to carry its own copy of this parse, which is
+    how they came to disagree about the box itself: AISHub was moved to the sea box on
+    2026-08-13 and aisstream was not, because nothing pointed at the second copy.
+    """
+    # Blank is "unset", not "malformed": the panel exports every catalogue key, so an
+    # unconfigured box arrives as "" rather than as a missing variable, and warning about
+    # that on every start would be noise about nothing being wrong.
+    if not raw.strip():
+        return default
+    try:
+        latmin, latmax, lonmin, lonmax = (float(p) for p in raw.split(","))
+    except ValueError:
+        print(f"[{label}] bad bbox {raw!r}, using the default", flush=True)
+        return default
+    return (latmin, latmax, lonmin, lonmax)
+
+
+# The sea box, the same one AISHub adopted on 2026-08-13. Maas Approach works ships at sea
+# entering or waiting to enter, never river traffic already inside, so the eastern edge at
+# 4.25 is the load-bearing number: the old 6.0 reached up the Rhine and pulled in the inland
+# barge network -- 685 duplicate-name groups against this box's 43.
+AIS_BBOX_DEFAULT = (51.4, 52.6, 2.0, 4.25)
+
+AIS_BBOX = parse_bbox(os.environ.get("AIS_BBOX", "51.4,52.6,2.0,4.25"),
+                      AIS_BBOX_DEFAULT, label="AIS")
+
+
+def _subscription_boxes(bbox: tuple[float, float, float, float]) -> list:
+    """aisstream's BoundingBoxes shape: [[[latmin, lonmin], [latmax, lonmax]]].
+
+    Corners, not edges, and lat before lon in each -- which is neither the order the
+    environment variable uses nor the order AISHub's URL takes. Converted in one place so
+    the two orderings cannot be confused at the call site.
+    """
+    latmin, latmax, lonmin, lonmax = bbox
+    return [[[latmin, lonmin], [latmax, lonmax]]]
+
+
+# Rotterdam / Maas Approach bounding box, in aisstream's own shape.
+ROTTERDAM_BBOX = _subscription_boxes(AIS_BBOX)
 
 # Overridable so a frozen cache and the live one can coexist. The bench replays conversations
 # from a given week and needs the cache as it was THEN -- vessels that have since berthed or
@@ -401,15 +443,20 @@ _stale_filter_warned = False
 # seconds-apart cadence of a busy estuary, so it cannot fire on normal traffic.
 #
 # DEFAULT CHANGED TO 0 (off) 2026-08-11. The instrument is correct and the diagnosis it
-# reports is true -- which is exactly the problem. aisstream has delivered nothing since
-# 2026-08-05 13:31 UTC, so this fires every 60s forever, ~8,600 times and counting, and
+# reports is true -- which was exactly the problem between 2026-08-11 and 08-25. aisstream
+# delivered nothing from 2026-08-05 13:31 UTC, so this fired every 60s, ~8,600 times, and
 # drowns the console output that is still worth reading. A warning that is permanently on
 # carries no information; it only costs attention.
 #
-# This is a mute, not a removal: the mechanism is the only thing that would catch aisstream
-# failing again after it recovers. Restore with AIS_SILENCE_WARN_SEC=60 (there is a
-# commented line in start-all.bat), and do so the moment the feed comes back.
-AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "0"))
+# RESTORED to 60 on 2026-08-25. The feed was measured delivering again -- 577 frames in 25s
+# on the Rotterdam box, 72 of them ShipStaticData -- so the condition the mute was for is
+# gone, and the instrument goes back on as the note above always said it should.
+#
+# It carries more weight now than it did before the mute: aisstream is the DEFAULT source as
+# of the same date, and this is the only thing that distinguishes a quiet channel from a
+# socket that connected and then stopped delivering. That is not hypothetical -- it is the
+# 2026-08-08 failure shape, which this feed has already produced once.
+AIS_SILENCE_WARN_SEC = int(os.environ.get("AIS_SILENCE_WARN_SEC", "60"))
 
 # time.monotonic() of the last frame of any recognised type; None until the first arrives.
 _last_message_at = None

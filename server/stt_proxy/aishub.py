@@ -4,7 +4,7 @@ Polls AISHub's REST webservice for every vessel in a bounding box and writes eac
 the shared cache through `ais.record()`. Nothing here touches the cache directly -- the merge
 lives in one place so two providers cannot get it wrong two different ways.
 
-Replaces aisstream, which has delivered nothing since 2026-08-05. The aisstream path is still
+Added when aisstream delivered nothing for eight days from 2026-08-05. The aisstream path is still
 live and still tested; `AIS_SOURCE` chooses between them.
 
 The failure mode that shapes this module: AISHub answers a rate-limit violation with HTTP 200
@@ -165,6 +165,9 @@ def map_ship(ship: dict) -> dict | None:
     }
 
 
+BBOX_DEFAULT = (51.0, 53.2, 2.0, 6.0)
+
+
 def _resolve_bbox() -> tuple[float, float, float, float]:
     """(latmin, latmax, lonmin, lonmax) for the poll.
 
@@ -175,12 +178,7 @@ def _resolve_bbox() -> tuple[float, float, float, float]:
     candidates by proximity rather than trusting the box to disambiguate.
     """
     raw = os.environ.get("AISHUB_BBOX", "51.0,53.2,2.0,6.0")
-    try:
-        latmin, latmax, lonmin, lonmax = (float(p) for p in raw.split(","))
-    except ValueError:
-        print(f"[AISHub] bad AISHUB_BBOX {raw!r}, using the default", flush=True)
-        return (51.0, 53.2, 2.0, 6.0)
-    return (latmin, latmax, lonmin, lonmax)
+    return ais.parse_bbox(raw, BBOX_DEFAULT, label="AISHub")
 
 
 def _resolve_poll_sec() -> int:

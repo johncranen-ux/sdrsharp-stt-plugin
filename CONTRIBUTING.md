@@ -8,8 +8,15 @@ the C# side.
 
 ```bash
 py -m pip install -r server/requirements.txt        # proxy + tooling
-dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj
+
+# The plugin needs the SDR# SDK DLLs from your own install. Point the build at them
+# rather than editing the csproj, which is tracked:
+dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj \
+       -p:SDRSharpSdkPath=C:\SDR\SdrSharpSDK\sdrplugins\lib
 ```
+
+The plugin targets `net9.0-windows`, so the **.NET 9 SDK** is required to build it — .NET 8
+alone will not do, whatever the runtime it eventually loads under (see trap 1 below).
 
 ## Layout
 
@@ -21,17 +28,32 @@ SDRSharp.SttPlugin/        the plugin that runs inside SDR# (C#)
 
 server/
   whisper-proxy.py         configuration, routing, HTTP handler, entry point
+  ship_types.py            the AIS ship-type table, shared by proxy and panel
+  conversation_archive.py  the SQLite archive behind the rolling window
   stt_proxy/
     corrections.py         hallucination, prompt echo, STT fixes, callsign checks
-    ais.py                 vessel cache, aisstream feed, name and callsign matching
+    ais.py                 vessel cache, aisstream feed, bbox parsing, name/callsign matching
+    aishub.py              the AISHub polling source
     backends.py            groq + whisper.cpp, decoder params, watchdog
     identify.py            identifying the vessel in one transmission
     conversations.py       journal, windowing, retrospective resolver, page
+    fewshot.py             runtime-loaded correction examples (never from source)
+    llm.py, claude.py      provider abstraction and the Anthropic client
     vessel_log.py          the /identified-vessels HTML log
     markup.py              escaping and the VesselFinder link, shared by both pages
-    claude.py              shared Anthropic client
+  webapp/                  the control panel (FastAPI)
+    settings_schema.py     the validated setting catalogue -- the panel exports only these
+    config_store.py        config.json read/write, atomic and account-restricted
+    supervisor.py          detached child processes, pid files, log rotation
+    health.py              per-feed liveness, separate from process liveness
+    proxy_data.py          cached projections of the proxy's collections
+    static/                the panel's CSS and JS
+  iq/                      the IQ replay harness (baseband reader, NFM demod, segmentation)
   bench.py, bench_identify.py, stress.py, replay_sessions.py, make_references.py   tooling
   tests/                   pytest suite
+
+tools/
+  make-release.ps1         builds the release archive; asserts what it must not contain
 ```
 
 ### One rule that matters when editing
@@ -55,8 +77,8 @@ A `/conversations` outage caused by exactly this is what prompted the route test
 ## Running the tests
 
 ```bash
-py -m pytest server/tests -q                                              # 392 tests
-dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj      # 38 tests
+py -m pytest server/tests -q                                              # 1,232 tests
+dotnet test SDRSharp.SttPlugin.Tests/SDRSharp.SttPlugin.Tests.csproj      # 39 tests
 ```
 
 Both run in CI on every push and pull request. Neither needs an API key, a GPU, or a

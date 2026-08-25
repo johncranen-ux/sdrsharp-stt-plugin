@@ -1701,6 +1701,52 @@ failing *again* after it recovers — and this feed has already changed failure 
 mid-outage. Restore with `AIS_SILENCE_WARN_SEC=60`; there is a commented line in
 `start-all.bat` saying to do so the moment the feed returns.
 
+### aisstream recovered, and the mute is lifted (2026-08-25)
+
+**The feed delivers again.** Measured directly, three arms of 25 s each against
+`wss://stream.aisstream.io/v0/stream`:
+
+| Arm | Frames in 25 s | Breakdown |
+|---|---|---|
+| key 1, Rotterdam box | 577 | 504 PositionReport, 72 ShipStaticData |
+| key 1, whole world | 2,490 | 2,105 PositionReport, 384 ShipStaticData |
+| key 2, Rotterdam box | 552 | 485 PositionReport, 66 ShipStaticData |
+
+`ShipStaticData` is the half that carries vessel *names*, so this is a feed that is useful and
+not merely open. It is also not the 2026-08-08 failure shape, where the socket accepted the
+connection and then delivered nothing.
+
+Both keys work. The recovery date is unknown — the outage began 2026-08-05 13:31 UTC and
+nothing was watching in between, so all that can honestly be said is that it was dead then and
+delivering on 2026-08-25.
+
+`AIS_SILENCE_WARN_SEC` therefore returns to its documented value of 60, in the code default and
+the setting catalogue both. The condition the mute existed for is gone, and the instrument
+matters more now than it did before: aisstream became the *default* source on the same date.
+
+### The aisstream box was never moved to the sea box (2026-08-25)
+
+Found while checking whether the aisstream path still worked after the AISHub cutover. It did —
+841 live frames fed through `_process_ais` produced 764 cached vessels, all named, with exact
+and one-character-garbled name lookups both hitting, callsign lookup hitting, ship types
+resolving through the shared table and `_find_ais_hints` returning hints. The provider-agnostic
+`record()` merge point did its job.
+
+**But the bounding box had not been touched.** aisstream subscribed with a module constant,
+`[[[51.0, 2.95], [52.85, 6.0]]]` — the *wide* box, eastern edge at 6.0, reaching up the Rhine —
+with no environment variable able to change it. The 2026-08-13 sea-box change moved
+`AISHUB_BBOX` and only `AISHUB_BBOX`, because AISHub was the only source in use and nothing
+pointed at the second copy of the box.
+
+That is a 685-versus-43 difference in duplicate-name groups, sitting unnoticed behind a code
+path that was working correctly in every other respect. The lesson is narrow and worth stating:
+**a dormant-but-live alternative path does not inherit the measurements made on the active one.**
+"Still live and still tested" was true of the adapter and false of its configuration.
+
+Fixed by giving aisstream `AIS_BBOX`, defaulting to the same sea box, and routing both feeds'
+box parsing through one `ais.parse_bbox()` — two copies of that parse is how they came to
+disagree in the first place.
+
 ## Offering the near misses instead of asserting them (2026-08-18)
 
 `/conversations` now shows, under a conversation nobody was identified in, the best three
