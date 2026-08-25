@@ -22,8 +22,8 @@ works on any voice channel.
 Every line of this repository — the plugin, the proxy, the control panel, the tests and this
 documentation — was written by [Claude Code](https://claude.com/claude-code). The project
 exists as an experiment in what an AI coding agent can carry on its own over months: not a
-demo, but a working system that runs continuously against live radio traffic, with 274
-commits, 1,271 tests, and a design-notes file recording what was measured and rejected as
+demo, but a working system that runs continuously against live radio traffic, with more than
+270 commits, 1,271 tests, and a design-notes file recording what was measured and rejected as
 well as what shipped.
 
 The human role was direction and judgement — what to build, what "better" meant, and whether
