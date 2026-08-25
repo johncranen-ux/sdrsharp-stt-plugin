@@ -4,7 +4,7 @@ Polls AISHub's REST webservice for every vessel in a bounding box and writes eac
 the shared cache through `ais.record()`. Nothing here touches the cache directly -- the merge
 lives in one place so two providers cannot get it wrong two different ways.
 
-Replaces aisstream, which has delivered nothing since 2026-08-05. The aisstream path is still
+Added when aisstream delivered nothing for eight days from 2026-08-05. The aisstream path is still
 live and still tested; `AIS_SOURCE` chooses between them.
 
 The failure mode that shapes this module: AISHub answers a rate-limit violation with HTTP 200

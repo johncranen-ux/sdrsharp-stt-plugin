@@ -27,8 +27,7 @@
   <!--
     Where your SDR# SDK DLLs live. Override without editing this file:
 
-        dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release
-               -p:SDRSharpSdkPath=C:\SDR\SdrSharpSDK\sdrplugins\lib
+        dotnet build SDRSharp.SttPlugin/SDRSharp.SttPlugin.csproj -c Release -p:SDRSharpSdkPath=C:\SDR\SdrSharpSDK\sdrplugins\lib
 
     The default is the original author's layout and will not match yours. It is a property
     rather than a literal HintPath so that pointing the build at your own install does not

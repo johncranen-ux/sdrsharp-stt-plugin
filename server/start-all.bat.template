@@ -9,9 +9,12 @@ setlocal
 
 :: -- API Keys (edit these) -----------------------------------
 set ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
+:: AISSTREAM_API_KEY is a free key from aisstream.io, available to anyone. AIS_SOURCE
+:: defaults to aisstream, so this is the one you need for vessel enrichment out of the box.
+::
 :: AISHUB_USERNAME is the username/API key from AISHub's welcome mail. You only get one by
-:: contributing an AIS feed to AISHub -- signing up alone is not enough. AIS_SOURCE defaults
-:: to aishub below, so this is needed for vessel enrichment out of the box.
+:: contributing an AIS feed to AISHub -- signing up alone is not enough. Better data if you
+:: have it; set AIS_SOURCE=aishub below to use it.
 set AISHUB_USERNAME=YOUR_AISHUB_USERNAME_HERE
 set AISSTREAM_API_KEY=YOUR_AISSTREAM_KEY_HERE
 set GROQ_API_KEY=gsk_YOUR_GROQ_KEY_HERE
@@ -80,11 +83,17 @@ set GROQ_MODEL=whisper-large-v3
 :: set CONVERSATION_RESOLVER=off
 
 :: -- AIS vessel source -----------------------------------------
-:: AIS_SOURCE selects where vessel data comes from: aishub (default) polls AISHub's REST
-:: webservice using AISHUB_USERNAME above; aisstream is the original aisstream.io websocket,
-:: kept working as a rollback and needs AISSTREAM_API_KEY above; off disables vessel
+:: AIS_SOURCE selects where vessel data comes from: aisstream (default) is the aisstream.io
+:: websocket and needs AISSTREAM_API_KEY above; aishub polls AISHub's REST webservice using
+:: AISHUB_USERNAME above and is the better source if you can get credentials; off disables vessel
 :: enrichment entirely.
-:: set AIS_SOURCE=aishub
+:: set AIS_SOURCE=aisstream
+::
+:: AIS_BBOX is the aisstream subscription box, latmin,latmax,lonmin,lonmax. Defaults to the
+:: sea box 51.4,52.6,2.0,4.25 -- the same one AISHUB_BBOX uses. The eastern edge is what
+:: matters: 4.25 keeps the Rhine/Maas inland barge network out, and the old wide 6.0 carried
+:: 685 duplicate-name groups against this box's 43.
+:: set AIS_BBOX=51.4,52.6,2.0,4.25
 ::
 :: AISHUB_BBOX is latmin,latmax,lonmin,lonmax. Deliberately wide -- a vessel is cached long
 :: before it calls Rotterdam, at the cost of more duplicate vessel names to disambiguate.

@@ -443,8 +443,8 @@ _stale_filter_warned = False
 # seconds-apart cadence of a busy estuary, so it cannot fire on normal traffic.
 #
 # DEFAULT CHANGED TO 0 (off) 2026-08-11. The instrument is correct and the diagnosis it
-# reports is true -- which is exactly the problem. aisstream has delivered nothing since
-# 2026-08-05 13:31 UTC, so this fires every 60s forever, ~8,600 times and counting, and
+# reports is true -- which was exactly the problem between 2026-08-11 and 08-25. aisstream
+# delivered nothing from 2026-08-05 13:31 UTC, so this fired every 60s, ~8,600 times, and
 # drowns the console output that is still worth reading. A warning that is permanently on
 # carries no information; it only costs attention.
 #
