@@ -804,6 +804,30 @@ is a list of known filenames rather than a content scan, so a path that doesn't 
 patterns bypasses both `.gitignore` and the gate. Keep the file outside the repository
 entirely (e.g. alongside `start-all.bat`) if you'd rather not rely on the name matching.
 
+### Airband flight identification
+
+`ADSB_SOURCE` selects whether flight identification runs at all:
+
+| value | notes |
+|---|---|
+| `adsbfi` **(default)** | Polls adsb.fi's free point/radius endpoint. No key needed. |
+| `off` | No flight identification. The proxy still starts and transcribes airband channels normally. |
+
+On startup the proxy prints either `Flight identification: adsb.fi, ...` or
+`Flight identification: disabled (ADSB_SOURCE=off)`, mirroring the `AIS feed: ...` line above.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ADSB_SOURCE` | `adsbfi` | `off` disables the ADS-B poller entirely |
+| `ADSB_LAT` | `52.15` | Poll centre latitude |
+| `ADSB_LON` | `4.3` | Poll centre longitude |
+| `ADSB_DIST_NM` | `40` | Poll radius, nautical miles |
+| `ADSB_POLL_SEC` | `15` | Seconds between polls; values under 5 are raised to 5 |
+
+A malformed value for `ADSB_LAT`, `ADSB_LON`, `ADSB_DIST_NM` or `ADSB_POLL_SEC` falls back to
+its default rather than crashing the proxy at startup — the same guarantee `AISHUB_POLL_SEC`
+gives, since this module is imported unconditionally whether or not you use airband at all.
+
 ### Groq free-tier limits
 
 | Limit | Free tier | Typical busy channel |

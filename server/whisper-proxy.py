@@ -110,6 +110,9 @@ APPROACH_TOWER_CHANNELS = frozenset({
 })
 
 
+from stt_proxy import adsb, flight_identify  # noqa: E402
+
+
 def _maybe_identify_flight(text: str, channel: str) -> str:
     """identify_flight(text), but only on a channel known to carry callsigns."""
     if channel not in APPROACH_TOWER_CHANNELS:
@@ -282,9 +285,6 @@ from stt_proxy.backends import (  # noqa: E402
     _watchdog_loop,
     transcribe,
 )
-from stt_proxy import adsb, flight_identify  # noqa: E402
-
-
 
 
 # ---------------------------------------------------------------------------

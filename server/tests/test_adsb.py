@@ -93,8 +93,10 @@ def test_map_aircraft_defaults_missing_optional_fields_to_none():
 
 
 def test_build_url_shape():
-    url = adsb.build_url(52.15, 4.3, 40)
-    assert url == "https://opendata.adsb.fi/api/v2/lat/52.15/lon/4.3/dist/40"
+    """POINT_DIST_NM is a float, so this is how build_url is actually called in production --
+    a `40` here (int-looking) would assert a URL the module never actually emits."""
+    url = adsb.build_url(52.15, 4.3, 40.0)
+    assert url == "https://opendata.adsb.fi/api/v2/lat/52.15/lon/4.3/dist/40.0"
 
 
 # ---------------------------------------------------------------------------
