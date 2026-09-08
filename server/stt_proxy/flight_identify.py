@@ -177,10 +177,50 @@ def format_flight_for_plugin(result: dict, text: str) -> str:
     return f"{tag} {text}"
 
 
+def _near_miss_codes(cand_code: str, cache: list[dict]) -> list[str]:
+    """Flight designators in `cache` whose airline code fuzzy-matches `cand_code`, regardless
+    of tail. Diagnostic only -- lets a real session's log distinguish "the right airline was
+    nearby, just with a different flight number" (evidence the digit tail is getting
+    misheard, the same way airline names are) from "nothing from that airline was in range at
+    all" (evidence of a poll-timing/radius miss instead). See the review's own note: measure
+    before tuning the matching thresholds again.
+    """
+    near = []
+    for ac in cache:
+        split = _split_code_tail(ac["flight"])
+        if split is None:
+            continue
+        code, _tail = split
+        if rf_fuzz.ratio(cand_code, code) >= _FUZZY_THRESHOLD:
+            near.append(ac["flight"])
+    return near
+
+
+def _log_unmatched(candidate: str) -> None:
+    cache = adsb.current_aircraft()
+    split = _split_code_tail(candidate)
+    if split is None:
+        print(f"[flight-id] no match for {candidate!r} -- {len(cache)} aircraft in range, "
+              f"candidate has no parseable airline code", flush=True)
+        return
+    cand_code, _cand_tail = split
+    near = _near_miss_codes(cand_code, cache)
+    print(f"[flight-id] no match for {candidate!r} -- {len(cache)} aircraft in range, "
+          f"same-airline nearby: {near or 'none'}", flush=True)
+
+
 def identify_flight(text: str) -> str:
-    """The one call site Task 3 needs: identify and prefix, or return text unchanged."""
+    """The one call site Task 3 needs: identify and prefix, or return text unchanged.
+
+    Only logs on a genuine extraction-but-no-match -- ordinary chatter (headings, QNH) never
+    yields a candidate at all and must not print anything, or the console would drown in
+    noise the way over-eager logging elsewhere in this project has before.
+    """
     candidate = extract_callsign_candidate(text)
+    if candidate is None:
+        return text
     result = match_flight(candidate)
     if result is None:
+        _log_unmatched(candidate)
         return text
     return format_flight_for_plugin(result, text)

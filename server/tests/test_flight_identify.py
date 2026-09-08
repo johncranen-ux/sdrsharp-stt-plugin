@@ -175,3 +175,48 @@ def test_identify_flight_returns_text_unchanged_without_a_match():
 def test_identify_flight_returns_text_unchanged_when_cache_is_empty():
     text = flight_identify.identify_flight("Hello KLM two eight one, cleared ILS.")
     assert text == "Hello KLM two eight one, cleared ILS."
+
+
+def test_near_miss_codes_finds_same_airline_different_tail():
+    """Diagnostic aid: given a candidate whose airline code fuzzy-matches a cached flight
+    but whose tail doesn't (a real miss), report that flight as a near miss so a session log
+    can distinguish "right airline, wrong digits" from "nothing from that airline nearby"."""
+    _seed("484443", "KLM285")
+    near = flight_identify._near_miss_codes("KLM", adsb.current_aircraft())
+    assert near == ["KLM285"]
+
+
+def test_near_miss_codes_empty_when_no_airline_overlap():
+    _seed("484443", "AAL999")
+    near = flight_identify._near_miss_codes("KLM", adsb.current_aircraft())
+    assert near == []
+
+
+def test_near_miss_codes_skips_unparseable_flight_strings():
+    _seed("484443", "")
+    near = flight_identify._near_miss_codes("KLM", adsb.current_aircraft())
+    assert near == []
+
+
+def test_identify_flight_logs_near_misses_on_no_match(capsys):
+    _seed("484443", "KLM285")
+    flight_identify.identify_flight("Hello KLM two eight one, cleared ILS.")
+    err = capsys.readouterr().out
+    assert "KLM281" in err
+    assert "KLM285" in err
+
+
+def test_identify_flight_logs_no_near_misses_when_cache_empty_of_that_airline(capsys):
+    _seed("484443", "AAL999")
+    flight_identify.identify_flight("Hello KLM two eight one, cleared ILS.")
+    out = capsys.readouterr().out
+    assert "KLM281" in out
+    assert "none" in out
+
+
+def test_identify_flight_does_not_log_when_no_candidate_extracted(capsys):
+    """Ordinary chatter (headings, QNH) is the common case -- logging every one of those
+    would drown the console the way over-eager print statements have in this project before."""
+    flight_identify.identify_flight("One eight zero, over.")
+    out = capsys.readouterr().out
+    assert out == ""
