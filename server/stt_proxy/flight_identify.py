@@ -114,3 +114,19 @@ def match_flight(candidate: str | None) -> dict | None:
         if score > best_score:
             best_ac, best_score = ac, score
     return best_ac if best_score >= _FUZZY_THRESHOLD else None
+
+
+def format_flight_for_plugin(result: dict, text: str) -> str:
+    flight = result.get("flight") or ""
+    aircraft_type = result.get("t")
+    tag = f"[{flight}/{aircraft_type}]" if aircraft_type else f"[{flight}]"
+    return f"{tag} {text}"
+
+
+def identify_flight(text: str) -> str:
+    """The one call site Task 3 needs: identify and prefix, or return text unchanged."""
+    candidate = extract_callsign_candidate(text)
+    result = match_flight(candidate)
+    if result is None:
+        return text
+    return format_flight_for_plugin(result, text)

@@ -95,3 +95,31 @@ def test_match_flight_handles_empty_cache():
 def test_match_flight_none_candidate_returns_none():
     """So callers can chain extract -> match without a None-check in between."""
     assert flight_identify.match_flight(None) is None
+
+
+def test_format_flight_for_plugin_with_type():
+    result = {"flight": "KLM281", "t": "A332"}
+    assert (flight_identify.format_flight_for_plugin(result, "Approach, good day.")
+            == "[KLM281/A332] Approach, good day.")
+
+
+def test_format_flight_for_plugin_without_type():
+    result = {"flight": "KLM281", "t": None}
+    assert (flight_identify.format_flight_for_plugin(result, "Approach, good day.")
+            == "[KLM281] Approach, good day.")
+
+
+def test_identify_flight_prefixes_on_a_match():
+    _seed("484443", "KLM281", t="A332")
+    text = flight_identify.identify_flight("Hello KLM two eight one, cleared ILS.")
+    assert text == "[KLM281/A332] Hello KLM two eight one, cleared ILS."
+
+
+def test_identify_flight_returns_text_unchanged_without_a_match():
+    text = flight_identify.identify_flight("One eight zero, over.")
+    assert text == "One eight zero, over."
+
+
+def test_identify_flight_returns_text_unchanged_when_cache_is_empty():
+    text = flight_identify.identify_flight("Hello KLM two eight one, cleared ILS.")
+    assert text == "Hello KLM two eight one, cleared ILS."
