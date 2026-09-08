@@ -52,6 +52,41 @@ def test_extract_returns_none_for_empty_text():
     assert flight_identify.extract_callsign_candidate("") is None
 
 
+def test_extract_numeral_flight_number_survives_extraction():
+    """Whisper sometimes emits the flight number as literal digits rather than spelling it
+    out. Before the whole-branch review's finding 4 fix, the tokenizer was letters-only and
+    silently dropped "281" entirely, leaving only the bare airline code."""
+    assert flight_identify.extract_callsign_candidate("KLM 281, cleared ILS.") == "KLM281"
+
+
+def test_extract_continues_past_a_false_anchor_to_a_real_callsign_later_in_the_text():
+    """Review finding 3's exact reproduction: "speed" used to fuzzy-anchor on "speedbird"
+    (ratio 71.4, over the old threshold of 70) and extraction gave up right there, never
+    reaching the real callsign spoken later in the same transmission."""
+    assert flight_identify.extract_callsign_candidate(
+        "Reduce speed one eight zero, KLM two eight one."
+    ) == "KLM281"
+
+
+def test_extract_speed_word_alone_yields_no_candidate():
+    assert flight_identify.extract_callsign_candidate("Speed.") is None
+
+
+def test_extract_heading_like_speed_phrase_yields_no_candidate():
+    """A heading-shaped phrase built from "speed" must not be mistaken for speedbird plus a
+    flight number -- there is no airline word here at all once the threshold is fixed."""
+    assert flight_identify.extract_callsign_candidate("Speed one eight zero.") is None
+
+
+def test_extract_genuine_long_name_garbling_still_fuzzy_matches_at_the_raised_threshold():
+    """The threshold went from 70 to 85 to kill "speed"/"speedbird" (71.4), but real garbling
+    of a longer airline name must still work -- fuzz.ratio("lufthanza", "lufthansa") is 88.9,
+    comfortably above 85."""
+    assert flight_identify.extract_callsign_candidate(
+        "Lufthanza six seven six, descend flight level one one zero."
+    ) == "DLH676"
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
     adsb._aircraft_cache.clear()
@@ -95,6 +130,23 @@ def test_match_flight_handles_empty_cache():
 def test_match_flight_none_candidate_returns_none():
     """So callers can chain extract -> match without a None-check in between."""
     assert flight_identify.match_flight(None) is None
+
+
+def test_match_flight_rejects_a_different_flight_with_a_similar_code():
+    """Review finding 1's exact reproduction: KLM281 was never in the cache, but
+    fuzz.ratio("KLM281", "KLM285") is well over the old whole-string threshold, so the
+    unrelated real flight KLM285 got returned as if it were a match. Fuzzing only the code
+    and requiring the digit tail to match exactly must reject this."""
+    _seed("484443", "KLM285")
+    assert flight_identify.match_flight("KLM281") is None
+
+
+def test_match_flight_bare_code_does_not_match_a_cached_flight_with_a_tail():
+    """Review finding 2's exact reproduction: a transmission that named no flight number at
+    all ("Hello KLM" -> bare candidate "KLM") must not fabricate an identification against
+    whichever cached flight's code happens to fuzzy-match."""
+    _seed("484443", "KLM76")
+    assert flight_identify.match_flight("KLM") is None
 
 
 def test_format_flight_for_plugin_with_type():

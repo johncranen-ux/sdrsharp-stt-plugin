@@ -41,7 +41,12 @@ AIRLINE_TELEPHONY: dict[str, str] = {
 # module docstring's note on why short tokens (KLM's 3 characters) are handled by explicit
 # variants instead.
 _FUZZY_MIN_WORD_LEN = 5
-_FUZZY_THRESHOLD = 70  # a starting point, not yet measured against a labelled corpus
+# 70 was a starting point, not measured against a labelled corpus, and it was too loose:
+# fuzz.ratio("speed", "speedbird") is 71.4, so "reduce speed one eight zero" false-anchored on
+# "speedbird" (see the whole-branch review, finding 3). 85 still passes every explicit-variant
+# and genuine-garbling case the test suite covers -- those matches score in the 90s-100 range
+# -- while putting "speed"/"speedbird" (and similarly short overlaps) below threshold.
+_FUZZY_THRESHOLD = 85
 
 
 def _find_airline_anchor(word: str) -> str | None:
@@ -69,13 +74,24 @@ def extract_callsign_candidate(text: str) -> str | None:
     with no airline anchor are ambiguous (a heading, a QNH, a flight level) and must not be
     treated as a callsign.
     """
-    words = re.findall(r"[A-Za-z]+", (text or "").lower())
+    # [A-Za-z0-9]+ (not letters-only): Whisper sometimes transcribes a flight number as
+    # literal digits ("KLM 281") rather than spelling it out ("KLM two eight one"). A
+    # letters-only tokenizer silently dropped those digit tokens entirely, which then fed the
+    # bare-code fabrication problem this whole function exists to avoid (review finding 4).
+    words = re.findall(r"[A-Za-z0-9]+", (text or "").lower())
     for i, word in enumerate(words):
         code = _find_airline_anchor(word)
         if code is None:
             continue
         digits = ""
         for follow in words[i + 1:i + 5]:
+            if follow.isdigit():
+                # A numeral token ("281") already stands for its whole run of characters --
+                # unlike a single spelled-out word, which _decode_spoken_word turns into
+                # exactly one character. Keep scanning afterwards in case a phonetic-letter
+                # suffix follows the number ("281 november" -> "281N").
+                digits += follow
+                continue
             # Not just spoken digits: a real callsign suffix mixes digits and a single
             # phonetic letter ("six november" -> "6N"), which _decode_spoken_word already
             # handles by checking both tables -- using _SPOKEN_DIGITS alone here was tried
@@ -87,17 +103,46 @@ def extract_callsign_candidate(text: str) -> str | None:
             digits += char
         if digits:
             return f"{code}{digits}"
-        return code if code == word.upper() else None
+        if code == word.upper():
+            return code
+        # This anchor matched (exactly or fuzzily) but produced nothing usable -- e.g. a
+        # fuzzy false-anchor like "speed"/"speedbird" with no callsign actually spoken here.
+        # Keep scanning: a real callsign may still appear later in the same transmission
+        # (review finding 3 -- "reduce speed one eight zero, KLM two eight one" must not die
+        # on "speed" before ever reaching "KLM").
     return None
+
+
+# Airline codes are typically 2-4 letters (KLM, BAW, RYR, EZY...); everything after that is
+# the flight's digit/suffix tail (e.g. "281", "6N").
+_CODE_TAIL_RE = re.compile(r"^([A-Za-z]{2,4})(.*)$")
+
+
+def _split_code_tail(flight: str) -> tuple[str, str] | None:
+    """(code, tail) for a flight designator, or None if it doesn't even start with a code.
+
+    Used by match_flight to fuzz only the airline-code portion and require the tail to match
+    exactly -- see the module-level note on why fuzzing the whole string was wrong.
+    """
+    if not flight:
+        return None
+    m = _CODE_TAIL_RE.match(flight)
+    if not m:
+        return None
+    return m.group(1).upper(), m.group(2).strip().upper()
 
 
 def match_flight(candidate: str | None) -> dict | None:
     """The live aircraft `candidate` most likely refers to, or None.
 
     Exact match first (the common case once extraction has already normalised known garbled
-    airline forms). Falls back to a fuzzy match against the whole candidate string -- digits
-    are not fuzzed on their own; no evidence yet that they get misheard the way letters do,
-    per the design spec's deferred-work note.
+    airline forms). Falls back to a fuzzy match, but ONLY on the airline-code portion of the
+    string -- fuzzing the whole candidate ("KLM281" vs "KLM285") let two different real
+    flights score well over threshold against each other, and let a bare code with no digits
+    ("KLM") fuzzy-match any cached flight whose code was similar (review findings 1 and 2).
+    The digit/suffix tail must match exactly: both empty (a bare code, matched only against
+    another bare-code cache entry -- which in practice does not happen for airline traffic,
+    so a bare code effectively never fuzzy-matches) or both present and identical.
     """
     if not candidate:
         return None
@@ -106,11 +151,20 @@ def match_flight(candidate: str | None) -> dict | None:
         if ac["flight"] == candidate:
             return ac
 
+    cand_split = _split_code_tail(candidate)
+    if cand_split is None:
+        return None
+    cand_code, cand_tail = cand_split
+
     best_ac, best_score = None, 0
     for ac in adsb.current_aircraft():
-        if not ac["flight"]:
+        ac_split = _split_code_tail(ac["flight"])
+        if ac_split is None:
             continue
-        score = rf_fuzz.ratio(candidate, ac["flight"])
+        ac_code, ac_tail = ac_split
+        if cand_tail != ac_tail:
+            continue
+        score = rf_fuzz.ratio(cand_code, ac_code)
         if score > best_score:
             best_ac, best_score = ac, score
     return best_ac if best_score >= _FUZZY_THRESHOLD else None
