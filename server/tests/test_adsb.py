@@ -97,6 +97,57 @@ def test_build_url_shape():
     assert url == "https://opendata.adsb.fi/api/v2/lat/52.15/lon/4.3/dist/40"
 
 
+# ---------------------------------------------------------------------------
+# ADSB_SOURCE (review finding 5): the on/off switch adsb.fi never had, mirroring AIS_SOURCE
+# ---------------------------------------------------------------------------
+
+def test_resolve_source_defaults_to_adsbfi(monkeypatch):
+    monkeypatch.delenv("ADSB_SOURCE", raising=False)
+    assert adsb._resolve_source() == "adsbfi"
+
+
+def test_resolve_source_reads_off(monkeypatch):
+    monkeypatch.setenv("ADSB_SOURCE", "off")
+    assert adsb._resolve_source() == "off"
+
+
+def test_resolve_source_is_case_and_whitespace_insensitive(monkeypatch):
+    monkeypatch.setenv("ADSB_SOURCE", "  OFF  ")
+    assert adsb._resolve_source() == "off"
+
+
+# ---------------------------------------------------------------------------
+# Env var parsing guards (review finding 6): a typo must fall back, not crash the import
+# ---------------------------------------------------------------------------
+
+def test_resolve_float_falls_back_to_default_on_malformed_value(monkeypatch):
+    """whisper-proxy.py imports this module at load time -- a ValueError here would take
+    down the entire proxy over a typo in a setting that only affects flight identification."""
+    monkeypatch.setenv("ADSB_LAT", "not-a-number")
+    assert adsb._resolve_float("ADSB_LAT", 52.15) == 52.15
+
+
+def test_resolve_float_uses_the_env_var_when_it_parses(monkeypatch):
+    monkeypatch.setenv("ADSB_LAT", "51.9")
+    assert adsb._resolve_float("ADSB_LAT", 52.15) == 51.9
+
+
+def test_resolve_poll_sec_falls_back_to_default_on_malformed_value(monkeypatch):
+    monkeypatch.setenv("ADSB_POLL_SEC", "abc")
+    assert adsb._resolve_poll_sec(15) == 15
+
+
+def test_resolve_poll_sec_floors_a_too_low_value():
+    """A malformed value isn't the only way to tight-loop the external API -- a valid but
+    tiny value must be floored the same way aishub.py floors AISHUB_POLL_SEC."""
+    assert adsb._resolve_poll_sec(1) == adsb.MIN_POLL_SEC
+
+
+def test_resolve_poll_sec_keeps_a_reasonable_value(monkeypatch):
+    monkeypatch.setenv("ADSB_POLL_SEC", "30")
+    assert adsb._resolve_poll_sec(15) == 30
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
     adsb._aircraft_cache.clear()

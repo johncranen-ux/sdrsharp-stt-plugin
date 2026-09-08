@@ -20,18 +20,56 @@ import urllib.request
 
 API_HOST = "https://opendata.adsb.fi"
 
+# Mirrors ais.py's AIS_SOURCE: "off" disables the feed entirely. adsb.fi has no equivalent of
+# AIS_SOURCE=aishub/aisstream to choose between -- it is the only source that actually works
+# (see the module docstring) -- so this only needs one real value plus "off". Unlike AIS, this
+# poller had no switch at all until the whole-branch review (finding 5): it always ran, for
+# every user of this now-public repo, including anyone who never uses airband.
+def _resolve_source() -> str:
+    return os.environ.get("ADSB_SOURCE", "adsbfi").strip().lower()
+
+
+ADSB_SOURCE = _resolve_source()
+
+# Lowest sane poll interval: a malformed/typo'd ADSB_POLL_SEC (or a deliberately tiny one)
+# must not tight-loop an external API.
+MIN_POLL_SEC = 5
+
+
+def _resolve_float(env_var: str, default: float) -> float:
+    """A float env var, or `default` on anything that doesn't parse.
+
+    whisper-proxy.py imports this module at load time, so a bad env var here must not raise
+    -- that would take down the entire proxy over a typo in a setting that only affects flight
+    identification. Same reasoning as aishub.py's _resolve_poll_sec (review finding 6).
+    """
+    try:
+        return float(os.environ.get(env_var, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_poll_sec(default: int = 15) -> int:
+    """Seconds between polls, never below MIN_POLL_SEC whatever the environment says."""
+    try:
+        wanted = int(os.environ.get("ADSB_POLL_SEC", str(default)))
+    except (TypeError, ValueError):
+        wanted = default
+    return max(wanted, MIN_POLL_SEC)
+
+
 # Centred to cover Schiphol, Rotterdam, and the Scheveningen coastal corridor -- the exact
 # point tested live during design (2026-09-08), which returned 59 real aircraft including
 # KLM281, RYR37DV, AFR16JN, EZY85FV and PHVSY (a Dutch-registered light aircraft).
-POINT_LAT     = float(os.environ.get("ADSB_LAT", "52.15"))
-POINT_LON     = float(os.environ.get("ADSB_LON", "4.3"))
-POINT_DIST_NM = float(os.environ.get("ADSB_DIST_NM", "40"))
+POINT_LAT     = _resolve_float("ADSB_LAT", 52.15)
+POINT_LON     = _resolve_float("ADSB_LON", 4.3)
+POINT_DIST_NM = _resolve_float("ADSB_DIST_NM", 40)
 
 # No published rate limit was found for adsb.fi during design (unlike AISHub's documented
 # "once per minute"), so this is a conservative starting point, not an enforced server fact.
 # Aircraft move at 150-250 m/s on approach -- far faster than ships -- so it needs to be much
 # more frequent than AISHub's 900s.
-POLL_SEC = int(os.environ.get("ADSB_POLL_SEC", "15"))
+POLL_SEC = _resolve_poll_sec(15)
 
 
 class AdsbError(Exception):

@@ -604,7 +604,12 @@ if __name__ == "__main__":
     else:
         print(f"AIS feed: disabled (AIS_SOURCE={ais_source})", flush=True)
 
-    adsb.start(adsb.POINT_LAT, adsb.POINT_LON, adsb.POINT_DIST_NM)
+    if adsb.ADSB_SOURCE == "off":
+        print(f"Flight identification: disabled (ADSB_SOURCE={adsb.ADSB_SOURCE})", flush=True)
+    else:
+        adsb.start(adsb.POINT_LAT, adsb.POINT_LON, adsb.POINT_DIST_NM)
+        print(f"Flight identification: adsb.fi, {adsb.POINT_DIST_NM}nm around "
+              f"({adsb.POINT_LAT}, {adsb.POINT_LON}), every {adsb.POLL_SEC}s", flush=True)
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed
