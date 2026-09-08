@@ -96,6 +96,26 @@ AIS_SAVE_INTERVAL   = 300
 _last_chunk_at: float | None = None
 _STARTED_AT = time.time()
 
+# Only channels where pilots actually state a callsign repeatedly. Ground sometimes has one;
+# ATIS/Departure Information never do (a looping recorded broadcast has no one to identify).
+# Both locale-formatted separators are listed for the same reason corrections.py's channel
+# check already handles this: the plugin renders the channel string in SDR#'s current
+# culture, which on this deployment is a comma decimal separator.
+APPROACH_TOWER_CHANNELS = frozenset({
+    "121.200", "121,200",   # Schiphol Approach 4
+    "118.405", "118,405",   # Schiphol Approach 5 / Arrival (Main)
+    "119.055", "119,055",   # Schiphol Approach
+    "127.870", "127,870",   # Schiphol Area Control Centre 1
+    "119.230", "119,230",   # Schiphol Tower 1 / Tower (Main)
+})
+
+
+def _maybe_identify_flight(text: str, channel: str) -> str:
+    """identify_flight(text), but only on a channel known to carry callsigns."""
+    if channel not in APPROACH_TOWER_CHANNELS:
+        return text
+    return flight_identify.identify_flight(text)
+
 # ---------------------------------------------------------------------------
 # Recent-traffic memory and retrospective conversation resolution
 #   see stt_proxy/conversations.py and stt_proxy/claude.py
@@ -262,6 +282,7 @@ from stt_proxy.backends import (  # noqa: E402
     _watchdog_loop,
     transcribe,
 )
+from stt_proxy import adsb, flight_identify  # noqa: E402
 
 
 
@@ -460,6 +481,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 elif mode == "airband":
                     corrected = _apply_sttt_corrections(raw_text, mode="airband")
+                    corrected = _maybe_identify_flight(corrected, channel)
                     channel_label = f"[{channel} MHz]" if channel else "[airband]"
                     print(f"[{ts}] {channel_label} {corrected}", flush=True)
                     data["text"] = corrected
@@ -581,6 +603,8 @@ if __name__ == "__main__":
                   flush=True)
     else:
         print(f"AIS feed: disabled (AIS_SOURCE={ais_source})", flush=True)
+
+    adsb.start(adsb.POINT_LAT, adsb.POINT_LON, adsb.POINT_DIST_NM)
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed

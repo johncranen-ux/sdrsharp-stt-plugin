@@ -3145,6 +3145,34 @@ def test_anchor_rule_is_not_applied_on_airband():
     assert proxy._apply_sttt_corrections(text, mode="airband") == text
 
 
+def test_approach_tower_channels_includes_both_locale_separators():
+    """The plugin sends the channel as a decimal string in the SDR#'s current culture, which
+    on this deployment renders a comma, not a dot (see corrections.py's existing
+    channel in ("160.650", "160,650") handling for the same quirk)."""
+    assert "118.405" in proxy.APPROACH_TOWER_CHANNELS
+    assert "118,405" in proxy.APPROACH_TOWER_CHANNELS
+
+
+def test_airband_identify_flight_called_only_on_approach_tower_channels(monkeypatch):
+    calls = []
+    monkeypatch.setattr(proxy.flight_identify, "identify_flight",
+                         lambda text: calls.append(text) or f"[TAGGED] {text}")
+
+    tagged = proxy._maybe_identify_flight("Hello KLM two eight one.", channel="118,405")
+    untagged = proxy._maybe_identify_flight("Wind two seven zero.", channel="122,205")
+
+    assert tagged == "[TAGGED] Hello KLM two eight one."
+    assert untagged == "Wind two seven zero."
+    assert calls == ["Hello KLM two eight one."]
+
+
+def test_airband_identify_flight_skipped_for_unknown_channel(monkeypatch):
+    monkeypatch.setattr(proxy.flight_identify, "identify_flight",
+                         lambda text: pytest.fail("should not be called"))
+    result = proxy._maybe_identify_flight("Hello KLM two eight one.", channel="")
+    assert result == "Hello KLM two eight one."
+
+
 # ---------------------------------------------------------------------------
 # Multipart parse / rebuild round-trip
 # ---------------------------------------------------------------------------
