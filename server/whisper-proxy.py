@@ -327,6 +327,7 @@ def _status_payload() -> dict:
         # whether the last attempt failed. The username is scrubbed from `last_error` inside
         # aishub before it can reach here.
         "aishub": aishub.feed_status(),
+        "adsb": adsb.feed_status(),
         "conversations": stored,
         "last_chunk_at": _last_chunk_at,
         "started_at": _STARTED_AT,

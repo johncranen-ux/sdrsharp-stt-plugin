@@ -204,12 +204,25 @@ def feed_status() -> dict:
 
 
 def _record_success(count: int) -> None:
+    """Update feed state for one successful poll.
+
+    Deliberately quieter than aishub.py's unconditional per-poll line: AISHub polls every
+    900s, so one line a poll is not noise, but adsb.fi polls every ~15s and a line every poll
+    would flood the console. Print only on the first successful poll ever, when the aircraft
+    count actually changes from the previous poll, or when recovering from a run of failures
+    (mirroring aishub.py's "recovered after N failed poll(s)" line) -- review finding 7.
+    """
     global _last_ok_at, _last_count, _consecutive_failures
     with _feed_lock:
+        recovered = _consecutive_failures
+        previous_count = _last_count
         _last_ok_at = time.time()
         _last_count = count
         _consecutive_failures = 0
-    print(f"[adsb.fi] {count} aircraft", flush=True)
+    if recovered:
+        print(f"[adsb.fi] recovered after {recovered} failed poll(s)", flush=True)
+    if previous_count is None or count != previous_count:
+        print(f"[adsb.fi] {count} aircraft", flush=True)
 
 
 def _record_failure(reason: str) -> None:

@@ -244,3 +244,43 @@ def test_poll_and_record_never_raises_on_unexpected_exception():
     adsb.poll_and_record(52.15, 4.3, 40, fetch=_exploding_fetch)  # must not raise
 
     assert adsb.feed_status()["consecutive_failures"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _record_success console pacing (review finding 7): adsb.fi polls every ~15s, so printing
+# on every success (as aishub.py does for its 900s polls) would flood the console.
+# ---------------------------------------------------------------------------
+
+def test_record_success_first_poll_prints():
+    adsb._record_success(3)
+    # _last_count is set regardless of whether a line was printed -- the state-tracking half
+    # of "does it print" that this test suite can assert without capturing stdout.
+    assert adsb.feed_status()["last_count"] == 3
+
+
+def test_record_success_unchanged_count_does_not_print_again(capsys):
+    adsb._record_success(3)
+    capsys.readouterr()  # discard the first poll's line
+
+    adsb._record_success(3)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_record_success_changed_count_prints_again(capsys):
+    adsb._record_success(3)
+    capsys.readouterr()
+
+    adsb._record_success(4)
+
+    assert "4 aircraft" in capsys.readouterr().out
+
+
+def test_record_success_after_a_failure_streak_prints_recovered(capsys):
+    adsb._record_failure("network is down")
+    adsb._record_failure("network is down")
+    capsys.readouterr()
+
+    adsb._record_success(3)
+
+    assert "recovered after 2 failed poll(s)" in capsys.readouterr().out
