@@ -75,26 +75,34 @@ DEFAULT_MARITIME_PROMPT = (
 )
 
 # Fluent example transmissions for the aviation band, mirroring the maritime prompt's
-# approach (example dialogue, not a keyword list) and its "no invented name" rule --
-# a callsign here can be echoed into output the same way a vessel name could.
+# approach (example dialogue, not a keyword list) and its "no invented name" rule.
+#
+# CAUGHT IN TESTING (2026-09-08, same session it shipped): the first draft used a single
+# invented callsign, "November Two Two Bravo", repeated four times -- exactly the
+# Motortanker Neptune mistake DEFAULT_MARITIME_PROMPT above was rewritten to avoid, and it
+# reproduced the same failure within minutes of real Schiphol Approach traffic ("Nomember
+# Two Two Bravo, good day." / "November Two Two Bravo, X-ray one one eight two eight,
+# good bye." on audio that said nothing of the sort). Rewritten to use a generic role
+# ("the inbound aircraft") the way the maritime prompt uses "the inbound motortanker"
+# rather than a specific ship name. Real station names (Schiphol Approach, Tower) stay --
+# those are correct regardless of which aircraft is transmitting, unlike an invented
+# callsign or vessel name.
 #
 # Unlike DEFAULT_MARITIME_PROMPT, this has not been measured against a hand-referenced
 # corpus -- there wasn't one until an external antenna made airband reception usable
 # (2026-09-08). Ship as a reasonable first cut; revisit with server/bench.py once real
 # Schiphol-band clips have been captured and referenced. See docs/design-notes.md.
 DEFAULT_AVIATION_PROMPT = (
-    "Schiphol Approach, good morning, this is November Two Two Bravo, descending "
+    "Schiphol Approach, good morning, this is the inbound aircraft, descending "
     "flight level one hundred, request vectors for the ILS approach runway one "
     "eight center, over. "
-    "November Two Two Bravo, Schiphol Approach, roger, turn left heading two "
-    "seven zero, descend to three thousand feet, QNH one zero one three, over. "
-    "Heading two seven zero, three thousand feet, one zero one three, November "
-    "Two Two Bravo. "
-    "November Two Two Bravo, you are established on the localizer, cleared ILS "
-    "approach runway one eight center, contact Tower on frequency one one eight "
-    "decimal one, over. "
+    "Roger, turn left heading two seven zero, descend to three thousand feet, "
+    "QNH one zero one three, over. "
+    "Heading two seven zero, three thousand feet, one zero one three, wilco. "
+    "You are established on the localizer, cleared ILS approach runway one "
+    "eight center, contact Tower on frequency one one eight decimal one, over. "
     "Contact Tower one one eight decimal one, cleared ILS one eight center, "
-    "November Two Two Bravo, good day."
+    "good day."
 )
 
 

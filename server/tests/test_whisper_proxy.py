@@ -1796,6 +1796,26 @@ def test_aviation_prompt_contains_no_maritime_vocabulary():
         assert term not in lowered
 
 
+def test_aviation_prompt_names_no_specific_callsign():
+    """Regression test for the Motortanker-Neptune-shaped bug this prompt shipped with:
+    an invented, repeated callsign ("November Two Two Bravo") got echoed into real
+    Schiphol Approach transcripts within minutes of going live. The prompt must use a
+    generic role ("the inbound aircraft"), never a specific reusable identity, the same
+    way DEFAULT_MARITIME_PROMPT says "the inbound motortanker" rather than a ship name."""
+    lowered = proxy.DEFAULT_AVIATION_PROMPT.lower()
+    assert "november two two bravo" not in lowered
+    # No NATO phonetic-alphabet callsign token appears at all, so nothing distinctive is
+    # available for the decoder to echo back as a fabricated aircraft identity.
+    nato_alphabet = (
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        "india", "juliett", "kilo", "lima", "mike", "november", "oscar", "papa",
+        "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
+        "x-ray", "xray", "yankee", "zulu",
+    )
+    for letter in nato_alphabet:
+        assert letter not in lowered
+
+
 def test_prompt_echo_filter_can_be_disabled(monkeypatch):
     monkeypatch.setattr(corrections, "PROMPT_ECHO_FILTER", False)
     assert proxy._is_prompt_echo("Motortanker Neptune, over.", _PROMPT) is False
