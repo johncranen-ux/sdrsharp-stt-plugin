@@ -74,14 +74,49 @@ DEFAULT_MARITIME_PROMPT = (
     "Understood, shall we change to channel seven seven, over."
 )
 
+# Fluent example transmissions for the aviation band, mirroring the maritime prompt's
+# approach (example dialogue, not a keyword list) and its "no invented name" rule --
+# a callsign here can be echoed into output the same way a vessel name could.
+#
+# Unlike DEFAULT_MARITIME_PROMPT, this has not been measured against a hand-referenced
+# corpus -- there wasn't one until an external antenna made airband reception usable
+# (2026-09-08). Ship as a reasonable first cut; revisit with server/bench.py once real
+# Schiphol-band clips have been captured and referenced. See docs/design-notes.md.
+DEFAULT_AVIATION_PROMPT = (
+    "Schiphol Approach, good morning, this is November Two Two Bravo, descending "
+    "flight level one hundred, request vectors for the ILS approach runway one "
+    "eight center, over. "
+    "November Two Two Bravo, Schiphol Approach, roger, turn left heading two "
+    "seven zero, descend to three thousand feet, QNH one zero one three, over. "
+    "Heading two seven zero, three thousand feet, one zero one three, November "
+    "Two Two Bravo. "
+    "November Two Two Bravo, you are established on the localizer, cleared ILS "
+    "approach runway one eight center, contact Tower on frequency one one eight "
+    "decimal one, over. "
+    "Contact Tower one one eight decimal one, cleared ILS one eight center, "
+    "November Two Two Bravo, good day."
+)
 
-def _effective_prompt(client_prompt: str) -> str:
+
+def _default_prompt_for_mode(mode: str) -> str:
+    return DEFAULT_AVIATION_PROMPT if mode == "airband" else DEFAULT_MARITIME_PROMPT
+
+
+def _prompt_env_var_for_mode(mode: str) -> str:
+    # WHISPER_PROMPT is the pre-existing override name, kept as-is for the maritime
+    # default so existing deployments (start-all.bat, docs) don't silently change meaning.
+    return "WHISPER_PROMPT_AIRBAND" if mode == "airband" else "WHISPER_PROMPT"
+
+
+def _effective_prompt(client_prompt: str, mode: str = "maritime") -> str:
     """The prompt actually sent to the decoder for this request.
 
     Shared by the param builders and the echo filter, so the filter always compares against
     the prompt that was really in force rather than a copy that can drift from it.
     """
-    return client_prompt or os.environ.get("WHISPER_PROMPT", DEFAULT_MARITIME_PROMPT)
+    return client_prompt or os.environ.get(
+        _prompt_env_var_for_mode(mode), _default_prompt_for_mode(mode)
+    )
 
 
 def _env_bool(name: str, default: str) -> str:
@@ -89,7 +124,7 @@ def _env_bool(name: str, default: str) -> str:
     return "true" if os.environ.get(name, default).strip().lower() in ("1", "true", "yes") else "false"
 
 
-def _build_whisper_params(client_language: str, client_prompt: str) -> dict:
+def _build_whisper_params(client_language: str, client_prompt: str, mode: str = "maritime") -> dict:
     return {
         "temperature": os.environ.get("WHISPER_TEMPERATURE", "0"),
         "beam_size": os.environ.get("WHISPER_BEAM_SIZE", "5"),
@@ -97,7 +132,7 @@ def _build_whisper_params(client_language: str, client_prompt: str) -> dict:
         "suppress_nst": _env_bool("WHISPER_SUPPRESS_NST", "true"),
         "response_format": "json",
         "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
-        "prompt": _effective_prompt(client_prompt),
+        "prompt": _effective_prompt(client_prompt, mode),
         "carry_initial_prompt": "true",
         # Off by default: server/bench.py on 49 real captures showed VAD-on configs
         # (48.5%/41.8% pooled WER) doing no better than, or worse than, the equivalent
@@ -127,7 +162,7 @@ def _truncate_prompt(text: str, max_words: int = None) -> str:
     return " ".join(words[:limit])
 
 
-def _build_groq_fields(client_language: str, client_prompt: str) -> dict:
+def _build_groq_fields(client_language: str, client_prompt: str, mode: str = "maritime") -> dict:
     """Form fields for Groq's OpenAI-compatible transcription endpoint.
 
     Deliberately narrower than _build_whisper_params: Groq accepts only model,
@@ -144,7 +179,7 @@ def _build_groq_fields(client_language: str, client_prompt: str) -> dict:
         "temperature": os.environ.get("WHISPER_TEMPERATURE", "0"),
         "response_format": "json",
         "language": client_language or os.environ.get("WHISPER_LANGUAGE", "en"),
-        "prompt": _truncate_prompt(_effective_prompt(client_prompt)),
+        "prompt": _truncate_prompt(_effective_prompt(client_prompt, mode)),
     }
 
 
@@ -328,9 +363,9 @@ def _error_response(message: str) -> tuple[int, bytes, list]:
     return 503, json.dumps({"error": message}).encode("utf-8"), []
 
 
-def _transcribe_whisper_cpp(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+def _transcribe_whisper_cpp(file_info: dict, language: str, prompt: str, mode: str = "maritime") -> tuple[int, bytes, list]:
     """Transcribe via the local whisper.cpp server in WSL2."""
-    params = _build_whisper_params(client_language=language, client_prompt=prompt)
+    params = _build_whisper_params(client_language=language, client_prompt=prompt, mode=mode)
     boundary, body = _build_multipart(params, file_info)
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
@@ -427,12 +462,12 @@ def _check_groq_quota(headers: list) -> None:
     print(f"[{ts}] [quota] Groq daily requests remaining: {remaining}", flush=True)
 
 
-def _transcribe_groq(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+def _transcribe_groq(file_info: dict, language: str, prompt: str, mode: str = "maritime") -> tuple[int, bytes, list]:
     """Transcribe via Groq's hosted Whisper API."""
     if not GROQ_API_KEY:
         return _error_response("GROQ_API_KEY not set (needed when STT_BACKEND=groq)")
 
-    fields = _build_groq_fields(client_language=language, client_prompt=prompt)
+    fields = _build_groq_fields(client_language=language, client_prompt=prompt, mode=mode)
     boundary, body = _build_multipart(fields, file_info)
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -505,8 +540,8 @@ def _client_response_headers(upstream: list) -> list:
     return [(k, v) for k, v in upstream if k.lower() not in _SKIP_RESPONSE_HEADERS]
 
 
-def transcribe(file_info: dict, language: str, prompt: str) -> tuple[int, bytes, list]:
+def transcribe(file_info: dict, language: str, prompt: str, mode: str = "maritime") -> tuple[int, bytes, list]:
     """Transcribe one audio chunk using whichever backend STT_BACKEND selects."""
     if STT_BACKEND == "groq":
-        return _transcribe_groq(file_info, language, prompt)
-    return _transcribe_whisper_cpp(file_info, language, prompt)
+        return _transcribe_groq(file_info, language, prompt, mode)
+    return _transcribe_whisper_cpp(file_info, language, prompt, mode)

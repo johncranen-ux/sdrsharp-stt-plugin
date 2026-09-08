@@ -235,6 +235,7 @@ from stt_proxy import backends  # noqa: E402
 from stt_proxy.backends import (  # noqa: E402
     BACKEND_HOST,
     BACKEND_PORT,
+    DEFAULT_AVIATION_PROMPT,
     DEFAULT_MARITIME_PROMPT,
     GROQ_API_KEY,
     GROQ_HOST,
@@ -435,6 +436,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             file_info,
             language=client_fields.get("language", ""),
             prompt=client_fields.get("prompt", ""),
+            mode=mode,
         )
 
         # Post-process successful transcriptions
@@ -448,7 +450,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     data["text"] = ""
                     resp_body = json.dumps(data).encode("utf-8")
 
-                elif _is_prompt_echo(raw_text, _effective_prompt(client_fields.get("prompt", ""))):
+                elif _is_prompt_echo(raw_text, _effective_prompt(client_fields.get("prompt", ""), mode)):
                     # Logged separately from [filtered]: an echo means the decoder returned
                     # the prompt instead of the audio, which is worth being able to spot in
                     # the log rather than having it disappear into the hallucination count.

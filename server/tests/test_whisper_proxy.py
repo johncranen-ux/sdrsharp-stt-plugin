@@ -1777,6 +1777,25 @@ def test_shipped_prompt_leaves_real_speech_alone():
                                  proxy.DEFAULT_MARITIME_PROMPT) is False
 
 
+def test_shipped_aviation_prompt_echo_is_detected():
+    """Same guard as test_shipped_prompt_echo_is_detected, for the airband default."""
+    first_sentence = proxy.DEFAULT_AVIATION_PROMPT.split(". ")[0] + "."
+    assert proxy._is_prompt_echo(first_sentence, proxy.DEFAULT_AVIATION_PROMPT) is True
+
+
+def test_shipped_aviation_prompt_leaves_real_speech_alone():
+    assert proxy._is_prompt_echo("Kipin Approach, Ranae One, I'm with you.",
+                                 proxy.DEFAULT_AVIATION_PROMPT) is False
+
+
+def test_aviation_prompt_contains_no_maritime_vocabulary():
+    """The bug this whole fix addresses: maritime vocabulary echoed into airband
+    transcripts because the decoder was always primed with the maritime prompt."""
+    lowered = proxy.DEFAULT_AVIATION_PROMPT.lower()
+    for term in ("maas", "vts", "motortanker", "draught", "buoy", "botlek", "anchorage"):
+        assert term not in lowered
+
+
 def test_prompt_echo_filter_can_be_disabled(monkeypatch):
     monkeypatch.setattr(corrections, "PROMPT_ECHO_FILTER", False)
     assert proxy._is_prompt_echo("Motortanker Neptune, over.", _PROMPT) is False
@@ -3184,6 +3203,16 @@ def test_build_whisper_params_honors_client_overrides():
     assert params["beam_size"] == "5"
 
 
+def test_build_whisper_params_defaults_to_maritime_prompt_when_mode_omitted():
+    params = proxy._build_whisper_params(client_language="", client_prompt="")
+    assert params["prompt"] == proxy.DEFAULT_MARITIME_PROMPT
+
+
+def test_build_whisper_params_uses_aviation_prompt_in_airband_mode():
+    params = proxy._build_whisper_params(client_language="", client_prompt="", mode="airband")
+    assert params["prompt"] == proxy.DEFAULT_AVIATION_PROMPT
+
+
 def test_env_bool_accepts_common_truthy_values(monkeypatch):
     for value in ("1", "true", "True", "yes"):
         monkeypatch.setenv("TEST_FLAG", value)
@@ -3211,6 +3240,28 @@ def test_build_groq_fields_honors_client_overrides():
     fields = proxy._build_groq_fields(client_language="nl", client_prompt="custom prompt text")
     assert fields["language"] == "nl"
     assert fields["prompt"] == "custom prompt text"
+
+
+def test_build_groq_fields_uses_aviation_prompt_in_airband_mode():
+    fields = proxy._build_groq_fields(client_language="", client_prompt="", mode="airband")
+    assert fields["prompt"] == proxy.DEFAULT_AVIATION_PROMPT
+
+
+def test_build_groq_fields_client_prompt_wins_over_mode():
+    fields = proxy._build_groq_fields(client_language="", client_prompt="custom", mode="airband")
+    assert fields["prompt"] == "custom"
+
+
+def test_effective_prompt_airband_env_override_does_not_leak_into_maritime(monkeypatch):
+    monkeypatch.setenv("WHISPER_PROMPT_AIRBAND", "custom airband override")
+    assert backends._effective_prompt("", mode="airband") == "custom airband override"
+    assert backends._effective_prompt("", mode="maritime") == proxy.DEFAULT_MARITIME_PROMPT
+
+
+def test_effective_prompt_maritime_env_override_does_not_leak_into_airband(monkeypatch):
+    monkeypatch.setenv("WHISPER_PROMPT", "custom maritime override")
+    assert backends._effective_prompt("", mode="maritime") == "custom maritime override"
+    assert backends._effective_prompt("", mode="airband") == proxy.DEFAULT_AVIATION_PROMPT
 
 
 def test_build_groq_fields_omits_params_groq_rejects():
@@ -3331,6 +3382,34 @@ def test_transcribe_dispatches_to_whisper_cpp_when_selected(monkeypatch):
 
     status, body, _ = proxy.transcribe(_FILE_INFO, language="en", prompt="")
     assert (status, body) == (200, b'{"text":"local"}')
+
+
+def test_transcribe_passes_mode_through_to_the_selected_backend(monkeypatch):
+    seen = {}
+
+    def _capture(file_info, language, prompt, mode="maritime"):
+        seen["mode"] = mode
+        return (200, b'{"text":""}', [])
+
+    monkeypatch.setattr(backends, "STT_BACKEND", "groq")
+    monkeypatch.setattr(backends, "_transcribe_groq", _capture)
+
+    proxy.transcribe(_FILE_INFO, language="en", prompt="", mode="airband")
+    assert seen["mode"] == "airband"
+
+
+def test_transcribe_defaults_to_maritime_mode_when_omitted(monkeypatch):
+    seen = {}
+
+    def _capture(file_info, language, prompt, mode="maritime"):
+        seen["mode"] = mode
+        return (200, b'{"text":""}', [])
+
+    monkeypatch.setattr(backends, "STT_BACKEND", "groq")
+    monkeypatch.setattr(backends, "_transcribe_groq", _capture)
+
+    proxy.transcribe(_FILE_INFO, language="en", prompt="")
+    assert seen["mode"] == "maritime"
 
 
 def test_transcribe_groq_missing_key_returns_error_envelope(monkeypatch):
