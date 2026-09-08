@@ -4,6 +4,8 @@ live adsb.fi cache."""
 import sys
 from pathlib import Path
 
+import pytest
+
 _SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SERVER_DIR))
 
@@ -48,3 +50,48 @@ def test_extract_airline_word_with_no_following_digits_returns_none():
 
 def test_extract_returns_none_for_empty_text():
     assert flight_identify.extract_callsign_candidate("") is None
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    adsb._aircraft_cache.clear()
+    yield
+    adsb._aircraft_cache.clear()
+
+
+def _seed(hex_id: str, flight: str, t: str = "B738"):
+    adsb._aircraft_cache[hex_id] = {
+        "hex": hex_id, "flight": flight, "r": None, "t": t,
+        "alt_baro": None, "gs": None, "track": None, "lat": None, "lon": None,
+        "squawk": None, "last_seen": 0.0,
+    }
+
+
+def test_match_flight_exact_hit():
+    _seed("484443", "KLM281")
+    result = flight_identify.match_flight("KLM281")
+    assert result["hex"] == "484443"
+    assert result["flight"] == "KLM281"
+
+
+def test_match_flight_resolves_a_garbled_candidate_to_the_real_flight():
+    """extract_callsign_candidate already normalised KALM -> KLM, so the candidate reaching
+    match_flight is clean; this test is the airline-code fuzzy path when the candidate
+    itself still differs slightly from what's in the live cache (e.g. a flight number a
+    digit short)."""
+    _seed("484443", "KLM676")
+    assert flight_identify.match_flight("KLM676")["hex"] == "484443"
+
+
+def test_match_flight_no_match_returns_none():
+    _seed("484443", "KLM281")
+    assert flight_identify.match_flight("AAL999") is None
+
+
+def test_match_flight_handles_empty_cache():
+    assert flight_identify.match_flight("KLM281") is None
+
+
+def test_match_flight_none_candidate_returns_none():
+    """So callers can chain extract -> match without a None-check in between."""
+    assert flight_identify.match_flight(None) is None

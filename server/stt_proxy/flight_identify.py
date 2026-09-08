@@ -89,3 +89,28 @@ def extract_callsign_candidate(text: str) -> str | None:
             return f"{code}{digits}"
         return code if code == word.upper() else None
     return None
+
+
+def match_flight(candidate: str | None) -> dict | None:
+    """The live aircraft `candidate` most likely refers to, or None.
+
+    Exact match first (the common case once extraction has already normalised known garbled
+    airline forms). Falls back to a fuzzy match against the whole candidate string -- digits
+    are not fuzzed on their own; no evidence yet that they get misheard the way letters do,
+    per the design spec's deferred-work note.
+    """
+    if not candidate:
+        return None
+
+    for ac in adsb.current_aircraft():
+        if ac["flight"] == candidate:
+            return ac
+
+    best_ac, best_score = None, 0
+    for ac in adsb.current_aircraft():
+        if not ac["flight"]:
+            continue
+        score = rf_fuzz.ratio(candidate, ac["flight"])
+        if score > best_score:
+            best_ac, best_score = ac, score
+    return best_ac if best_score >= _FUZZY_THRESHOLD else None
