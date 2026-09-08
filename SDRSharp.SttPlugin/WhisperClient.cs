@@ -126,7 +126,7 @@ namespace SDRSharp.SttPlugin
                 {
                     var text = ExtractText(responseBody);
                     if (!string.IsNullOrWhiteSpace(text))
-                        RaiseStatus(text);
+                        RaiseStatus(FormatForDisplay(channel, text));
                     return text;
                 }
                 else
@@ -157,6 +157,14 @@ namespace SDRSharp.SttPlugin
                 return "";
             }
         }
+
+        // Channel is presentation-only here -- the value SendAsync() returns (and what
+        // ChunkCaptureInfo.ReturnedText records) stays the plain decoder text. Only what
+        // reaches the transcript panel via StatusChanged gets the frequency prefix, so
+        // scanning multiple channels (or several conversations resolving on the server)
+        // can be told apart on sight instead of only in the server console log.
+        internal static string FormatForDisplay(string? channel, string text) =>
+            string.IsNullOrEmpty(channel) ? text : $"[{channel} MHz] {text}";
 
         internal static bool TryParseUrl(string url, out string host, out int port, out string path)
         {

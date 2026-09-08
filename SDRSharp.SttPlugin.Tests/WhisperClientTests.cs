@@ -70,4 +70,20 @@ public class WhisperClientTests
         var text = WhisperClient.ExtractText("not json at all");
         Assert.Equal("", text);
     }
+
+    [Fact]
+    public void FormatForDisplay_PrefixesTheChannelWhenKnown()
+    {
+        var line = WhisperClient.FormatForDisplay("119,055", "Roger, copy");
+        Assert.Equal("[119,055 MHz] Roger, copy", line);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void FormatForDisplay_LeavesTextAloneWhenChannelUnknown(string? channel)
+    {
+        var line = WhisperClient.FormatForDisplay(channel, "Roger, copy");
+        Assert.Equal("Roger, copy", line);
+    }
 }
