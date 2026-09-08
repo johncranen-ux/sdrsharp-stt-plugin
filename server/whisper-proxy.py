@@ -102,7 +102,8 @@ _STARTED_AT = time.time()
 # check already handles this: the plugin renders the channel string in SDR#'s current
 # culture, which on this deployment is a comma decimal separator.
 APPROACH_TOWER_CHANNELS = frozenset({
-    "121.200", "121,200",   # Schiphol Approach 4
+    "121.200", "121,200",   # Schiphol Approach 4 (nominal)
+    "121.205", "121,205",   # Schiphol Approach 4 as tuned with the +42ppm correction active
     "118.405", "118,405",   # Schiphol Approach 5 / Arrival (Main)
     "119.055", "119,055",   # Schiphol Approach
     "127.870", "127,870",   # Schiphol Area Control Centre 1
