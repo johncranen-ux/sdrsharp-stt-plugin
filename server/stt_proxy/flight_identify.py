@@ -25,6 +25,7 @@ from stt_proxy.corrections import _decode_spoken_word
 # _find_airline_anchor below.
 AIRLINE_TELEPHONY: dict[str, str] = {
     "klm": "KLM", "kalm": "KLM", "rklm": "KLM", "klmx": "KLM",
+    "llm": "KLM", "lem": "KLM",
     "transavia": "TRA",
     "american": "AAL",
     "united": "UAL",
@@ -36,6 +37,34 @@ AIRLINE_TELEPHONY: dict[str, str] = {
     "lufthansa": "DLH",
     "easyjet": "EZY",
 }
+
+# Extra digit words _decode_spoken_word (corrections.py) doesn't cover, scoped locally rather
+# than added to that shared table since they're specific to how flight numbers get read aloud
+# rather than general spelled-out decoding (vessel names, etc.). Grown from real transmissions
+# the same way AIRLINE_TELEPHONY is: "one thirty three" for DAL133 and "two oh three" for
+# AAL203, both observed 2026-09-09 with the correctly-tagged flight sitting right there in the
+# session under a different phrasing. A tens word contributes only its tens digit (dropping
+# the implicit trailing zero) because it's always immediately followed by a units word in the
+# observed data ("thirty" + "three" -> "33"); a bare tens word with no units word after it
+# (e.g. "Delta sixty" for DAL60) isn't handled -- no evidence yet it's needed.
+_SUPPLEMENTAL_DIGIT_WORDS: dict[str, str] = {
+    "twenty": "2", "thirty": "3", "forty": "4", "fifty": "5",
+    "sixty": "6", "seventy": "7", "eighty": "8", "ninety": "9",
+    "oh": "0",
+}
+
+# A digit word immediately followed by one of these means the digit belongs to an altitude or
+# fraction reading, not the callsign -- stop the run before it. Evidence: "Delta seven four
+# eight thousand for seven thousand" is DAL74, not DAL748 (proxy-2026-09-09.log line 440); "one
+# six one two point two percent" is DAL161, not DAL1612 (line 688). Both real transmissions
+# from the same session, not a hypothetical -- add more boundary words only against similar
+# evidence.
+_DIGIT_RUN_BOUNDARY_WORDS = {"thousand", "point"}
+
+
+def _decode_digit_word(word: str) -> str | None:
+    return _decode_spoken_word(word) or _SUPPLEMENTAL_DIGIT_WORDS.get(word)
+
 
 # Only words this long or longer are tried against the table with fuzzy matching -- see the
 # module docstring's note on why short tokens (KLM's 3 characters) are handled by explicit
@@ -84,21 +113,30 @@ def extract_callsign_candidate(text: str) -> str | None:
         if code is None:
             continue
         digits = ""
-        for follow in words[i + 1:i + 5]:
+        window_end = min(i + 5, len(words))
+        for j in range(i + 1, window_end):
+            follow = words[j]
+            peek = words[j + 1] if j + 1 < len(words) else None
             if follow.isdigit():
                 # A numeral token ("281") already stands for its whole run of characters --
                 # unlike a single spelled-out word, which _decode_spoken_word turns into
                 # exactly one character. Keep scanning afterwards in case a phonetic-letter
                 # suffix follows the number ("281 november" -> "281N").
-                digits += follow
-                continue
-            # Not just spoken digits: a real callsign suffix mixes digits and a single
-            # phonetic letter ("six november" -> "6N"), which _decode_spoken_word already
-            # handles by checking both tables -- using _SPOKEN_DIGITS alone here was tried
-            # and empirically failed ("Transavia six november" produced "TRA6", dropping the
-            # N) before this plan was finalised.
-            char = _decode_spoken_word(follow)
+                char = follow
+            else:
+                # Not just spoken digits: a real callsign suffix mixes digits and a single
+                # phonetic letter ("six november" -> "6N"), which _decode_spoken_word already
+                # handles by checking both tables -- using _SPOKEN_DIGITS alone here was tried
+                # and empirically failed ("Transavia six november" produced "TRA6", dropping
+                # the N) before this plan was finalised. _decode_digit_word adds tens words
+                # ("thirty") and "oh" on top, scoped to this loop -- see
+                # _SUPPLEMENTAL_DIGIT_WORDS above.
+                char = _decode_digit_word(follow)
             if char is None:
+                break
+            if peek in _DIGIT_RUN_BOUNDARY_WORDS:
+                # This digit is the start of an altitude/fraction reading ("eight thousand",
+                # "two point two"), not part of the callsign -- stop before including it.
                 break
             digits += char
         if digits:

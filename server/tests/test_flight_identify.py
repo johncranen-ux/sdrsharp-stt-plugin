@@ -87,6 +87,69 @@ def test_extract_genuine_long_name_garbling_still_fuzzy_matches_at_the_raised_th
     ) == "DLH676"
 
 
+def test_extract_compressed_tens_number_word():
+    """Real 2026-09-09 session: "Delta one thirty three" for DAL133 -- ATC/pilots don't
+    always read digits individually. Before this fix, "thirty" wasn't decodable at all, so
+    extraction stopped after "one" and produced "DAL1" (logged as a no-match 5 times in
+    proxy-2026-09-09.log, each time with the real DAL133 sitting in "same-airline nearby")
+    even though the very same aircraft got tagged correctly elsewhere in the same session
+    when read digit-by-digit ("one three three")."""
+    assert flight_identify.extract_callsign_candidate(
+        "Star third, Delta one thirty three out of two for six."
+    ) == "DAL133"
+
+
+def test_extract_stops_digit_run_before_an_altitude_thousand_word():
+    """Real 2026-09-09 session: "Delta seven four eight thousand for seven thousand" is
+    DAL74 climbing/descending through an altitude, not DAL748 -- but the old 4-word lookahead
+    window had no stop condition, so it swallowed the "eight" from "eight thousand" into the
+    candidate (logged as 'DAL748' with the real DAL74 sitting in "same-airline nearby",
+    proxy-2026-09-09.log line 440)."""
+    assert flight_identify.extract_callsign_candidate(
+        "Shipboat Delta seven four eight thousand for seven thousand, "
+        "and we're on the zero eight zero heading."
+    ) == "DAL74"
+
+
+def test_extract_stops_digit_run_before_a_point_fraction_word():
+    """Real 2026-09-09 session: "Delta one six one two point two percent" is DAL161, not
+    DAL1612 -- the trailing "two" belongs to "point two percent", not the flight number
+    (logged as 'DAL1612' with the real DAL161 sitting in "same-airline nearby",
+    proxy-2026-09-09.log line 688)."""
+    assert flight_identify.extract_callsign_candidate(
+        "My departure is Delta one six one two point two percent."
+    ) == "DAL161"
+
+
+def test_extract_oh_decodes_as_zero_in_a_digit_run():
+    """Real 2026-09-09 session: "American, two oh three" is AAL203 -- the same aircraft got
+    tagged correctly 6 other times in this session using "two zero three", but "oh" wasn't in
+    the digit table, so this one phrasing stopped after "two" and produced 'AAL2' (logged with
+    the real AAL203 sitting in "same-airline nearby", proxy-2026-09-09.log line 847)."""
+    assert flight_identify.extract_callsign_candidate(
+        "Good morning American, two oh three, heavy passing two thousand "
+        "three hundred four, on flight level six zero."
+    ) == "AAL203"
+
+
+def test_extract_llm_garbled_klm_variant():
+    """Real 2026-09-09 session transcript (09:57 UTC-ish, plugin panel): "LLM five nine on
+    November" for what context (same conversation as the confirmed KLM23N/KLM1031 traffic)
+    makes clear is a garbled "KLM" -- not yet in AIRLINE_TELEPHONY alongside kalm/rklm/klmx."""
+    assert flight_identify.extract_callsign_candidate(
+        "LLM five nine on November, after SPY we'd like to obtain the heading."
+    ) == "KLM59"
+
+
+def test_extract_lem_garbled_klm_variant():
+    """Real 2026-09-09 session transcript: "LEM two three" spoken in the middle of a run of
+    confirmed KLM23N transmissions from the same aircraft -- another garbled "KLM" form not
+    yet in AIRLINE_TELEPHONY."""
+    assert flight_identify.extract_callsign_candidate(
+        "ILS one one three zero, okay, LEM two three, no rem."
+    ) == "KLM23"
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
     adsb._aircraft_cache.clear()
