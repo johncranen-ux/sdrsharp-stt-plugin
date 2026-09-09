@@ -62,8 +62,23 @@ _SUPPLEMENTAL_DIGIT_WORDS: dict[str, str] = {
 _DIGIT_RUN_BOUNDARY_WORDS = {"thousand", "point"}
 
 
-def _decode_digit_word(word: str) -> str | None:
-    return _decode_spoken_word(word) or _SUPPLEMENTAL_DIGIT_WORDS.get(word)
+def _decode_digit_word(word: str, next_word: str | None) -> str | None:
+    """Like _decode_spoken_word, plus the tens/oh table above and one deliberately narrow
+    homophone case.
+
+    "for"/"four" (real 2026-09-09 23:54 transmission: "Transavia, two for Zulu" -> should be
+    TRA24Z) is NOT added as a blanket alias the way "oh" was -- "for" is one of the most common
+    words in English ("cleared for ILS", "request for deviation"), so decoding it unconditionally
+    would corrupt those. It's only treated as "4" when the word right after it is itself
+    digit-context (another digit or a phonetic letter), which real prepositional uses of "for"
+    essentially never are.
+    """
+    char = _decode_spoken_word(word) or _SUPPLEMENTAL_DIGIT_WORDS.get(word)
+    if char is not None:
+        return char
+    if word == "for" and next_word is not None and _decode_spoken_word(next_word) is not None:
+        return "4"
+    return None
 
 
 # Only words this long or longer are tried against the table with fuzzy matching -- see the
@@ -131,7 +146,7 @@ def extract_callsign_candidate(text: str) -> str | None:
                 # the N) before this plan was finalised. _decode_digit_word adds tens words
                 # ("thirty") and "oh" on top, scoped to this loop -- see
                 # _SUPPLEMENTAL_DIGIT_WORDS above.
-                char = _decode_digit_word(follow)
+                char = _decode_digit_word(follow, peek)
             if char is None:
                 break
             if peek in _DIGIT_RUN_BOUNDARY_WORDS:

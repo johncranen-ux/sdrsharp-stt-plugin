@@ -150,6 +150,26 @@ def test_extract_lem_garbled_klm_variant():
     ) == "KLM23"
 
 
+def test_extract_for_decodes_as_four_between_digit_context_words():
+    """Real 2026-09-09 23:54 transmission: "Transavia, two for Zulu" -- Whisper transcribed
+    "four" as its homophone "for", which isn't a digit word, so extraction stopped after "two"
+    and produced 'TRA2' (logged with the real TRA24Z sitting in "same-airline nearby",
+    proxy-2026-09-09.log line 191)."""
+    assert flight_identify.extract_callsign_candidate(
+        "QNH one zero one eight, Transavia, two for Zulu."
+    ) == "TRA24Z"
+
+
+def test_extract_for_before_a_non_digit_word_does_not_produce_a_false_digit():
+    """"for" must only be treated as "four" when sandwiched between two digit-context words --
+    otherwise ordinary uses ("cleared for ILS", "request for deviation") would corrupt the
+    candidate. Here "for" is followed by "ILS" (not decodable), so it must stop the run
+    exactly as any other non-decodable word would, leaving DAL13, not a fabricated DAL134."""
+    assert flight_identify.extract_callsign_candidate(
+        "Delta one three for ILS."
+    ) == "DAL13"
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
     adsb._aircraft_cache.clear()
