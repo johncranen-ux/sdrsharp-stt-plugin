@@ -36,6 +36,8 @@ AIRLINE_TELEPHONY: dict[str, str] = {
     "speedbird": "BAW",
     "lufthansa": "DLH",
     "easyjet": "EZY",
+    "shamrock": "EIN", "shemarck": "EIN",
+    "canada": "ACA",
 }
 
 # Extra digit words _decode_spoken_word (corrections.py) doesn't cover, scoped locally rather

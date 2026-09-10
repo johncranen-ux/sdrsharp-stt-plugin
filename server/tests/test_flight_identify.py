@@ -87,6 +87,34 @@ def test_extract_genuine_long_name_garbling_still_fuzzy_matches_at_the_raised_th
     ) == "DLH676"
 
 
+def test_extract_shamrock_decodes_as_ein():
+    """Real 2026-09-10 00:05 transmission on 121.205: "Shamrock" is Aer Lingus's standard
+    ICAO radio telephony designator (EIN), same category as "Speedbird" -> BAW already in
+    AIRLINE_TELEPHONY -- a confident, well-established mapping, not a guess."""
+    assert flight_identify.extract_callsign_candidate(
+        "Shamrock six one one, passing two thousand one hundred feet, "
+        "for flight level six zero, RG two zero."
+    ) == "EIN611"
+
+
+def test_extract_shemarck_garbled_shamrock_variant():
+    """Real 2026-09-10 00:07 transmission, same session and same aircraft (EIN611) already
+    confirmed twice under the plain "Shamrock" spelling -- same policy as KLM's "llm"/"lem"
+    garbled variants."""
+    assert flight_identify.extract_callsign_candidate(
+        "One two three decimal seven zero five, Shemarck six one one, see you."
+    ) == "EIN611"
+
+
+def test_extract_canada_decodes_air_canada_callsign():
+    """Real 2026-09-10 10:13 transmission: "Air Canada 808" -- extraction only matches single
+    words, so "canada" (not "air", which is far too common a word to anchor on safely) is the
+    anchor. Full name spoken clearly with a numeral flight number right after it."""
+    assert flight_identify.extract_callsign_candidate(
+        "One one eight four zero five, Air Canada 808, take care."
+    ) == "ACA808"
+
+
 def test_extract_compressed_tens_number_word():
     """Real 2026-09-09 session: "Delta one thirty three" for DAL133 -- ATC/pilots don't
     always read digits individually. Before this fix, "thirty" wasn't decodable at all, so
