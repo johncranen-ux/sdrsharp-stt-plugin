@@ -226,6 +226,24 @@ recorded 83 aircraft with real callsigns, types, altitudes and registrations.
 - Per-transmission in-proxy snapshotting (the side-car covers the first corpus).
 - Scoring the 2026-09-07→09 sessions retrospectively: no snapshots exist for them and no
   audio was captured for most, so they can support miss *classification* but not replay.
+- **Poll geometry — measure on the NEXT run, not this one.** The circle is centred at
+  52.15/4.3 with a 40nm (74 km) radius, which is 36.2 km southwest of Schiphol. It therefore
+  reaches only ~20nm past the field to the northeast while extending ~60nm southwest over
+  sea. One instantaneous sample (2026-09-10, airline callsigns only, airborne below 15,000ft,
+  within 40nm of Schiphol) put **1 of 20 candidates outside the circle** — `KLM26X`, 8900ft,
+  54 km out on bearing 056 — and the visible traffic showed a matching bearing skew: N 8,
+  **E 1**, S 3, W 7. Consistent with northeast arrivals being truncated, but it is a single
+  poll and is treated as indicative only.
+  The next measurement run should log a wide circle alongside the narrow one and report the
+  distribution over a full session. Note that widening is **not** a free win: it enlarges the
+  candidate set, which cuts against precision, so it is a trade to score rather than a fix to
+  apply. Deliberately not run during the first corpus, to avoid changing the poll geometry
+  midway through the session being labelled.
+- **Ground-traffic filtering.** Aircraft parked at Schiphol (~36 km out, `alt_baro: "ground"`)
+  sit in the candidate set `match_flight` searches — four of six Deltas at one sampled instant,
+  including `DAL161`, a name that recurs in the near-miss diagnostics. Filtering
+  `alt_baro != "ground"` is a one-line change, but it could cost recall for aircraft that have
+  just landed and are still on frequency. Score it with `--replay`; do not assume it.
 - Conversation-level resolution for airband. The 2026-09-10 interleaving analysis found
   Approach 4's gaps are inverted relative to CH01's (same-aircraft gaps of 90–112s against
   13–30s to a different aircraft), so the CH01 window-and-resolve pattern needs a different
