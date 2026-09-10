@@ -71,6 +71,10 @@ identification-labels-verified.txt
 # note field carries transcript text and it falls under exactly the restriction above.
 identification-labels*.txt
 bench-identify-results*.json
+# make_flight_labels.py's worksheet and the aircraft snapshots it is scored against. Same
+# restriction: the worksheet carries full transcript text by design.
+flight-labels*.txt
+adsb-snapshots-*.jsonl
 # --repeats writes one of these per run set. Same reason as the line above: the per-turn
 # rows carry real vessel names and MMSIs, and this repo is public.
 bench-identify-repeats*.json
