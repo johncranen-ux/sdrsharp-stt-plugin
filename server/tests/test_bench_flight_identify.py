@@ -454,6 +454,19 @@ class TestScoringAnArmsTranscripts:
         }}), encoding="utf-8")
         assert bench.load_transcripts(path, config="air_both") == {"0000": "both"}
 
+    def test_an_ambiguous_results_file_with_no_config_named_refuses_to_guess(self, tmp_path):
+        """A silent next(iter(results)) here would attribute one arm's transcriptions to
+        another arm -- exactly the cross-contamination this design exists to prevent."""
+        path = tmp_path / "two.json"
+        path.write_text(json.dumps({"model_label": None, "results": {
+            "air_shipped": [{"clip_id": "0000", "text": "shipped"}],
+            "air_both": [{"clip_id": "0000", "text": "both"}],
+        }}), encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            bench.load_transcripts(path)
+        assert "air_shipped" in str(excinfo.value)
+        assert "air_both" in str(excinfo.value)
+
     def test_the_arms_text_replaces_the_worksheet_text(self, corpus, tmp_path):
         """Row 0002 is "Port Cremoros three six seven" in the worksheet and extracts nothing.
         An arm that transcribed it as "Orange three six seven" must score as correct."""
