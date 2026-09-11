@@ -324,6 +324,32 @@ class TestRowsReportTheTextTheyWereScoredOn:
         assert row.text == "Level five, JetBlue three two."
 
 
+    def test_a_row_with_no_snapshot_still_reports_the_arms_text(self, tmp_path):
+        """17 of the 136 corpus rows have no snapshot in window. That path scores nothing --
+        no extraction runs -- but it still has to record the text the run was reading, or
+        --rows displays the worksheet's machine line as though the arm had written it. --rows
+        is exactly how the fabricated-callsign rows in the published result were found."""
+        labels = tmp_path / "labels.txt"
+        labels.write_text(WORKSHEET, encoding="utf-8")
+        # Every snapshot is long before the transmissions, so join_snapshot returns None.
+        snaps = bench.load_snapshots(_write_snapshots(tmp_path / "s.jsonl", [
+            _snap("2026-09-10T10:00:00+02:00", "DAL73")]))
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0000": "Delta seven three, New York."}).rows[0]
+        assert row.text == "Delta seven three, New York."
+
+    def test_a_row_with_no_snapshot_and_no_arm_text_shows_nothing(self, tmp_path):
+        """A clip the arm never transcribed has no text to show; the worksheet's line is not
+        a stand-in for it."""
+        labels = tmp_path / "labels.txt"
+        labels.write_text(WORKSHEET, encoding="utf-8")
+        snaps = bench.load_snapshots(_write_snapshots(tmp_path / "s.jsonl", [
+            _snap("2026-09-10T10:00:00+02:00", "DAL73")]))
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0000": "Delta seven three, New York."}).rows[1]
+        assert row.text == ""
+
+
 class TestDigitRuns:
     """Tail-first matching arm. The airline word is what ASR destroys; the digits usually
     survive, so this asks whether the digits alone can find the aircraft. Decoding reuses
@@ -530,3 +556,55 @@ class TestScoringAnArmsTranscripts:
         labels, snaps = corpus
         with pytest.raises(ValueError):
             bench.score(labels.read_text(encoding="utf-8"), snaps, transcripts={"0000": "x"})
+
+
+class TestRunHeader:
+    """The one line a console log is identified by later.
+
+    `mode` keyed off --replay alone, so a run over an arm's transcripts printed "live record"
+    and a saved log of an arm was indistinguishable from the baseline it is compared against.
+    --text was silently ignored beside --transcripts, so the header could also name a text
+    source the run never read.
+    """
+
+    def _run(self, monkeypatch, corpus, *argv):
+        labels, _ = corpus
+        monkeypatch.setattr("sys.argv", [
+            "bench_flight_identify.py", "--labels", str(labels),
+            "--snapshots", str(labels.parent / "s.jsonl"), *argv])
+        bench.main()
+
+    def _arm(self, tmp_path, rows):
+        path = tmp_path / "air_both.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_both": [
+            {"clip_id": cid, "text": text, "error": None} for cid, text in rows]}}),
+            encoding="utf-8")
+        return path
+
+    def test_the_live_record_says_so(self, corpus, monkeypatch, capsys):
+        self._run(monkeypatch, corpus)
+        assert "live record" in capsys.readouterr().out
+
+    def test_a_replay_names_the_text_column_it_ran_over(self, corpus, monkeypatch, capsys):
+        self._run(monkeypatch, corpus, "--replay", "--text", "heard")
+        assert "heard" in capsys.readouterr().out.splitlines()[0]
+
+    def test_a_transcripts_run_names_the_arm_file_and_claims_no_text_column(
+            self, corpus, monkeypatch, capsys, tmp_path):
+        labels, _ = corpus
+        path = self._arm(labels.parent, [("0000", "Delta seven three, New York.")])
+        self._run(monkeypatch, corpus, "--transcripts", str(path))
+        header = capsys.readouterr().out.splitlines()[0]
+        assert "air_both.json" in header
+        assert "live record" not in header
+        assert "machine" not in header
+
+    def test_naming_a_text_column_beside_transcripts_is_an_error(
+            self, corpus, monkeypatch, tmp_path):
+        """Silently ignoring --text is how a header comes to describe a run that never
+        happened; refusing is the only reading that cannot mislead."""
+        labels, _ = corpus
+        path = self._arm(labels.parent, [("0000", "Delta seven three, New York.")])
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, corpus, "--transcripts", str(path), "--text", "heard")
+        assert "--text" in str(excinfo.value) and "--transcripts" in str(excinfo.value)

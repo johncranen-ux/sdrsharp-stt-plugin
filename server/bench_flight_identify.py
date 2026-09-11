@@ -249,8 +249,13 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
 
         if replay:
             if snapshot is None:
+                # Nothing is scored here -- no extraction runs without a snapshot -- but the
+                # row still has to record the text this run was reading. Showing the
+                # worksheet's own column instead would put text the arm never produced beside
+                # an arm's row in --rows, on 17 of the 136 rows of the 2026-09-10 corpus.
                 tagged = candidate = None
-                text = record.get(text_source, "")
+                text = (record.get(text_source, "") if transcripts is None
+                        else transcripts.get(f"{record['index']:04d}", ""))
             else:
                 _load_cache(snapshot)
                 if transcripts is None:
@@ -455,7 +460,9 @@ def main() -> None:
     ap.add_argument("--snapshots", help="default: logs/adsb-snapshots-<the worksheet's date>.jsonl")
     ap.add_argument("--replay", action="store_true",
                     help="re-run extraction and matching against the aircraft in range")
-    ap.add_argument("--text", choices=("machine", "heard"), default="machine",
+    # No argparse default: "not given" has to stay distinguishable from "given as machine",
+    # or --text beside --transcripts cannot be refused.
+    ap.add_argument("--text", choices=("machine", "heard"),
                     help="with --replay, which transcription to run over (default: machine)")
     ap.add_argument("--blank", choices=("none", "skip"), default="none",
                     help="what an empty aircraft line means (default: none, the operator's call)")
@@ -466,6 +473,12 @@ def main() -> None:
                                           "worksheet's own machine text (implies --replay)")
     ap.add_argument("--config", help="which arm inside --transcripts to read")
     args = ap.parse_args()
+
+    if args.transcripts and args.text:
+        raise SystemExit(
+            "--text picks a column of the worksheet and --transcripts replaces that column "
+            "with an arm's own transcription -- they cannot both apply. Drop --text.")
+    text_source = args.text or "machine"
 
     worksheet = Path(args.labels).read_text(encoding="utf-8")
     if args.snapshots:
@@ -485,17 +498,27 @@ def main() -> None:
     blank_means = LABEL_NONE if args.blank == "none" else LABEL_UNSURE
 
     if args.sweep:
-        _sweep(worksheet, snapshots, blank_means, args.text)
+        _sweep(worksheet, snapshots, blank_means, text_source)
         return
 
     transcripts = (load_transcripts(Path(args.transcripts), args.config)
                    if args.transcripts else None)
 
     result = score(worksheet, snapshots, blank_means=blank_means,
-                   replay=args.replay or transcripts is not None, text_source=args.text,
+                   replay=args.replay or transcripts is not None, text_source=text_source,
                    transcripts=transcripts)
 
-    mode = f"replay over the {args.text} text" if args.replay else "live record"
+    # The header is how a saved console log is identified months later, so it has to name the
+    # source that was actually scored. Keying it off --replay alone printed "live record" for
+    # an arm run and made an arm's log indistinguishable from the baseline it is compared to.
+    if transcripts is not None:
+        mode = f"replay over {Path(args.transcripts).name}"
+        if args.config:
+            mode += f" [{args.config}]"
+    elif args.replay:
+        mode = f"replay over the {text_source} text"
+    else:
+        mode = "live record"
     print(f"{len(result.rows)} transmissions   {mode}   snapshots: {snap_path.name}")
     print(f"blank aircraft line read as {blank_means}\n")
 
