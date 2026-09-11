@@ -170,6 +170,14 @@ _AIRLINE_PHRASES = (
 
 AIR_AIRLINES_PROMPT = AIR_SHIPPED_PROMPT + _AIRLINE_PHRASES
 AIR_BOTH_PROMPT = AIR_NO_QNH_PROMPT + _AIRLINE_PHRASES
+
+# NOT a no-prompt arm, despite the name. backends._effective_prompt is `client_prompt or
+# <default>`, and "" is falsy, so an empty prompt sends the MARITIME default instead of
+# nothing. That was measured, not theorised: this arm produced "Maas Approach" and
+# "Rotterdam" hallucinations on airband audio. The workaround that does work is the
+# environment override -- os.environ.get returns "" verbatim, so exporting WHISPER_PROMPT=""
+# (WHISPER_PROMPT_AIRBAND="" for mode=airband) really does send no prompt. The value is left
+# as-is because the measurement was run with it and its results are on file under this name.
 AIR_EMPTY_PROMPT = ""
 
 # Selectable by name from the command line (bench.py --prompt, bench_stt.py --prompt).
@@ -183,7 +191,8 @@ PROMPTS: dict[str, str] = {
     "air_no_qnh": AIR_NO_QNH_PROMPT,      # is QNH over-primed?
     "air_airlines": AIR_AIRLINES_PROMPT,  # is KLM's absence the problem?
     "air_both": AIR_BOTH_PROMPT,          # do the two edits compose?
-    "air_empty": AIR_EMPTY_PROMPT,        # does the prompt help at all?
+    # Misnamed: "" falls through to the maritime default, see AIR_EMPTY_PROMPT above.
+    "air_empty": AIR_EMPTY_PROMPT,        # maritime default, NOT an empty prompt
 }
 
 CONFIGS: dict[str, dict[str, Any]] = {
