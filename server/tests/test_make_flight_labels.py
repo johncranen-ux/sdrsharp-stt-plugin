@@ -6,8 +6,11 @@ protect that investment -- a format that renders nicely but cannot be read back 
 labelling effort into wasted work.
 """
 
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 _SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SERVER_DIR))
@@ -204,3 +207,83 @@ class TestReferenceExport:
         out = mfl.to_references(self._sheet("one\ttwo"))
         assert out.splitlines() == ["0018\tone two"]
         assert out.count("\t") == 1
+
+
+class TestCli:
+    """`main` is where an hour of hand labelling can be destroyed by one flag.
+
+    The original --references re-generated a fresh worksheet into --out and then derived the
+    references from it, so pointing --out at the labelled file overwrote the labelling, and
+    the references it produced were byte-identical to the decoder's own output -- a reference
+    file that scores the decoder against itself. Both are pinned closed here.
+    """
+
+    def _captures(self, tmp_path):
+        captures = tmp_path / "2026-09-10"
+        captures.mkdir()
+        (captures / "index.jsonl").write_text(json.dumps({
+            "index": 18, "timestamp": "2026-09-10T11:00:00+02:00", "channel": "121,205",
+            "durationSec": 2.5, "text": "machine text"}) + "\n", encoding="utf-8")
+        return captures
+
+    def _run(self, monkeypatch, *argv):
+        monkeypatch.setattr(sys, "argv", ["make_flight_labels.py", *argv])
+        mfl.main()
+
+    def test_from_worksheet_writes_references_and_generates_nothing(self, tmp_path, monkeypatch):
+        """The only correct way to get references: read the labelled worksheet as it stands."""
+        sheet = tmp_path / "labels.txt"
+        sheet.write_text(mfl.render_worksheet([_row(index=18)]).replace(
+            "heard    : Two thousand feet, ten nineteen, Delta one nine two.",
+            "heard    : Two thousand feet, one zero one nine, Delta one six two."),
+            encoding="utf-8")
+        before = sheet.read_text(encoding="utf-8")
+        refs = tmp_path / "refs.txt"
+        self._run(monkeypatch, "--from-worksheet", str(sheet), "--references", str(refs))
+        assert refs.read_text(encoding="utf-8").splitlines() == [
+            "0018\tTwo thousand feet, one zero one nine, Delta one six two."]
+        assert sheet.read_text(encoding="utf-8") == before
+
+    def test_from_worksheet_needs_no_captures_or_out(self, tmp_path, monkeypatch):
+        sheet = tmp_path / "labels.txt"
+        sheet.write_text(mfl.render_worksheet([_row(index=18)]), encoding="utf-8")
+        self._run(monkeypatch, "--from-worksheet", str(sheet),
+                  "--references", str(tmp_path / "refs.txt"))
+        assert not (tmp_path / "out.txt").exists()
+
+    def test_generating_over_an_existing_worksheet_is_refused(self, tmp_path, monkeypatch):
+        """The hand labelling is an hour of the operator's listening and is not in git."""
+        out = tmp_path / "labels.txt"
+        out.write_text("PRECIOUS HAND LABELLING", encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, "--captures", str(self._captures(tmp_path)), "--out", str(out))
+        assert str(out) in str(excinfo.value)
+        assert out.read_text(encoding="utf-8") == "PRECIOUS HAND LABELLING"
+
+    def test_generating_into_a_fresh_path_still_works(self, tmp_path, monkeypatch):
+        out = tmp_path / "new-labels.txt"
+        self._run(monkeypatch, "--captures", str(self._captures(tmp_path)), "--out", str(out))
+        assert mfl.parse_worksheet(out.read_text(encoding="utf-8"))[0]["index"] == 18
+
+    def test_references_cannot_be_combined_with_generation(self, tmp_path, monkeypatch):
+        """Generating and then exporting produces references identical to the machine text --
+        a WER of zero against the decoder's own output, for every arm."""
+        out = tmp_path / "new-labels.txt"
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, "--captures", str(self._captures(tmp_path)),
+                      "--out", str(out), "--references", str(tmp_path / "refs.txt"))
+        assert "--from-worksheet" in str(excinfo.value)
+        assert not out.exists()
+        assert not (tmp_path / "refs.txt").exists()
+
+    def test_from_worksheet_without_references_is_refused(self, tmp_path, monkeypatch):
+        sheet = tmp_path / "labels.txt"
+        sheet.write_text(mfl.render_worksheet([_row(index=18)]), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            self._run(monkeypatch, "--from-worksheet", str(sheet))
+
+    def test_generating_without_captures_or_out_is_refused(self, tmp_path, monkeypatch):
+        with pytest.raises(SystemExit):
+            self._run(monkeypatch, "--out", str(tmp_path / "x.txt"))
+        with pytest.raises(SystemExit):
+            self._run(monkeypatch, "--captures", str(self._captures(tmp_path)))
