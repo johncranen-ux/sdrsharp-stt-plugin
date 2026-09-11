@@ -427,3 +427,54 @@ class TestTailFirstArmInScoring:
                              arm=bench.TailFirst())
         assert result.counts[bench.WRONG_MATCH] == 1
         assert result.precision == pytest.approx(0.5)
+
+
+class TestScoringAnArmsTranscripts:
+    """An arm is scored by replacing the worksheet's machine text with that arm's own
+    transcription of the same clip, joined on clip id."""
+
+    def _results_file(self, tmp_path, rows, config="air_shipped"):
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({
+            "model_label": "groq-whisper-large-v3",
+            "results": {config: [{"clip_id": cid, "text": text, "reference": "", "wer": None}
+                                 for cid, text in rows]},
+        }), encoding="utf-8")
+        return path
+
+    def test_transcripts_load_keyed_by_clip_id(self, tmp_path):
+        path = self._results_file(tmp_path, [("0000", "hello"), ("0001", "world")])
+        assert bench.load_transcripts(path) == {"0000": "hello", "0001": "world"}
+
+    def test_a_results_file_with_several_configs_needs_the_config_named(self, tmp_path):
+        path = tmp_path / "two.json"
+        path.write_text(json.dumps({"model_label": None, "results": {
+            "air_shipped": [{"clip_id": "0000", "text": "shipped"}],
+            "air_both": [{"clip_id": "0000", "text": "both"}],
+        }}), encoding="utf-8")
+        assert bench.load_transcripts(path, config="air_both") == {"0000": "both"}
+
+    def test_the_arms_text_replaces_the_worksheet_text(self, corpus, tmp_path):
+        """Row 0002 is "Port Cremoros three six seven" in the worksheet and extracts nothing.
+        An arm that transcribed it as "Orange three six seven" must score as correct."""
+        labels, snaps = corpus
+        path = self._results_file(tmp_path, [
+            ("0002", "Orange three six seven heavy, passing two thousand six hundred.")])
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.rows[2].bucket == bench.CORRECT
+
+    def test_a_clip_missing_from_the_arm_is_excluded_and_named(self, corpus, tmp_path):
+        """A dropped clip (a 429, a failed request) must never be scored on stale worksheet
+        text -- that would credit one arm with another arm's transcription."""
+        labels, snaps = corpus
+        path = self._results_file(tmp_path, [("0000", "Delta seven three, New York.")])
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.missing_transcripts == [1, 2, 3, 4]
+        assert all(r.bucket == bench.EXCLUDED for r in result.rows[1:])
+
+    def test_transcripts_require_replay(self, corpus):
+        labels, snaps = corpus
+        with pytest.raises(ValueError):
+            bench.score(labels.read_text(encoding="utf-8"), snaps, transcripts={"0000": "x"})

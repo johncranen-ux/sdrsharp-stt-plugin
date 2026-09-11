@@ -39,6 +39,21 @@ def load_snapshots(path: Path) -> list[dict]:
     return sorted(rows, key=lambda r: r["t"])
 
 
+def load_transcripts(path: Path, config: str | None = None) -> dict[str, str]:
+    """One arm's transcriptions from a bench-results JSON, keyed by clip id.
+
+    `config` names which arm to read when a results file holds more than one; with a single
+    arm it can be omitted, which is the common case since each run writes its own file.
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    results = payload["results"]
+    if config is None:
+        if len(results) != 1:
+            raise SystemExit(f"{path} holds {sorted(results)} -- name one with --config")
+        config = next(iter(results))
+    return {row["clip_id"]: row.get("text") or "" for row in results[config]}
+
+
 def join_snapshot(snapshots: list[dict], timestamp: str,
                   window_sec: float = SNAPSHOT_WINDOW_SEC) -> dict | None:
     """The snapshot in force at `timestamp`, or None if the corpus cannot answer.
@@ -176,6 +191,7 @@ class Result:
     achievable: int
     ceiling_missed: int
     excluded: int
+    missing_transcripts: list[int]
 
 
 def _timestamp_of(time_line: str) -> str:
@@ -195,7 +211,8 @@ def _load_cache(snapshot: dict) -> None:
 
 def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
           replay: bool = False, text_source: str = "machine",
-          arm: "TailFirst | None" = None) -> Result:
+          arm: "TailFirst | None" = None,
+          transcripts: dict[str, str] | None = None) -> Result:
     """Every labelled transmission in a worksheet, bucketed.
 
     `replay` re-runs extraction and matching against the aircraft that were actually in range
@@ -204,10 +221,17 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
 
     `arm` adds the tail-first fallback on top of the real matcher, which is why it requires
     replay: it is a counterfactual about code that does not exist, not a reading of history.
+
+    `transcripts` scores a different transcription setting's own output for each clip, joined
+    by clip id, instead of the worksheet's own `machine`/`heard` text -- also a counterfactual,
+    and also requiring replay.
     """
     if arm is not None and not replay:
         raise ValueError("an arm is a counterfactual and needs --replay")
+    if transcripts is not None and not replay:
+        raise ValueError("scoring an arm's transcripts is a counterfactual and needs --replay")
     rows: list[Scored] = []
+    missing: list[int] = []
     for record in make_flight_labels.parse_worksheet(worksheet):
         timestamp = _timestamp_of(record.get("time", ""))
         snapshot = join_snapshot(snapshots, timestamp) if timestamp else None
@@ -219,7 +243,18 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
                 tagged = candidate = None
             else:
                 _load_cache(snapshot)
-                text = record.get(text_source, "")
+                if transcripts is None:
+                    text = record.get(text_source, "")
+                else:
+                    text = transcripts.get(f"{record['index']:04d}")
+                if text is None:
+                    missing.append(record["index"])
+                    text, candidate, tagged = "", None, None
+                    rows.append(Scored(
+                        index=record["index"], timestamp=timestamp, label=LABEL_UNSURE,
+                        tagged=None, candidate=None, bucket=EXCLUDED, text="",
+                        in_range=False))
+                    continue
                 candidate = flight_identify.extract_callsign_candidate(text)
                 matched = flight_identify.match_flight(candidate)
                 if matched is None and arm is not None and (
@@ -248,6 +283,7 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
         achievable=achievable,
         ceiling_missed=counts[RETRIEVAL_MISS],
         excluded=sum(1 for r in rows if r.bucket == EXCLUDED),
+        missing_transcripts=missing,
     )
 
 
@@ -415,6 +451,9 @@ def main() -> None:
     ap.add_argument("--rows", action="store_true", help="list every miss, row by row")
     ap.add_argument("--sweep", action="store_true",
                     help="score the tail-first arm over its whole parameter grid and stop")
+    ap.add_argument("--transcripts", help="a bench-results JSON to score instead of the "
+                                          "worksheet's own machine text (implies --replay)")
+    ap.add_argument("--config", help="which arm inside --transcripts to read")
     args = ap.parse_args()
 
     worksheet = Path(args.labels).read_text(encoding="utf-8")
@@ -438,8 +477,12 @@ def main() -> None:
         _sweep(worksheet, snapshots, blank_means, args.text)
         return
 
+    transcripts = (load_transcripts(Path(args.transcripts), args.config)
+                   if args.transcripts else None)
+
     result = score(worksheet, snapshots, blank_means=blank_means,
-                   replay=args.replay, text_source=args.text)
+                   replay=args.replay or transcripts is not None, text_source=args.text,
+                   transcripts=transcripts)
 
     mode = f"replay over the {args.text} text" if args.replay else "live record"
     print(f"{len(result.rows)} transmissions   {mode}   snapshots: {snap_path.name}")
@@ -455,6 +498,10 @@ def main() -> None:
     print(f"recall    {_pct(result.recall)}   "
           f"(correct / {result.achievable} rows naming an aircraft that was in range)")
     print(f"ceiling   {result.ceiling_missed} rows named an aircraft that was never in range")
+
+    if result.missing_transcripts:
+        print(f"\n{len(result.missing_transcripts)} clips missing from the arm and excluded: "
+              f"{result.missing_transcripts}")
 
     if args.rows:
         print()
