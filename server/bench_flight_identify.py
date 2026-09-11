@@ -241,6 +241,7 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
         if replay:
             if snapshot is None:
                 tagged = candidate = None
+                text = record.get(text_source, "")
             else:
                 _load_cache(snapshot)
                 if transcripts is None:
@@ -263,12 +264,13 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
                 tagged = matched["flight"] if matched else None
         else:
             tagged, candidate = parse_system(record.get("system", ""))
+            text = record.get("machine", "")
 
         label = read_label(record.get("aircraft", ""), blank_means)
         rows.append(Scored(
             index=record["index"], timestamp=timestamp, label=label, tagged=tagged,
             candidate=candidate, bucket=classify(label, tagged, candidate, in_range),
-            text=record.get(text_source if replay else "machine", ""),
+            text=text,
             in_range=bool(in_range and label in in_range)))
 
     counts = collections.Counter(r.bucket for r in rows if r.bucket != EXCLUDED)

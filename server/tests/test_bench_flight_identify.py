@@ -313,6 +313,16 @@ class TestRowsReportTheTextTheyWereScoredOn:
                           replay=True, text_source="heard").rows[2]
         assert row.text.startswith("Orange")
 
+    def test_a_transcripts_replay_reports_the_arms_text(self, corpus):
+        """`transcripts` scores an arm's own transcription, not either worksheet column --
+        Scored.text must record that text, not the worksheet's `machine` line beside it. This
+        is the JetBlue/QNH case: a row scored on "Level five, JetBlue three two." must not be
+        displayed next to "Level five, QNH, clear for takeoff." from the worksheet."""
+        labels, snaps = corpus
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0002": "Level five, JetBlue three two."}).rows[2]
+        assert row.text == "Level five, JetBlue three two."
+
 
 class TestDigitRuns:
     """Tail-first matching arm. The airline word is what ASR destroys; the digits usually
