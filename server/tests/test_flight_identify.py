@@ -331,3 +331,56 @@ def test_identify_flight_does_not_log_when_no_candidate_extracted(capsys):
     flight_identify.identify_flight("One eight zero, over.")
     out = capsys.readouterr().out
     assert out == ""
+
+
+class TestTelephonyGapsFoundByTheBaseline:
+    """The four extraction misses that survived perfect transcription on the 2026-09-10 corpus
+    (see the RESULT section of the measurement-arm spec). Every string here is a real
+    transmission from that corpus, quoted from the labelling worksheet."""
+
+    def test_jetblue_as_one_word(self):
+        assert flight_identify.extract_callsign_candidate(
+            "Flight level one three zero, JetBlue three two.") == "JBU32"
+
+    def test_jet_blue_as_two_words_anchors_on_the_second(self):
+        """Same shape as "Air Canada" -> "canada": the tokenizer is single-word and "jet" is
+        far too common to anchor on safely."""
+        assert flight_identify.extract_callsign_candidate(
+            "Right turn three six zero, jet blue three two.") == "JBU32"
+
+    def test_jet_blue_stops_at_an_altitude_reading(self):
+        assert flight_identify.extract_callsign_candidate(
+            "Ship hold, jet blue three two two thousand, flight level zero.") == "JBU32"
+
+    def test_orange_is_tui_fly_netherlands(self):
+        """ORANGE is TFL's telephony designator. Held back deliberately until the baseline was
+        taken so it would register as a real miss -- it did, twice."""
+        assert flight_identify.extract_callsign_candidate(
+            "Orange three six seven heavy, passing two thousand six hundred.") == "TFL367"
+
+    def test_kl_abbreviated_to_two_letters(self):
+        assert flight_identify.extract_callsign_candidate(
+            "One eight center with Foxtrot, KL one two bravo.") == "KLM12B"
+
+
+class TestTheseAnchorsDoNotFireOnOrdinaryTraffic:
+    """Each new anchor is a chance to fabricate a callsign where none was spoken. "blue" and
+    "kl" are the short ones and carry the real risk."""
+
+    def test_a_bare_colour_with_no_digits_is_not_a_callsign(self):
+        assert flight_identify.extract_callsign_candidate("Report when you have the blue one in sight.") is None
+
+    def test_blue_does_not_fuzzy_match_other_short_words(self):
+        """Under _FUZZY_MIN_WORD_LEN, so "blue" must match exactly or not at all -- the
+        speed/speedbird lesson."""
+        assert flight_identify.extract_callsign_candidate("Descend to four thousand, blew away") is None
+
+    def test_range_does_not_false_anchor_on_orange(self):
+        """fuzz.ratio("range", "orange") is 90.9, over the threshold -- the same shape as
+        speed/speedbird. It appears zero times in 238 real airband transmissions, but it is
+        an ordinary enough English word to pin rather than trust."""
+        assert flight_identify.extract_callsign_candidate(
+            "Radar contact, range one two zero miles.") is None
+
+    def test_orange_does_not_swallow_a_runway_or_level(self):
+        assert flight_identify.extract_callsign_candidate("Cleared to land, wind two seven zero.") is None

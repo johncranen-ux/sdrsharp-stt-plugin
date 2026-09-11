@@ -38,7 +38,34 @@ AIRLINE_TELEPHONY: dict[str, str] = {
     "easyjet": "EZY",
     "shamrock": "EIN", "shemarck": "EIN",
     "canada": "ACA",
+    # Both spellings were observed in the 2026-09-10 corpus; "jet blue" is joined into one
+    # token before tokenizing (see _TELEPHONY_PHRASES) rather than anchoring on "blue", which
+    # would fabricate JBU1 out of "the blue one in sight".
+    "jetblue": "JBU",
+    # ORANGE is TUI fly Netherlands' telephony designator. Held back deliberately until the
+    # identification baseline had been taken, so it would register as a real extraction miss
+    # rather than being quietly fixed before the number was published -- it did, twice.
+    "orange": "TFL",
+    # "KL one two bravo" for KLM12B. Two letters, so it never reaches the fuzzy path below and
+    # must match exactly, which is what makes an anchor this short safe.
+    "kl": "KLM",
 }
+
+# Telephony designators that are two spoken words. The tokenizer is single-word, and the
+# second word on its own is not safe to anchor on -- "blue" alone turns "the blue one in
+# sight" into JBU1 -- so the pair is joined into the single token the table already knows.
+# This is the general form of the workaround "canada" uses for Air Canada.
+_TELEPHONY_PHRASES: dict[str, str] = {
+    "jet blue": "jetblue",
+}
+
+# Spoken forms close enough to an ordinary word that fuzzy anchoring on them does more harm
+# than good, so they must match exactly. fuzz.ratio("range", "orange") is 90.9, over the
+# threshold, and "radar contact, range one two zero miles" would otherwise extract TFL120 --
+# the same failure the speed/speedbird case produced (whole-branch review, finding 3). "range"
+# appears zero times in the 238 real airband transmissions captured so far, which is why the
+# entry is still worth having; it is an ordinary enough word not to gamble on.
+_NEVER_FUZZY = frozenset({"orange"})
 
 # Extra digit words _decode_spoken_word (corrections.py) doesn't cover, scoped locally rather
 # than added to that shared table since they're specific to how flight numbers get read aloud
@@ -104,7 +131,7 @@ def _find_airline_anchor(word: str) -> str | None:
         return None
     best_code, best_score = None, 0
     for spoken, code in AIRLINE_TELEPHONY.items():
-        if len(spoken) < _FUZZY_MIN_WORD_LEN:
+        if len(spoken) < _FUZZY_MIN_WORD_LEN or spoken in _NEVER_FUZZY:
             continue
         score = rf_fuzz.ratio(word, spoken)
         if score > best_score:
@@ -124,7 +151,10 @@ def extract_callsign_candidate(text: str) -> str | None:
     # literal digits ("KLM 281") rather than spelling it out ("KLM two eight one"). A
     # letters-only tokenizer silently dropped those digit tokens entirely, which then fed the
     # bare-code fabrication problem this whole function exists to avoid (review finding 4).
-    words = re.findall(r"[A-Za-z0-9]+", (text or "").lower())
+    lowered = (text or "").lower()
+    for phrase, joined in _TELEPHONY_PHRASES.items():
+        lowered = lowered.replace(phrase, joined)
+    words = re.findall(r"[A-Za-z0-9]+", lowered)
     for i, word in enumerate(words):
         code = _find_airline_anchor(word)
         if code is None:
