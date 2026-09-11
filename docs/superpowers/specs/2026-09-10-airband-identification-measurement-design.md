@@ -272,9 +272,19 @@ missing telephony-table entries rather than anything needing a new mechanism:
 
 ### Two prior worries retired by the numbers
 
-- **Poll geometry is not the constraint on this corpus.** Zero retrieval misses: every one of
-  the 32 aircraft the operator named was in the snapshot. The deferred wide-circle measurement
-  is still worth running on a different session, but nothing here is blocked on it.
+- **Poll geometry is not the constraint on this corpus** — with a caveat added 2026-09-11 that
+  weakens it. Zero retrieval misses: every one of the 32 aircraft the operator named was in the
+  snapshot. But **the label set is biased toward aircraft ADS-B carries**, because a callsign
+  heard on the radio can usually only be *confirmed* by looking it up in the snapshot. An
+  aircraft absent from the feed cannot be named, so it is left blank and scored as a correct
+  rejection — never as a retrieval miss. The count is therefore structurally under-stated and
+  "zero" is partly circular.
+
+  The concrete case: a station reading back as *"two four three zero, alfa"* appears in four
+  transmissions (0039, 0041, 0042, 0049) and **has no ADS-B presence in the entire hour** — no
+  tail `2430`, `2430A` or `32430`, and nothing squawking 2430. It is a real aircraft on
+  frequency that the feed never carried, and it is invisible to this metric. Treat "0 retrieval
+  misses" as "0 among rows that could be named", not as evidence of complete coverage.
 - **Precision is not under threat.** Arm C was specified to veto implausible matches; on 136
   real transmissions there was nothing to veto.
 
