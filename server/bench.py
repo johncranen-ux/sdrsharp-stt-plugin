@@ -143,6 +143,35 @@ V3_PHRASES_PROMPT = (
     "Maas Aanloop, understood, shall we change to channel seven seven, over."
 )
 
+# -- airband arms for the 2026-09-11 prompt-biasing measurement -------------------------
+#
+# The shipped airband prompt over-produces its own vocabulary and contains no airline name at
+# all: measured over the 2026-09-10 labelled corpus the decoder wrote QNH 27 times against the
+# operator's 12, and KLM 5 times against 15, writing QNH in the exact slot where KLM was spoken
+# in four transmissions. These arms separate "QNH is over-primed" from "KLM is absent".
+
+AIR_SHIPPED_PROMPT = backends.DEFAULT_AVIATION_PROMPT
+
+# Only the initialism is removed; the pressure reading stays, so exactly one thing changes.
+AIR_NO_QNH_PROMPT = AIR_SHIPPED_PROMPT.replace(
+    "QNH one zero one three", "one zero one three")
+
+# Operators actually observed on 121.205, in phraseology rather than as a word list -- the
+# prompt is read as prior speech, so a bare list of names is not the thing being tested.
+# 41 words, which is what fits: the shipped prompt is 92 and the Groq cap is 140. Shamrock
+# (Aer Lingus) was cut for the budget; swap it in for a rarer operator if a later corpus
+# says it matters more than one of these.
+_AIRLINE_PHRASES = (
+    " KLM one two three four, descend flight level seven zero. "
+    "Transavia six seven eight nine, roger. "
+    "Delta seven three, American two zero three, United nine four seven, "
+    "JetBlue three two, Orange three six seven, Speedbird four three zero, contact Tower."
+)
+
+AIR_AIRLINES_PROMPT = AIR_SHIPPED_PROMPT + _AIRLINE_PHRASES
+AIR_BOTH_PROMPT = AIR_NO_QNH_PROMPT + _AIRLINE_PHRASES
+AIR_EMPTY_PROMPT = ""
+
 # Selectable by name from the command line (bench.py --prompt, bench_stt.py --prompt).
 PROMPTS: dict[str, str] = {
     "shipped": MARITIME_PROMPT,      # what the proxy sends today
@@ -150,6 +179,11 @@ PROMPTS: dict[str, str] = {
     "legacy": LEGACY_BENCH_PROMPT,   # bench.py's drifted copy, older still
     "no_names": NO_NAMES_PROMPT,     # v1 minus the invented name; measured as a wash
     "v3_phrases": V3_PHRASES_PROMPT, # standard phraseology filled in; MEASURED WORSE, rejected
+    "air_shipped": AIR_SHIPPED_PROMPT,    # today's airband prompt; the control
+    "air_no_qnh": AIR_NO_QNH_PROMPT,      # is QNH over-primed?
+    "air_airlines": AIR_AIRLINES_PROMPT,  # is KLM's absence the problem?
+    "air_both": AIR_BOTH_PROMPT,          # do the two edits compose?
+    "air_empty": AIR_EMPTY_PROMPT,        # does the prompt help at all?
 }
 
 CONFIGS: dict[str, dict[str, Any]] = {
