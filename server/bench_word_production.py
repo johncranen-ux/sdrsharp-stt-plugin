@@ -21,7 +21,14 @@ sys.path.insert(0, str(_SERVER_DIR))
 
 from bench_flight_identify import load_transcripts  # noqa: E402
 
-# What the operator actually heard across the 136-transmission corpus, for comparison.
+# What the operator actually heard, counted by hand over ONE corpus: the 136 airband
+# transmissions of 2026-09-10. These are frozen figures for that hour, NOT a standing baseline
+# -- run this tool over a later corpus and these same numbers still print, against a different
+# and differently sized set of clips. That is why the row names its corpus in the output
+# rather than reading "(operator heard)". A new corpus needs its own hand count and its own
+# three constants here; comparing arms across corpora is not what this row is for.
+EAR_CORPUS = "2026-09-10"
+EAR_CLIPS = 136
 EAR_COUNTS = {"QNH": 12, "KLM": 15, "ILS": 8}
 DEFAULT_WORDS = ("QNH", "KLM", "ILS")
 
@@ -44,13 +51,14 @@ def main() -> None:
     args = ap.parse_args()
 
     words = tuple(args.words)
-    print(f"{'arm':28} {'clips':>6} " + " ".join(f"{w:>6}" for w in words))
+    print(f"{'arm':30} {'clips':>6} " + " ".join(f"{w:>6}" for w in words))
     for path in args.results:
         texts = list(load_transcripts(Path(path), args.config).values())
         counts = count_words(texts, words)
-        print(f"  {Path(path).stem:26} {len(texts):>6} "
+        print(f"  {Path(path).stem:28} {len(texts):>6} "
               + " ".join(f"{counts[w]:>6}" for w in words))
-    print(f"  {'(operator heard)':26} {136:>6} "
+    # Dated on the line: the arms above may be any corpus, this row is only ever that one.
+    print(f"  {f'(operator heard {EAR_CORPUS})':28} {EAR_CLIPS:>6} "
           + " ".join(f"{EAR_COUNTS.get(w, '?'):>6}" for w in words))
 
 
