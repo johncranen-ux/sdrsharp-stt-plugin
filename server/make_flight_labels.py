@@ -9,8 +9,13 @@ actually said rather than against what the decoder claimed.
 See docs/superpowers/specs/2026-09-10-airband-identification-measurement-design.md.
 
 Usage:
+    # generate a blank worksheet (refuses to write over an existing file)
     py make_flight_labels.py --captures "D:\\SDR\\...\\captures\\2026-09-10" \\
                              --out flight-labels-2026-09-10.txt
+
+    # AFTER labelling it by hand: export the `heard` lines as a WER reference file
+    py make_flight_labels.py --from-worksheet flight-labels-2026-09-10.txt \\
+                             --references references-airband-2026-09-10.txt
 """
 
 import argparse
@@ -135,11 +140,78 @@ def parse_worksheet(text: str) -> list[dict]:
     return records
 
 
+def to_references(worksheet: str) -> str:
+    """The worksheet's corrected `heard` lines as a bench.load_references file.
+
+    A `?` the labeller wrote is an unintelligible word, not a word they transcribed as "?".
+    It is emitted as `[inaudible]`, which bench._normalize already strips, so it costs no WER
+    against any arm rather than counting as one wrong word against all of them.
+
+    A row with an empty `heard` line emits nothing: bench treats a missing reference as
+    "excluded from aggregates", which is what an unlabelled clip deserves.
+
+    CAVEAT -- THE OUTPUT IS NOT AN INDEPENDENT REFERENCE SET. The `heard` lines are exported
+    to the worksheet PRE-FILLED with the machine transcription and the operator corrects only
+    what they hear differently: on the 2026-09-10 corpus 51 of the 126 exported references are
+    byte-identical to the decoder's own output. A WER computed against this file therefore
+    partly scores the decoder against itself, and it flatters whichever arm produced the
+    pre-fill above all others. This is exactly why bench_word_production.py exists and is the
+    prompt measurement's primary metric: counting word production needs no reference at all.
+    Use these references for eyeballing individual rows, not for a headline WER.
+    """
+    lines = []
+    for record in parse_worksheet(worksheet):
+        heard = (record.get("heard") or "").strip()
+        if not heard:
+            continue
+        text = heard.replace("?", "[inaudible]").replace("\t", " ")
+        lines.append(f"{record['index']:04d}\t{text}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--captures", required=True, help="a dated capture directory")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--captures", help="a dated capture directory (generate mode)")
+    ap.add_argument("--out", help="where to write the new worksheet (generate mode)")
+    ap.add_argument("--from-worksheet", dest="from_worksheet",
+                    help="an EXISTING labelled worksheet to export references from; "
+                         "generates nothing and writes nothing but --references")
+    ap.add_argument("--references", help="with --from-worksheet, where to write the WER "
+                                         "reference file built from its `heard` lines")
     args = ap.parse_args()
+
+    # Export mode. Separated from generation because combining them is what produced
+    # self-referential references: the old --references regenerated the worksheet first, so
+    # every exported `heard` line was the decoder's own output scored against itself.
+    if args.from_worksheet:
+        if not args.references:
+            raise SystemExit("--from-worksheet needs --references <path> to write to")
+        if args.captures or args.out:
+            raise SystemExit(
+                "--from-worksheet only reads an existing worksheet; drop --captures/--out "
+                "(nothing is generated in this mode)")
+        text = to_references(Path(args.from_worksheet).read_text(encoding="utf-8"))
+        Path(args.references).write_text(text + "\n", encoding="utf-8")
+        print(f"-> {args.references} ({len(text.splitlines())} references "
+              f"from {args.from_worksheet})")
+        return
+
+    if not args.captures or not args.out:
+        raise SystemExit(
+            "generating a worksheet needs both --captures and --out (to export references "
+            "from a worksheet you already have, use --from-worksheet <path> --references "
+            "<path>)")
+    if args.references:
+        raise SystemExit(
+            "--references cannot be combined with generation: the worksheet it would export "
+            "from is the one just generated, so every reference would be the decoder's own "
+            "output scored against itself. Generate first, label by hand, then run "
+            "--from-worksheet <the labelled file> --references <path>")
+    if Path(args.out).exists():
+        raise SystemExit(
+            f"refusing to overwrite {args.out}: it already exists, and if it is a labelled "
+            f"worksheet this would destroy the hand labelling. Write to a new path, or "
+            f"delete that file yourself if you are certain it holds nothing.")
 
     index_path = Path(args.captures) / "index.jsonl"
     # utf-8-sig: the plugin writes a BOM, which json.loads will not accept on the first line.

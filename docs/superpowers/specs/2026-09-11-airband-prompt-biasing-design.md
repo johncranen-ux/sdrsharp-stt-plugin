@@ -1,7 +1,7 @@
 # Airband prompt biasing — design
 
 **Date:** 2026-09-11
-**Status:** design agreed, not implemented
+**Status:** MEASURED 2026-09-11 -- see RESULT. Both airline arms DISQUALIFIED (they fabricate callsigns); the QNH arm is a null. Nothing shipped.
 **Related:** this is arm A from
 `2026-09-10-airband-identification-measurement-design.md`, narrowed to its static form after
 that arm's baseline named it as the binding constraint. Scored with the harness that spec
@@ -157,14 +157,112 @@ Ordinary modules under `server/tests/`, TDD as usual:
 
 ## Success criteria
 
-- [ ] QNH over-production falls and KLM under-production closes, both beyond the repeat arm's
-      spread.
-- [ ] The identification four-way split is reported per arm against the published baseline.
-- [ ] No arm is adopted that adds a wrong match — precision is currently 100% and prompting the
-      decoder with airline names is exactly the change that could invent one.
-- [ ] WER over the edited rows does not regress beyond the repeat arm's spread.
-- [ ] The tail-first arm is re-measured on the winning arm's transcripts, and its verdict is
-      restated with the overlap removed.
+- [x] QNH over-production falls and KLM under-production closes, both beyond the repeat arm's
+      spread. **Both achieved, and both overshoot.**
+- [x] The identification four-way split is reported per arm against the published baseline.
+- [x] No arm is adopted that adds a wrong match. **This is what disqualified the two arms that
+      improved recall.**
+- [x] WER over the edited rows does not regress beyond the repeat arm's spread. **Failed by
+      every arm:** the noise floor is 0.0 points and every edit cost 6-12.
+- [ ] The tail-first arm is re-measured on the winning arm's transcripts. **Not applicable --
+      there is no winning arm.** Re-measure it on the control instead when that work resumes.
+
+## RESULT — 2026-09-11
+
+Seven arms, 136 clips each, 952 transcriptions, zero dropped clips. Groq `whisper-large-v3`.
+
+| arm | prompt actually sent | QNH | KLM | ILS | recall | wrong | WER |
+|---|---|---|---|---|---|---|---|
+| `air_shipped` | aviation (control) | 29 | 5 | 23 | 43.8% | 7 | 27.2% |
+| `air_shipped` repeat | identical | 28 | 5 | 23 | 43.8% | 7 | 27.2% |
+| `air_no_qnh` | control minus "QNH" | **1** | 5 | 26 | 43.8% | 6 | 33.2% |
+| `air_airlines` | control plus operators | 11 | **27** | 16 | 68.8% | 9 | 38.7% |
+| `air_both` | both edits | **0** | **31** | 15 | **71.9%** | 10 | 39.3% |
+| `air_empty` **INVALID** | the MARITIME prompt | 0 | 6 | 4 | 40.6% | 6 | 52.9% |
+| `air_noprompt` | genuinely nothing | 0 | 3 | 6 | 37.5% | 3 | **90.4%** |
+| *(operator heard)* | | *12* | *15* | *8* | | | |
+
+**The noise floor is zero.** The repeat arm matched the control on recall, every bucket, and
+pooled WER to the decimal. Every delta above is real.
+
+### 1. The prompt is load-bearing, far more than anyone had measured
+
+With no prompt at all the decoder collapses to **90.4% WER** — clip 0000 transcribes as `...`
+and nothing else. The shipped prompt is worth ~63 WER points. Nothing in this project had
+established that before; the question had never been asked.
+
+### 2. The mechanism is confirmed, causally
+
+Removing one token takes QNH production from 29 to 1. Adding airline phraseology takes KLM
+from 5 to 31. The prompt decides what the decoder writes, exactly as the operator suspected
+from reading transcripts.
+
+### 3. But removing QNH buys nothing
+
+`air_no_qnh` cuts QNH production by 97% and leaves identification **completely unchanged** —
+43.8% recall, 15 extraction misses, the same three selection misses. The decoder does not start
+writing KLM in the freed slot; it writes some other garble. **Over-priming was not the problem.
+Absence was.** This retires the most intuitive reading of the original evidence.
+
+### 4. The airline arms buy recall by hallucinating, and are disqualified
+
+`air_both` is the largest recall movement this project has produced: 43.8% -> 71.9%, extraction
+misses 15 -> 3. It is also unshippable. KLM production overshoots to 31 against the operator's
+15, and three of the new identifications are fabricated outright — confirmed against the
+operator's own ear transcriptions, not inferred:
+
+| row | operator heard | `air_both` wrote | tagged |
+|---|---|---|---|
+| 0027 | `??` (unintelligible) | "...JetBlue three two." | JBU32 |
+| 0108 | "Level five, ?" | "Level five, JetBlue three two." | JBU32 |
+| 0035 | "Continue pressed heading, **kilo hotel bravo**" | "...**KLM one two bravo**" | KLM12B |
+
+Row 0035 is the one to remember: the decoder turned phonetic letters — plausibly a runway or
+taxi instruction — into a callsign, and the matcher then attached a real in-range aircraft to
+it with full confidence. That is the BERGE TOWNSEND failure class, manufactured by the prompt.
+The prompt-echo filter cannot catch any of these, for the reason given earlier in this spec:
+they are single substituted words inside otherwise-real speech.
+
+WER confirms it independently: +11.5 and +12.1 points against a 0.0 noise floor.
+
+### 5. A measurement defect, found and corrected mid-run
+
+The `air_empty` arm **did not test what it claimed**. `bench_stt.py` calls
+`backends.transcribe(...)` without a `mode`, so mode defaults to `"maritime"`, and
+`_effective_prompt` returns `client_prompt or <default>` — an empty string is falsy, so the arm
+silently sent the **maritime** prompt ("Maas Approach, Maas Aanloop, this is the inbound
+motortanker...") to airband audio. It was caught because its errors were full of "Rotterdam",
+"Maas Center buoy" and "over". Re-run as `air_noprompt` with `WHISPER_PROMPT=""` exported, which
+`os.environ.get` returns verbatim. The original row is kept above, marked INVALID, rather than
+deleted: 52.9% is a real and interesting number — the *wrong* prompt still beats no prompt by 37
+points — it just is not the number the arm was designed to produce.
+
+## Conclusion
+
+**Nothing ships.** The static prompt edit fails as specified: the one arm that is safe
+(`air_no_qnh`) is a null, and the two arms that work are disqualified for fabricating
+identifications.
+
+What the arm did establish, none of it previously known:
+
+- the prompt carries ~63 WER points, so it must not be removed or weakened casually
+- prompt content causally determines callsign transcription, confirming the operator's read
+- the failure is absence of airline vocabulary, not over-priming of QNH
+- naive injection of that vocabulary overshoots into hallucination at the exact point where the
+  audio is unintelligible — which is precisely where a fabricated callsign is most dangerous
+
+### Where this leaves arm A
+
+The dynamic per-transmission version now looks **worse**, not better, than when it was deferred.
+It injects a much larger and more specific vocabulary than these eight operators, and rows
+0027/0035/0108 show what the decoder does with unintelligible audio when a callsign is available
+in the prompt: it uses it. Any future attempt must be scored on this corpus against those three
+rows as standing negative cases, and must carry a defence the echo filter does not have — one
+that works on a single substituted word inside real speech.
+
+A calibrated middle remains untested: these arms crammed eight operators into one dense
+sentence, which is maximally priming and unlike real speech. A gentler variant might buy part of
+the recall without the fabrication. That is a hypothesis, not a result, and it needs its own arm.
 
 ## Deferred
 

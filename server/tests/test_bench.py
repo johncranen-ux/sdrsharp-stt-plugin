@@ -132,8 +132,8 @@ def test_legacy_prompt_is_kept_distinct_and_selectable():
 
 
 def test_every_prompt_fits_groqs_length_cap():
-    # Over-length is a hard 400 from Groq, which costs a real chunk of radio audio.
-    # _truncate_prompt would save the request but silently bench a different prompt.
+    # Over-length is not rejected: _truncate_prompt cuts the prompt to the cap and the
+    # request succeeds, so the arm runs to completion having benched a prompt nobody wrote.
     for name, text in bench.PROMPTS.items():
         assert len(text.split()) <= backends.GROQ_PROMPT_MAX_WORDS, name
 
@@ -219,3 +219,63 @@ def test_some_empty_clips_are_normal_and_not_flagged():
 def test_no_clips_at_all_is_fatal():
     fatal, message = bench.run_health([])
     assert fatal is True and "no clips" in message.lower()
+
+
+class TestAirbandPromptVariants:
+    """The airband arms for the prompt-biasing measurement. The word-cap assertion is not
+    ceremony: backends._truncate_prompt silently cuts an over-long prompt to the cap, so an
+    arm that overruns is not rejected -- it runs to completion having sent a prompt nobody
+    wrote, and its 136 transcriptions look like a clean result."""
+
+    AIR_ARMS = ("air_shipped", "air_no_qnh", "air_airlines", "air_both", "air_empty")
+
+    def test_every_airband_arm_is_registered(self):
+        for name in self.AIR_ARMS:
+            assert name in bench.PROMPTS, name
+
+    def test_every_airband_arm_fits_the_groq_word_cap(self):
+        from stt_proxy.backends import GROQ_PROMPT_MAX_WORDS
+        for name in self.AIR_ARMS:
+            words = len(bench.PROMPTS[name].split())
+            assert words <= GROQ_PROMPT_MAX_WORDS, f"{name} is {words} words"
+
+    def test_air_shipped_is_exactly_what_the_proxy_sends_today(self):
+        from stt_proxy.backends import DEFAULT_AVIATION_PROMPT
+        assert bench.PROMPTS["air_shipped"] == DEFAULT_AVIATION_PROMPT
+
+    def test_air_no_qnh_drops_the_token_and_keeps_the_reading(self):
+        """Isolate one variable: the pressure reading stays, only the initialism goes."""
+        prompt = bench.PROMPTS["air_no_qnh"]
+        assert "QNH" not in prompt
+        assert "one zero one three" in prompt
+
+    def test_air_airlines_keeps_the_shipped_text_and_adds_operators(self):
+        from stt_proxy.backends import DEFAULT_AVIATION_PROMPT
+        prompt = bench.PROMPTS["air_airlines"]
+        assert DEFAULT_AVIATION_PROMPT in prompt
+        for operator in ("KLM", "Transavia", "Delta", "American", "United",
+                         "JetBlue", "Orange", "Speedbird"):
+            assert operator in prompt, operator
+
+    def test_air_both_applies_both_edits(self):
+        prompt = bench.PROMPTS["air_both"]
+        assert "QNH" not in prompt
+        assert "KLM" in prompt
+
+    def test_air_empty_is_an_empty_string_that_does_NOT_disable_the_prompt(self, monkeypatch):
+        """The arm is misnamed and the registry says so. _effective_prompt is `client_prompt
+        or <default>`, so "" is falsy and the MARITIME default goes out instead of nothing --
+        measured, not theorised: this arm produced "Maas Approach" and "Rotterdam"
+        hallucinations on airband audio. Pinned here so nobody reads air_empty's numbers as a
+        no-prompt result."""
+        from stt_proxy import backends
+        monkeypatch.delenv("WHISPER_PROMPT", raising=False)
+        assert bench.PROMPTS["air_empty"] == ""
+        assert backends._effective_prompt(bench.PROMPTS["air_empty"]) ==             backends.DEFAULT_MARITIME_PROMPT
+
+    def test_the_env_override_is_the_way_to_really_send_no_prompt(self, monkeypatch):
+        """os.environ.get returns "" verbatim, so the override has no `or` to fall through:
+        exporting WHISPER_PROMPT="" is the workaround that actually works."""
+        from stt_proxy import backends
+        monkeypatch.setenv("WHISPER_PROMPT", "")
+        assert backends._effective_prompt("") == ""

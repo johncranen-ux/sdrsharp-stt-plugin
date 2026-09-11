@@ -313,6 +313,42 @@ class TestRowsReportTheTextTheyWereScoredOn:
                           replay=True, text_source="heard").rows[2]
         assert row.text.startswith("Orange")
 
+    def test_a_transcripts_replay_reports_the_arms_text(self, corpus):
+        """`transcripts` scores an arm's own transcription, not either worksheet column --
+        Scored.text must record that text, not the worksheet's `machine` line beside it. This
+        is the JetBlue/QNH case: a row scored on "Level five, JetBlue three two." must not be
+        displayed next to "Level five, QNH, clear for takeoff." from the worksheet."""
+        labels, snaps = corpus
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0002": "Level five, JetBlue three two."}).rows[2]
+        assert row.text == "Level five, JetBlue three two."
+
+
+    def test_a_row_with_no_snapshot_still_reports_the_arms_text(self, tmp_path):
+        """17 of the 136 corpus rows have no snapshot in window. That path scores nothing --
+        no extraction runs -- but it still has to record the text the run was reading, or
+        --rows displays the worksheet's machine line as though the arm had written it. --rows
+        is exactly how the fabricated-callsign rows in the published result were found."""
+        labels = tmp_path / "labels.txt"
+        labels.write_text(WORKSHEET, encoding="utf-8")
+        # Every snapshot is long before the transmissions, so join_snapshot returns None.
+        snaps = bench.load_snapshots(_write_snapshots(tmp_path / "s.jsonl", [
+            _snap("2026-09-10T10:00:00+02:00", "DAL73")]))
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0000": "Delta seven three, New York."}).rows[0]
+        assert row.text == "Delta seven three, New York."
+
+    def test_a_row_with_no_snapshot_and_no_arm_text_shows_nothing(self, tmp_path):
+        """A clip the arm never transcribed has no text to show; the worksheet's line is not
+        a stand-in for it."""
+        labels = tmp_path / "labels.txt"
+        labels.write_text(WORKSHEET, encoding="utf-8")
+        snaps = bench.load_snapshots(_write_snapshots(tmp_path / "s.jsonl", [
+            _snap("2026-09-10T10:00:00+02:00", "DAL73")]))
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                          transcripts={"0000": "Delta seven three, New York."}).rows[1]
+        assert row.text == ""
+
 
 class TestDigitRuns:
     """Tail-first matching arm. The airline word is what ASR destroys; the digits usually
@@ -427,3 +463,148 @@ class TestTailFirstArmInScoring:
                              arm=bench.TailFirst())
         assert result.counts[bench.WRONG_MATCH] == 1
         assert result.precision == pytest.approx(0.5)
+
+
+class TestScoringAnArmsTranscripts:
+    """An arm is scored by replacing the worksheet's machine text with that arm's own
+    transcription of the same clip, joined on clip id."""
+
+    def _results_file(self, tmp_path, rows, config="air_shipped"):
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({
+            "model_label": "groq-whisper-large-v3",
+            "results": {config: [{"clip_id": cid, "text": text, "reference": "", "wer": None}
+                                 for cid, text in rows]},
+        }), encoding="utf-8")
+        return path
+
+    def test_transcripts_load_keyed_by_clip_id(self, tmp_path):
+        path = self._results_file(tmp_path, [("0000", "hello"), ("0001", "world")])
+        assert bench.load_transcripts(path) == {"0000": "hello", "0001": "world"}
+
+    def test_a_results_file_with_several_configs_needs_the_config_named(self, tmp_path):
+        path = tmp_path / "two.json"
+        path.write_text(json.dumps({"model_label": None, "results": {
+            "air_shipped": [{"clip_id": "0000", "text": "shipped"}],
+            "air_both": [{"clip_id": "0000", "text": "both"}],
+        }}), encoding="utf-8")
+        assert bench.load_transcripts(path, config="air_both") == {"0000": "both"}
+
+    def test_an_ambiguous_results_file_with_no_config_named_refuses_to_guess(self, tmp_path):
+        """A silent next(iter(results)) here would attribute one arm's transcriptions to
+        another arm -- exactly the cross-contamination this design exists to prevent."""
+        path = tmp_path / "two.json"
+        path.write_text(json.dumps({"model_label": None, "results": {
+            "air_shipped": [{"clip_id": "0000", "text": "shipped"}],
+            "air_both": [{"clip_id": "0000", "text": "both"}],
+        }}), encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            bench.load_transcripts(path)
+        assert "air_shipped" in str(excinfo.value)
+        assert "air_both" in str(excinfo.value)
+
+    def test_the_arms_text_replaces_the_worksheet_text(self, corpus, tmp_path):
+        """Row 0002 is "Port Cremoros three six seven" in the worksheet and extracts nothing.
+        An arm that transcribed it as "Orange three six seven" must score as correct."""
+        labels, snaps = corpus
+        path = self._results_file(tmp_path, [
+            ("0002", "Orange three six seven heavy, passing two thousand six hundred.")])
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.rows[2].bucket == bench.CORRECT
+
+    def test_a_clip_missing_from_the_arm_is_excluded_and_named(self, corpus, tmp_path):
+        """A dropped clip (a 429, a failed request) must never be scored on stale worksheet
+        text -- that would credit one arm with another arm's transcription."""
+        labels, snaps = corpus
+        path = self._results_file(tmp_path, [("0000", "Delta seven three, New York.")])
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.missing_transcripts == [1, 2, 3, 4]
+        assert all(r.bucket == bench.EXCLUDED for r in result.rows[1:])
+
+    def test_a_failed_clip_is_missing_not_an_empty_transcription(self, corpus, tmp_path):
+        """bench_stt writes a row for EVERY clip: a 429, a timeout or a bad JSON body yields
+        text="" with `error` set, not an absent row. Reading that as an empty transcription
+        scores a rate-limited clip as a real extraction miss and as a row that wrote no QNH,
+        so an arm that lost ten clips prints several points worse than its control with no
+        drop reported anywhere. A row carrying an error is MISSING."""
+        labels, snaps = corpus
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_shipped": [
+            {"clip_id": "0000", "text": "Delta seven three, New York.", "error": None},
+            {"clip_id": "0001", "text": "", "error": "HTTP 429: rate limit"},
+            {"clip_id": "0002", "text": "", "error": "bad JSON: Expecting value"},
+        ]}}), encoding="utf-8")
+        assert bench.load_transcripts(path) == {"0000": "Delta seven three, New York."}
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.missing_transcripts == [1, 2, 3, 4]
+        assert result.rows[1].bucket == bench.EXCLUDED
+        assert result.rows[2].bucket == bench.EXCLUDED
+
+    def test_a_clip_that_really_transcribed_to_silence_is_still_scored(self, corpus, tmp_path):
+        """The counterpart: an empty text with NO error is a real result -- silence decodes to
+        nothing -- and must stay in the denominator rather than vanishing from the arm."""
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_shipped": [
+            {"clip_id": "0000", "text": "", "error": None},
+        ]}}), encoding="utf-8")
+        assert bench.load_transcripts(path) == {"0000": ""}
+
+    def test_transcripts_require_replay(self, corpus):
+        labels, snaps = corpus
+        with pytest.raises(ValueError):
+            bench.score(labels.read_text(encoding="utf-8"), snaps, transcripts={"0000": "x"})
+
+
+class TestRunHeader:
+    """The one line a console log is identified by later.
+
+    `mode` keyed off --replay alone, so a run over an arm's transcripts printed "live record"
+    and a saved log of an arm was indistinguishable from the baseline it is compared against.
+    --text was silently ignored beside --transcripts, so the header could also name a text
+    source the run never read.
+    """
+
+    def _run(self, monkeypatch, corpus, *argv):
+        labels, _ = corpus
+        monkeypatch.setattr("sys.argv", [
+            "bench_flight_identify.py", "--labels", str(labels),
+            "--snapshots", str(labels.parent / "s.jsonl"), *argv])
+        bench.main()
+
+    def _arm(self, tmp_path, rows):
+        path = tmp_path / "air_both.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_both": [
+            {"clip_id": cid, "text": text, "error": None} for cid, text in rows]}}),
+            encoding="utf-8")
+        return path
+
+    def test_the_live_record_says_so(self, corpus, monkeypatch, capsys):
+        self._run(monkeypatch, corpus)
+        assert "live record" in capsys.readouterr().out
+
+    def test_a_replay_names_the_text_column_it_ran_over(self, corpus, monkeypatch, capsys):
+        self._run(monkeypatch, corpus, "--replay", "--text", "heard")
+        assert "heard" in capsys.readouterr().out.splitlines()[0]
+
+    def test_a_transcripts_run_names_the_arm_file_and_claims_no_text_column(
+            self, corpus, monkeypatch, capsys, tmp_path):
+        labels, _ = corpus
+        path = self._arm(labels.parent, [("0000", "Delta seven three, New York.")])
+        self._run(monkeypatch, corpus, "--transcripts", str(path))
+        header = capsys.readouterr().out.splitlines()[0]
+        assert "air_both.json" in header
+        assert "live record" not in header
+        assert "machine" not in header
+
+    def test_naming_a_text_column_beside_transcripts_is_an_error(
+            self, corpus, monkeypatch, tmp_path):
+        """Silently ignoring --text is how a header comes to describe a run that never
+        happened; refusing is the only reading that cannot mislead."""
+        labels, _ = corpus
+        path = self._arm(labels.parent, [("0000", "Delta seven three, New York.")])
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, corpus, "--transcripts", str(path), "--text", "heard")
+        assert "--text" in str(excinfo.value) and "--transcripts" in str(excinfo.value)
