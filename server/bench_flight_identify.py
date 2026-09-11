@@ -1,0 +1,335 @@
+"""Score airband flight identification against a hand-labelled worksheet.
+
+The maritime side has nine bench_*.py scripts and flight identification shipped with none, so
+"what is our recall?" could only be answered by hand-diffing a plugin transcript against
+`grep flight-id` in the proxy log, and the three proposed improvements (decoder biasing,
+session identity register, physical corroboration) were all unfalsifiable. Building any of
+them blind is what the maritime record argues against: three matching-layer changes there
+measured as nulls, and a fourth was validated 8/8 on its sample and then fired zero times on
+real data.
+
+See docs/superpowers/specs/2026-09-10-airband-identification-measurement-design.md.
+
+Usage:
+    # score what happened live -- the historical record
+    py bench_flight_identify.py --labels flight-labels-2026-09-10.txt
+
+    # re-run extraction and matching over the aircraft that were actually in range
+    py bench_flight_identify.py --labels flight-labels-2026-09-10.txt --replay
+"""
+
+import argparse
+import datetime
+import json
+import sys
+from pathlib import Path
+
+_SERVER_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SERVER_DIR))
+
+# Polls are 15s apart, so 20s admits the snapshot before each transmission and nothing older.
+SNAPSHOT_WINDOW_SEC = 20.0
+
+
+def load_snapshots(path: Path) -> list[dict]:
+    """Every aircraft snapshot in a side-car file, oldest first."""
+    if not Path(path).exists():
+        return []
+    rows = [json.loads(line) for line in Path(path).open(encoding="utf-8") if line.strip()]
+    return sorted(rows, key=lambda r: r["t"])
+
+
+def join_snapshot(snapshots: list[dict], timestamp: str,
+                  window_sec: float = SNAPSHOT_WINDOW_SEC) -> dict | None:
+    """The snapshot in force at `timestamp`, or None if the corpus cannot answer.
+
+    Nearest at-or-before only. A later poll can hold aircraft that had not arrived yet, and
+    None must stay distinguishable from an empty snapshot: "we do not know what was in range"
+    and "nothing was in range" are different claims and the second one is a scored outcome.
+    """
+    when = datetime.datetime.fromisoformat(timestamp)
+    best = None
+    for row in snapshots:
+        taken = datetime.datetime.fromisoformat(row["t"])
+        if taken > when:
+            continue
+        if (when - taken).total_seconds() <= window_sec:
+            best = row
+    return best
+
+
+# -- the worksheet's two hand-written lines, as the scorer needs them -------------------
+
+LABEL_NONE = "NONE"      # no aircraft is named in this transmission -- ATC chatter, readbacks
+LABEL_UNSURE = "UNSURE"  # a callsign is spoken but the labeller could not commit; excluded
+
+_SYSTEM_TAG = "identified "
+_SYSTEM_EXTRACTED = "(extracted "
+
+
+def read_label(raw: str, blank_means: str = LABEL_NONE) -> str:
+    """One `aircraft :` line as a scorable verdict.
+
+    A trailing `?` is the labeller hedging (`YZR7939?`), which is UNSURE however confident the
+    stem looks -- scoring a hedge as a firm label would put an unearned row in the denominator.
+
+    `blank_means` is the operator's 2026-09-10 call that an empty line means NONE, kept as a
+    parameter rather than baked in because seven rows the system tagged were also left blank,
+    and that reading turns all seven into wrong matches.
+    """
+    value = (raw or "").strip().upper()
+    if not value:
+        return blank_means
+    if value.endswith("?"):
+        return LABEL_UNSURE
+    if value in (LABEL_NONE, LABEL_UNSURE):
+        return value
+    return value
+
+
+def parse_system(line: str) -> tuple[str | None, str | None]:
+    """(callsign tagged live, candidate extracted but unmatched) from a `system :` line.
+
+    Both are None for a transmission the extractor found no callsign in at all -- which is a
+    different miss from one where a candidate was produced and rejected, and the two are
+    fixed by different work.
+    """
+    text = (line or "").strip()
+    if text.startswith(_SYSTEM_TAG):
+        return text[len(_SYSTEM_TAG):].strip().split("/")[0], None
+    start = text.find(_SYSTEM_EXTRACTED)
+    if start == -1:
+        return None, None
+    return None, text[start + len(_SYSTEM_EXTRACTED):].split(",")[0].strip()
+
+
+# -- the outcome split ------------------------------------------------------------------
+#
+# Four causes, four different fixes, deliberately not blended into one recall number: a single
+# figure hides which of them is binding, which is the only question this arm exists to answer.
+
+CORRECT = "correct"                    # tagged, and it is the labelled aircraft
+WRONG_MATCH = "wrong-match"            # tagged, but not the labelled aircraft -- precision
+RETRIEVAL_MISS = "retrieval-miss"      # the aircraft was not in range; this is the ceiling
+EXTRACTION_MISS = "extraction-miss"    # in range, but no candidate was produced at all
+SELECTION_MISS = "selection-miss"      # a candidate was produced and matched nothing
+CORRECT_REJECTION = "correct-rejection"  # nothing was named and nothing was tagged
+EXCLUDED = "excluded"                  # UNSURE, or a miss the corpus cannot explain
+
+
+def classify(label: str, tagged: str | None, candidate: str | None,
+             in_range: set[str] | None) -> str:
+    """Which bucket one labelled transmission falls in.
+
+    `in_range` is None for "no snapshot covers this moment", which is not the same as an empty
+    set. It is consulted only where it changes the answer: a tag can be judged against the
+    label alone, so a correct identification is never thrown away for want of a snapshot.
+    """
+    if label == LABEL_UNSURE:
+        return EXCLUDED
+    if label == LABEL_NONE:
+        return WRONG_MATCH if tagged else CORRECT_REJECTION
+    if tagged:
+        return CORRECT if tagged == label else WRONG_MATCH
+    if in_range is None:
+        return EXCLUDED
+    if label not in in_range:
+        return RETRIEVAL_MISS
+    return EXTRACTION_MISS if candidate is None else SELECTION_MISS
+
+
+def candidate_for(text: str) -> str | None:
+    """What the live extractor makes of a transmission. Wraps the production function so the
+    corpus's standing negative cases (runway designators, ATC chatter) are pinned here."""
+    from stt_proxy import flight_identify
+    return flight_identify.extract_callsign_candidate(text)
+
+
+# -- scoring a whole worksheet ----------------------------------------------------------
+
+import collections
+import dataclasses
+
+import make_flight_labels
+from stt_proxy import adsb, flight_identify
+
+
+@dataclasses.dataclass
+class Scored:
+    index: int
+    timestamp: str
+    label: str
+    tagged: str | None
+    candidate: str | None
+    bucket: str
+    heard: str
+    in_range: bool
+
+
+@dataclasses.dataclass
+class Result:
+    rows: list[Scored]
+    counts: dict[str, int]
+    precision: float | None
+    recall: float | None
+    achievable: int
+    ceiling_missed: int
+    excluded: int
+
+
+def _timestamp_of(time_line: str) -> str:
+    return (time_line or "").split()[0]
+
+
+def _load_cache(snapshot: dict) -> None:
+    """Put a snapshot's aircraft into the live cache, through the real poll path.
+
+    Replay goes via adsb.poll_once with an injected fetch rather than writing the cache dict
+    directly, so it exercises the same validate-map-replace code the proxy runs. The snapshot
+    already holds mapped records and map_aircraft is idempotent over its own output.
+    """
+    payload = json.dumps({"aircraft": snapshot["aircraft"]}).encode("utf-8")
+    adsb.poll_once(0.0, 0.0, 0.0, fetch=lambda _url: payload)
+
+
+def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
+          replay: bool = False, text_source: str = "machine") -> Result:
+    """Every labelled transmission in a worksheet, bucketed.
+
+    `replay` re-runs extraction and matching against the aircraft that were actually in range
+    instead of reading what happened live; `text_source` picks which transcription it is run
+    over, so the gap between "machine" and "heard" sizes what better ASR alone could buy.
+    """
+    rows: list[Scored] = []
+    for record in make_flight_labels.parse_worksheet(worksheet):
+        timestamp = _timestamp_of(record.get("time", ""))
+        snapshot = join_snapshot(snapshots, timestamp) if timestamp else None
+        in_range = ({a["flight"] for a in snapshot["aircraft"]}
+                    if snapshot is not None else None)
+
+        if replay:
+            if snapshot is None:
+                tagged = candidate = None
+            else:
+                _load_cache(snapshot)
+                candidate = flight_identify.extract_callsign_candidate(
+                    record.get(text_source, ""))
+                matched = flight_identify.match_flight(candidate)
+                tagged = matched["flight"] if matched else None
+        else:
+            tagged, candidate = parse_system(record.get("system", ""))
+
+        label = read_label(record.get("aircraft", ""), blank_means)
+        rows.append(Scored(
+            index=record["index"], timestamp=timestamp, label=label, tagged=tagged,
+            candidate=candidate, bucket=classify(label, tagged, candidate, in_range),
+            heard=record.get("heard", ""),
+            in_range=bool(in_range and label in in_range)))
+
+    counts = collections.Counter(r.bucket for r in rows if r.bucket != EXCLUDED)
+    tags = sum(1 for r in rows if r.bucket in (CORRECT, WRONG_MATCH))
+    # Rows that named an aircraft which really was in range -- the only misses anyone can fix.
+    achievable = sum(1 for r in rows if r.in_range and r.bucket != EXCLUDED)
+    return Result(
+        rows=rows,
+        counts=dict(counts),
+        precision=counts[CORRECT] / tags if tags else None,
+        recall=counts[CORRECT] / achievable if achievable else None,
+        achievable=achievable,
+        ceiling_missed=counts[RETRIEVAL_MISS],
+        excluded=sum(1 for r in rows if r.bucket == EXCLUDED),
+    )
+
+
+def integrity_warnings(worksheet: str) -> list[str]:
+    """Rows whose `machine` line no longer produces the `system` line stored beside it.
+
+    The generator derived `system` from the capture text, so the pair is a checksum: if they
+    disagree, either the machine line was hand-edited (the labeller correcting the wrong line
+    -- it happened three times on the first corpus) or the extractor has changed since the
+    worksheet was made. Both make a replay-versus-live comparison meaningless, and both are
+    invisible without this check.
+
+    Rows the system tagged are skipped: `identified DAL73/A333` is the live record and cannot
+    be recomputed from text at all.
+    """
+    warnings = []
+    for record in make_flight_labels.parse_worksheet(worksheet):
+        stored = (record.get("system") or "").strip()
+        if not stored or stored.startswith(_SYSTEM_TAG):
+            continue
+        expected = make_flight_labels._system_line(record.get("machine", ""), None)
+        if expected != stored:
+            warnings.append(
+                f"{record['index']:04d}: machine line does not produce its system line"
+                f"  stored: {stored}  recomputed: {expected}")
+    return warnings
+
+
+# -- CLI --------------------------------------------------------------------------------
+
+_LOGS = _SERVER_DIR / "logs"
+
+
+def _pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--labels", required=True)
+    ap.add_argument("--snapshots", help="default: logs/adsb-snapshots-<the worksheet's date>.jsonl")
+    ap.add_argument("--replay", action="store_true",
+                    help="re-run extraction and matching against the aircraft in range")
+    ap.add_argument("--text", choices=("machine", "heard"), default="machine",
+                    help="with --replay, which transcription to run over (default: machine)")
+    ap.add_argument("--blank", choices=("none", "skip"), default="none",
+                    help="what an empty aircraft line means (default: none, the operator's call)")
+    ap.add_argument("--rows", action="store_true", help="list every miss, row by row")
+    args = ap.parse_args()
+
+    worksheet = Path(args.labels).read_text(encoding="utf-8")
+    if args.snapshots:
+        snap_path = Path(args.snapshots)
+    else:
+        day = _timestamp_of(
+            next(r["time"] for r in make_flight_labels.parse_worksheet(worksheet) if r.get("time"))
+        )[:10]
+        snap_path = _LOGS / f"adsb-snapshots-{day}.jsonl"
+    snapshots = load_snapshots(snap_path)
+    if not snapshots:
+        raise SystemExit(f"no aircraft snapshots in {snap_path} -- nothing can be bucketed")
+
+    for warning in integrity_warnings(worksheet):
+        print(f"CORPUS WARNING {warning}")
+
+    blank_means = LABEL_NONE if args.blank == "none" else LABEL_UNSURE
+    result = score(worksheet, snapshots, blank_means=blank_means,
+                   replay=args.replay, text_source=args.text)
+
+    mode = f"replay over the {args.text} text" if args.replay else "live record"
+    print(f"{len(result.rows)} transmissions   {mode}   snapshots: {snap_path.name}")
+    print(f"blank aircraft line read as {blank_means}\n")
+
+    for bucket in (CORRECT, WRONG_MATCH, EXTRACTION_MISS, SELECTION_MISS,
+                   RETRIEVAL_MISS, CORRECT_REJECTION):
+        print(f"  {bucket:18} {result.counts.get(bucket, 0):4}")
+    print(f"  {'excluded':18} {result.excluded:4}\n")
+
+    print(f"precision {_pct(result.precision)}   "
+          f"(correct / every tag applied)")
+    print(f"recall    {_pct(result.recall)}   "
+          f"(correct / {result.achievable} rows naming an aircraft that was in range)")
+    print(f"ceiling   {result.ceiling_missed} rows named an aircraft that was never in range")
+
+    if args.rows:
+        print()
+        for row in result.rows:
+            if row.bucket in (CORRECT, CORRECT_REJECTION):
+                continue
+            print(f"  {row.index:04d} {row.bucket:18} label={row.label:10} "
+                  f"tag={str(row.tagged):10} cand={str(row.candidate):10} {row.heard[:60]}")
+
+
+if __name__ == "__main__":
+    main()
