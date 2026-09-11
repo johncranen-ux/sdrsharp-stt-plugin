@@ -44,6 +44,14 @@ def load_transcripts(path: Path, config: str | None = None) -> dict[str, str]:
 
     `config` names which arm to read when a results file holds more than one; with a single
     arm it can be omitted, which is the common case since each run writes its own file.
+
+    A row whose `error` is set is dropped, so the caller sees it as a MISSING clip. bench_stt
+    writes a row for every clip it attempted, and a 429, a timeout or an unparseable body
+    leaves `text` empty with `error` filled in. Reading that as an empty transcription would
+    score a clip the API refused as a genuine extraction miss and as a row that wrote no QNH:
+    an arm that lost ten clips would print several points worse than its control with nothing
+    anywhere reporting the loss. Empty text with no error is the opposite case -- silence
+    really did decode to nothing -- and is kept.
     """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     results = payload["results"]
@@ -51,7 +59,8 @@ def load_transcripts(path: Path, config: str | None = None) -> dict[str, str]:
         if len(results) != 1:
             raise SystemExit(f"{path} holds {sorted(results)} -- name one with --config")
         config = next(iter(results))
-    return {row["clip_id"]: row.get("text") or "" for row in results[config]}
+    return {row["clip_id"]: row.get("text") or ""
+            for row in results[config] if not str(row.get("error") or "").strip()}
 
 
 def join_snapshot(snapshots: list[dict], timestamp: str,

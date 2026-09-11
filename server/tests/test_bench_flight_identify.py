@@ -497,6 +497,35 @@ class TestScoringAnArmsTranscripts:
         assert result.missing_transcripts == [1, 2, 3, 4]
         assert all(r.bucket == bench.EXCLUDED for r in result.rows[1:])
 
+    def test_a_failed_clip_is_missing_not_an_empty_transcription(self, corpus, tmp_path):
+        """bench_stt writes a row for EVERY clip: a 429, a timeout or a bad JSON body yields
+        text="" with `error` set, not an absent row. Reading that as an empty transcription
+        scores a rate-limited clip as a real extraction miss and as a row that wrote no QNH,
+        so an arm that lost ten clips prints several points worse than its control with no
+        drop reported anywhere. A row carrying an error is MISSING."""
+        labels, snaps = corpus
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_shipped": [
+            {"clip_id": "0000", "text": "Delta seven three, New York.", "error": None},
+            {"clip_id": "0001", "text": "", "error": "HTTP 429: rate limit"},
+            {"clip_id": "0002", "text": "", "error": "bad JSON: Expecting value"},
+        ]}}), encoding="utf-8")
+        assert bench.load_transcripts(path) == {"0000": "Delta seven three, New York."}
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             transcripts=bench.load_transcripts(path))
+        assert result.missing_transcripts == [1, 2, 3, 4]
+        assert result.rows[1].bucket == bench.EXCLUDED
+        assert result.rows[2].bucket == bench.EXCLUDED
+
+    def test_a_clip_that_really_transcribed_to_silence_is_still_scored(self, corpus, tmp_path):
+        """The counterpart: an empty text with NO error is a real result -- silence decodes to
+        nothing -- and must stay in the denominator rather than vanishing from the arm."""
+        path = tmp_path / "arm.json"
+        path.write_text(json.dumps({"model_label": None, "results": {"air_shipped": [
+            {"clip_id": "0000", "text": "", "error": None},
+        ]}}), encoding="utf-8")
+        assert bench.load_transcripts(path) == {"0000": ""}
+
     def test_transcripts_require_replay(self, corpus):
         labels, snaps = corpus
         with pytest.raises(ValueError):
