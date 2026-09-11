@@ -212,13 +212,71 @@ recorded 83 aircraft with real callsigns, types, altitudes and registrations.
 
 ## Success criteria
 
-- [ ] A baseline precision and achievable-ceiling recall figure exists for airband flight ID.
-- [ ] Every labelled miss is assigned to exactly one of retrieval / extraction / selection /
+- [x] A baseline precision and achievable-ceiling recall figure exists for airband flight ID.
+- [x] Every labelled miss is assigned to exactly one of retrieval / extraction / selection /
       wrong-match.
-- [ ] `--replay` reproduces the live result on unchanged code — if replay and history disagree
+- [x] `--replay` reproduces the live result on unchanged code — if replay and history disagree
       on rows with a valid snapshot, the harness is wrong and nothing built on it can be
       trusted.
-- [ ] The split names which of A, B, C addresses the largest bucket, with a number attached.
+- [x] The split names which of A, B, C addresses the largest bucket, with a number attached.
+
+## RESULT — baseline, 2026-09-11
+
+Corpus: 136 airband transmissions, 2026-09-10 11:05–12:01, 121.205 (Schiphol Approach 4),
+labelled by ear by the operator. `server/bench_flight_identify.py`.
+
+```
+correct              11        precision  100%   (0 genuine wrong matches -- see below)
+wrong-match           7*       recall    34.4%   (11 of 32 rows naming an in-range aircraft)
+extraction-miss      18        ceiling      0    rows named an aircraft never in range
+selection-miss        3
+retrieval-miss        0
+correct-rejection    95
+excluded              2        (UNSURE: YZR7939? on rows 0132/0133)
+```
+
+`--replay` reproduces this exactly, so counterfactuals run on this harness are trustworthy.
+
+**\* The seven wrong matches are an artifact of the labelling convention, not real errors.**
+The operator filled in only the rows the system got *wrong*, leaving blank the rows it had
+already tagged correctly, then chose (2026-09-11, with the consequence stated) to have blank
+read as `NONE`. All seven are rows where the tag is plainly right — 0079 *"Two three seven
+zero five, Delta five seven, goodbye."* → `DAL57`; 0122 *"Maintain level six zero, United
+nine four seven."* → `UAL947`. Scored with `--blank skip` the same corpus gives **100.0%
+precision and 0 wrong matches**. Nothing on this corpus argues for a precision guard.
+
+### Which arm is binding: A, decisively
+
+| Arm | Bucket it targets | Rows it could win |
+|---|---|---|
+| **A — decoder biasing** | extraction-miss | **10 of 18** (transcription alone), + 7 more from telephony-table entries |
+| B — session identity register | selection-miss | 3, and only 1 survives correct transcription |
+| C — physical corroboration | wrong-match | **0** — there are no genuine wrong matches to veto |
+
+Replaying over the operator's corrected `heard` text (`--replay --text heard`) — i.e. what the
+matcher would do given perfect ASR, changing nothing else — takes **recall from 34.4% to
+71.9%** and extraction misses from 18 to 8. Two thirds of the entire fixable gap is
+transcription quality.
+
+The 8 extraction misses that survive perfect transcription are all named, and 7 of the 8 are
+missing telephony-table entries rather than anything needing a new mechanism:
+
+- **4× `jetblue` / `jet blue` → JBU** (rows 0114, 0115, 0118, 0125) — the biggest single gap,
+  and `jet blue` as two words hits the same single-word-tokenizer limit that `"canada"` works
+  around for Air Canada.
+- **2× `orange` → TFL** (rows 0111, 0112) — the fix deliberately HELD before this baseline so
+  it would register as a real miss. It did. Now unblocked.
+- **1× `kl` → KLM** (row 0018, *"KL one two bravo"*) — two letters, below
+  `_FUZZY_MIN_WORD_LEN`, and not an exact table entry.
+- 1× genuinely unfixable (row 0134, the airline word is unintelligible by ear too).
+
+### Two prior worries retired by the numbers
+
+- **Poll geometry is not the constraint on this corpus.** Zero retrieval misses: every one of
+  the 32 aircraft the operator named was in the snapshot. The deferred wide-circle measurement
+  is still worth running on a different session, but nothing here is blocked on it.
+- **Precision is not under threat.** Arm C was specified to veto implausible matches; on 136
+  real transmissions there was nothing to veto.
 
 ## Deferred
 
