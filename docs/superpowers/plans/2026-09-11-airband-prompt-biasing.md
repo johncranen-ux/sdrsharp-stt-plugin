@@ -539,7 +539,7 @@ production needs no ground truth at all: the question "does this arm write QNH 2
 times" is answerable from the arm alone, and 12 is what the operator heard.
 
 Usage:
-    py bench_word_production.py air_shipped.json air-both.json
+    py bench_word_production.py air_shipped.json air_both.json
     py bench_word_production.py air_shipped.json --words QNH KLM ILS
 """
 
@@ -662,7 +662,7 @@ no experimental arm's movement counts unless it exceeds that gap.
 - [ ] **Step 5: The identification metric, per arm**
 
 ```bash
-for f in air-shipped air-shipped-repeat air_no_qnh air_airlines air_both air_empty; do
+for f in air_shipped air_shipped_repeat air_no_qnh air_airlines air_both air_empty; do
   echo "== $f"
   py bench_flight_identify.py --labels flight-labels-2026-09-10.txt --transcripts $f.json
 done
