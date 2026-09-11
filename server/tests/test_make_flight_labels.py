@@ -175,3 +175,32 @@ def test_worksheet_header_discloses_the_prefill_bias():
     between a disclosed trade-off and a hidden one."""
     header = mfl.render_worksheet([_row()])
     assert "bias" in header.lower()
+
+
+class TestReferenceExport:
+    """The worksheet's hand-corrected `heard` lines are the only ear-verified airband
+    reference set there is. bench.load_references wants clip_id<TAB>text."""
+
+    def _sheet(self, heard: str) -> str:
+        rows = [{"index": 18, "timestamp": "2026-09-10T11:00:00+02:00",
+                 "channel": "121,205", "durationSec": 2.5, "text": "machine text"}]
+        sheet = mfl.render_worksheet(rows)
+        return sheet.replace("heard    : machine text", f"heard    : {heard}")
+
+    def test_a_corrected_line_is_exported_against_its_clip_id(self):
+        out = mfl.to_references(self._sheet("KLM one two bravo."))
+        assert out.splitlines() == ["0018\tKLM one two bravo."]
+
+    def test_a_question_mark_becomes_an_inaudible_marker(self):
+        """bench._normalize already strips [bracketed] markers, so an unintelligible word
+        costs nothing instead of counting as a wrong word against every arm equally."""
+        out = mfl.to_references(self._sheet("Approach, ? good day."))
+        assert out.splitlines() == ["0018\tApproach, [inaudible] good day."]
+
+    def test_an_unlabelled_clip_exports_no_reference_line(self):
+        assert mfl.to_references(self._sheet("")) == ""
+
+    def test_a_tab_inside_the_text_cannot_break_the_format(self):
+        out = mfl.to_references(self._sheet("one\ttwo"))
+        assert out.splitlines() == ["0018\tone two"]
+        assert out.count("\t") == 1

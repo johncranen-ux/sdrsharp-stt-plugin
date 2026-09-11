@@ -135,10 +135,31 @@ def parse_worksheet(text: str) -> list[dict]:
     return records
 
 
+def to_references(worksheet: str) -> str:
+    """The worksheet's corrected `heard` lines as a bench.load_references file.
+
+    A `?` the labeller wrote is an unintelligible word, not a word they transcribed as "?".
+    It is emitted as `[inaudible]`, which bench._normalize already strips, so it costs no WER
+    against any arm rather than counting as one wrong word against all of them.
+
+    A row with an empty `heard` line emits nothing: bench treats a missing reference as
+    "excluded from aggregates", which is what an unlabelled clip deserves.
+    """
+    lines = []
+    for record in parse_worksheet(worksheet):
+        heard = (record.get("heard") or "").strip()
+        if not heard:
+            continue
+        text = heard.replace("?", "[inaudible]").replace("\t", " ")
+        lines.append(f"{record['index']:04d}\t{text}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--captures", required=True, help="a dated capture directory")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--references", help="also write a WER reference file from the `heard` lines")
     args = ap.parse_args()
 
     index_path = Path(args.captures) / "index.jsonl"
@@ -151,6 +172,10 @@ def main() -> None:
     print(f"{len(kept)} airband transmissions ({len(rows) - len(kept)} skipped as non-airband)")
     print(f"{tagged} already identified by the system; {len(kept) - tagged} to judge")
     print(f"-> {args.out}")
+    if args.references:
+        text = to_references(Path(args.out).read_text(encoding="utf-8"))
+        Path(args.references).write_text(text + "\n", encoding="utf-8")
+        print(f"-> {args.references} ({len(text.splitlines())} references)")
 
 
 if __name__ == "__main__":
