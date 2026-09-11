@@ -312,3 +312,118 @@ class TestRowsReportTheTextTheyWereScoredOn:
         row = bench.score(labels.read_text(encoding="utf-8"), snaps,
                           replay=True, text_source="heard").rows[2]
         assert row.text.startswith("Orange")
+
+
+class TestDigitRuns:
+    """Tail-first matching arm. The airline word is what ASR destroys; the digits usually
+    survive, so this asks whether the digits alone can find the aircraft. Decoding reuses
+    flight_identify's own digit/phonetic decoder so the runs are identical to what production
+    extraction would have built."""
+
+    def test_a_trailing_spelled_run_with_a_phonetic_suffix(self):
+        assert bench.digit_runs("One eight center with Fox, Roscoe, one two bravo.") == ["18", "12B"]
+
+    def test_each_maximal_run_is_separate(self):
+        assert bench.digit_runs(
+            "Descend flight level seven zero, QNH one two bravo.") == ["70", "12B"]
+
+    def test_a_run_stops_before_an_altitude_reading(self):
+        """Same boundary rule production extraction uses -- "three two two thousand" is a
+        callsign followed by an altitude, not a five-digit tail."""
+        assert bench.digit_runs(
+            "Ship hold, jet blue three two two thousand, flight level zero six zero."
+        ) == ["32", "060"]
+
+    def test_a_numeral_token_is_its_own_run(self):
+        assert bench.digit_runs("Contact 123705, good day.") == ["123705"]
+
+    def test_text_with_no_digits_has_no_runs(self):
+        assert bench.digit_runs("Approach, good morning.") == []
+
+
+class TestMatchByTail:
+    def _fleet(self, *pairs):
+        return [{"hex": f"h{i}", "flight": f, "t": "B738", "alt_baro": alt}
+                for i, (f, alt) in enumerate(pairs)]
+
+    def test_a_tail_unique_among_the_aircraft_in_range_resolves(self):
+        fleet = self._fleet(("KLM12B", 4000), ("DAL73", 9000))
+        assert bench.match_by_tail(["12B"], fleet, bench.TailFirst())["flight"] == "KLM12B"
+
+    def test_a_tail_two_aircraft_share_resolves_to_nothing(self):
+        """The BERGE TOWNSEND rule: an ambiguous match is worse than no match."""
+        fleet = self._fleet(("KLM32", 4000), ("JBU32", 9000))
+        assert bench.match_by_tail(["32"], fleet, bench.TailFirst()) is None
+
+    def test_a_tail_shorter_than_the_minimum_is_refused(self):
+        fleet = self._fleet(("KLM8", 4000))
+        assert bench.match_by_tail(["8"], fleet, bench.TailFirst(min_tail=2)) is None
+        assert bench.match_by_tail(["8"], fleet, bench.TailFirst(min_tail=1))["flight"] == "KLM8"
+
+    def test_parked_aircraft_are_out_of_the_candidate_set_by_default(self):
+        """Schiphol is 36 km away and its apron is full of aircraft that are not talking."""
+        fleet = self._fleet(("KLM12B", "ground"))
+        assert bench.match_by_tail(["12B"], fleet, bench.TailFirst()) is None
+        assert bench.match_by_tail(["12B"], fleet,
+                                   bench.TailFirst(include_ground=True))["flight"] == "KLM12B"
+
+    def test_two_runs_resolving_to_two_different_aircraft_resolve_to_nothing(self):
+        fleet = self._fleet(("KLM70", 4000), ("KLM12B", 9000))
+        assert bench.match_by_tail(["70", "12B"], fleet, bench.TailFirst()) is None
+
+    def test_only_the_trailing_run_is_tried_when_asked(self):
+        fleet = self._fleet(("KLM70", 4000), ("KLM12B", 9000))
+        opts = bench.TailFirst(runs="trailing")
+        assert bench.match_by_tail(["70", "12B"], fleet, opts)["flight"] == "KLM12B"
+
+
+TAIL_WORKSHEET = """\
+--- 0000 ----------------------------------------------
+audio    : 0000_sent.wav   (raw: 0000_raw.wav)
+time     : 2026-09-10T11:00:05+02:00   channel: 121,205   2.5s
+machine  : Descend flight level seven zero, QNH one two bravo.
+system   : not identified  (no callsign extracted)
+
+heard    : Descend flight level seven zero, KLM one two bravo.
+aircraft : KLM12B
+
+--- 0001 ----------------------------------------------
+audio    : 0001_sent.wav   (raw: 0001_raw.wav)
+time     : 2026-09-10T11:00:06+02:00   channel: 121,205   2.5s
+machine  : Continue present heading, heading is three seven zero.
+system   : not identified  (no callsign extracted)
+
+heard    : Continue present heading, heading is three seven zero.
+aircraft : NONE
+"""
+
+
+class TestTailFirstArmInScoring:
+    @pytest.fixture
+    def tail_corpus(self, tmp_path):
+        labels = tmp_path / "t.txt"
+        labels.write_text(TAIL_WORKSHEET, encoding="utf-8")
+        snaps = _write_snapshots(tmp_path / "s.jsonl", [
+            _snap("2026-09-10T11:00:00+02:00", "KLM12B", "DAL370")])
+        return labels, bench.load_snapshots(snaps)
+
+    def test_the_arm_is_off_unless_asked_for(self, tail_corpus):
+        labels, snaps = tail_corpus
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True)
+        assert result.counts[bench.EXTRACTION_MISS] == 1
+        assert bench.CORRECT not in result.counts
+
+    def test_the_arm_recovers_a_miss_the_airline_word_destroyed(self, tail_corpus):
+        labels, snaps = tail_corpus
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             arm=bench.TailFirst())
+        assert result.counts[bench.CORRECT] == 1
+
+    def test_the_arm_is_charged_for_the_readbacks_it_invents(self, tail_corpus):
+        """"heading is three seven zero" is a heading, and DAL370 is in range. This is the
+        whole risk of the arm and it must land in the wrong-match bucket, not vanish."""
+        labels, snaps = tail_corpus
+        result = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True,
+                             arm=bench.TailFirst())
+        assert result.counts[bench.WRONG_MATCH] == 1
+        assert result.precision == pytest.approx(0.5)

@@ -149,6 +149,7 @@ def candidate_for(text: str) -> str | None:
 
 import collections
 import dataclasses
+import re
 
 import make_flight_labels
 from stt_proxy import adsb, flight_identify
@@ -193,13 +194,19 @@ def _load_cache(snapshot: dict) -> None:
 
 
 def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
-          replay: bool = False, text_source: str = "machine") -> Result:
+          replay: bool = False, text_source: str = "machine",
+          arm: "TailFirst | None" = None) -> Result:
     """Every labelled transmission in a worksheet, bucketed.
 
     `replay` re-runs extraction and matching against the aircraft that were actually in range
     instead of reading what happened live; `text_source` picks which transcription it is run
     over, so the gap between "machine" and "heard" sizes what better ASR alone could buy.
+
+    `arm` adds the tail-first fallback on top of the real matcher, which is why it requires
+    replay: it is a counterfactual about code that does not exist, not a reading of history.
     """
+    if arm is not None and not replay:
+        raise ValueError("an arm is a counterfactual and needs --replay")
     rows: list[Scored] = []
     for record in make_flight_labels.parse_worksheet(worksheet):
         timestamp = _timestamp_of(record.get("time", ""))
@@ -212,9 +219,12 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
                 tagged = candidate = None
             else:
                 _load_cache(snapshot)
-                candidate = flight_identify.extract_callsign_candidate(
-                    record.get(text_source, ""))
+                text = record.get(text_source, "")
+                candidate = flight_identify.extract_callsign_candidate(text)
                 matched = flight_identify.match_flight(candidate)
+                if matched is None and arm is not None and (
+                        candidate is None or arm.on_failed_candidate):
+                    matched = match_by_tail(digit_runs(text), snapshot["aircraft"], arm)
                 tagged = matched["flight"] if matched else None
         else:
             tagged, candidate = parse_system(record.get("system", ""))
@@ -239,6 +249,89 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
         ceiling_missed=counts[RETRIEVAL_MISS],
         excluded=sum(1 for r in rows if r.bucket == EXCLUDED),
     )
+
+
+# -- arm: tail-first matching ------------------------------------------------------------
+#
+# ASR destroys the airline word and leaves the digits intact -- "Fox, Roscoe, one two bravo"
+# for KLM12B, "ship blue three two" for JBU32. This arm asks whether the digits alone can find
+# the aircraft. It is deliberately a bench arm and not a production path: matching on digits
+# with no airline anchor is the BERGE TOWNSEND hole reopened, and the 95 NONE rows in the
+# corpus -- headings, QNH readbacks, flight levels, frequencies -- are exactly the material
+# that would exploit it. Measure the damage before believing the recall.
+
+_RUN_MODES = ("all", "trailing")
+
+
+@dataclasses.dataclass(frozen=True)
+class TailFirst:
+    min_tail: int = 2          # a one-character tail matches far too much
+    unique: bool = True        # refuse a tail two in-range aircraft share
+    include_ground: bool = False   # parked traffic at Schiphol, 36 km away, is not talking
+    runs: str = "all"          # "all" maximal digit runs, or only the "trailing" one
+    on_failed_candidate: bool = False  # also fire when extraction produced a candidate that
+                                       # matched nothing, not only when it produced none
+
+
+def digit_runs(text: str) -> list[str]:
+    """Every maximal run of spoken digits/phonetic letters in a transmission.
+
+    Decoding is flight_identify's own, boundary rules included, so a run here is exactly what
+    production extraction would have appended after an airline anchor. Without that the arm
+    would be measuring a second, subtly different decoder.
+    """
+    words = re.findall(r"[A-Za-z0-9]+", (text or "").lower())
+    runs, current = [], ""
+    for i, word in enumerate(words):
+        peek = words[i + 1] if i + 1 < len(words) else None
+        char = word if word.isdigit() else flight_identify._decode_digit_word(word, peek)
+        if char is None:
+            if current:
+                runs.append(current)
+            current = ""
+            continue
+        if peek in flight_identify._DIGIT_RUN_BOUNDARY_WORDS:
+            # Production stops BEFORE this digit -- it opens an altitude or fraction reading
+            # ("three two, two thousand"), so it belongs to neither the callsign nor the run.
+            if current:
+                runs.append(current)
+            current = ""
+            continue
+        current += char
+    if current:
+        runs.append(current)
+    return runs
+
+
+def match_by_tail(runs: list[str], aircraft: list[dict], opts: TailFirst) -> dict | None:
+    """The one aircraft in range whose tail is one of these runs, or None.
+
+    None whenever the answer is not unique -- two aircraft sharing a tail, or two runs each
+    finding a different aircraft. An ambiguous identification is worse than none at all.
+    """
+    if opts.runs == "trailing":
+        runs = runs[-1:]
+
+    fleet = [a for a in aircraft
+             if opts.include_ground or a.get("alt_baro") != "ground"]
+    hits: list[dict] = []
+    for run in runs:
+        if len(run) < opts.min_tail:
+            continue
+        found = [a for a in fleet
+                 if (split := flight_identify._split_code_tail(a["flight"] or ""))
+                 and split[1] == run]
+        if not found:
+            continue
+        if len(found) > 1 and opts.unique:
+            return None
+        hits.extend(found)
+
+    if not hits:
+        return None
+    if len({a["hex"] for a in hits}) > 1:
+        return None
+    return hits[0]
 
 
 def integrity_warnings(worksheet: str) -> list[str]:
@@ -275,6 +368,40 @@ def _pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.1f}%"
 
 
+def _sweep(worksheet: str, snapshots: list[dict], blank_means: str, text_source: str) -> None:
+    """Every tail-first variant, beside the unchanged matcher.
+
+    The column that decides this is `wrong`, not `correct`: the arm matches on digits with no
+    airline anchor, and the corpus is full of headings, QNH readbacks and flight levels that
+    are digit runs naming no aircraft at all.
+    """
+    base = score(worksheet, snapshots, blank_means=blank_means, replay=True,
+                 text_source=text_source)
+    print(f"{'variant':44} {'correct':>7} {'wrong':>6} {'extract':>8} {'precision':>10} {'recall':>7}")
+
+    def row(name: str, result: Result) -> None:
+        print(f"  {name:42} {result.counts.get(CORRECT, 0):>7} "
+              f"{result.counts.get(WRONG_MATCH, 0):>6} "
+              f"{result.counts.get(EXTRACTION_MISS, 0):>8} "
+              f"{_pct(result.precision):>10} {_pct(result.recall):>7}")
+
+    row("(no arm -- current matcher)", base)
+    for runs in _RUN_MODES:
+        for min_tail in (2, 3, 4):
+            for unique in (True, False):
+                for ground in (False, True):
+                    for failed in (False, True):
+                        opts = TailFirst(min_tail=min_tail, unique=unique,
+                                         include_ground=ground, runs=runs,
+                                         on_failed_candidate=failed)
+                        name = (f"{runs}/min{min_tail}"
+                                f"{'/unique' if unique else '/ambiguous-ok'}"
+                                f"{'/+ground' if ground else ''}"
+                                f"{'/+failed-cand' if failed else ''}")
+                        row(name, score(worksheet, snapshots, blank_means=blank_means,
+                                        replay=True, text_source=text_source, arm=opts))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", required=True)
@@ -286,6 +413,8 @@ def main() -> None:
     ap.add_argument("--blank", choices=("none", "skip"), default="none",
                     help="what an empty aircraft line means (default: none, the operator's call)")
     ap.add_argument("--rows", action="store_true", help="list every miss, row by row")
+    ap.add_argument("--sweep", action="store_true",
+                    help="score the tail-first arm over its whole parameter grid and stop")
     args = ap.parse_args()
 
     worksheet = Path(args.labels).read_text(encoding="utf-8")
@@ -304,6 +433,11 @@ def main() -> None:
         print(f"CORPUS WARNING {warning}")
 
     blank_means = LABEL_NONE if args.blank == "none" else LABEL_UNSURE
+
+    if args.sweep:
+        _sweep(worksheet, snapshots, blank_means, args.text)
+        return
+
     result = score(worksheet, snapshots, blank_means=blank_means,
                    replay=args.replay, text_source=args.text)
 
