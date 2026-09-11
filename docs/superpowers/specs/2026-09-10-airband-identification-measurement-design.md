@@ -1,7 +1,7 @@
 # Airband flight identification — measurement arm — design
 
 **Date:** 2026-09-10
-**Status:** design agreed, not implemented (one throwaway side-car already running, see Rollout)
+**Status:** BUILT AND MEASURED 2026-09-11 -- see RESULT at the end. Arm A is binding.
 **Related:** measures the feature specified in
 `2026-09-08-airband-flight-identification-design.md`. Mirrors the maritime measurement
 tooling (`server/bench_identify.py`, `server/replay_sessions.py`) but scores per
