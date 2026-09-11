@@ -162,7 +162,7 @@ class Scored:
     tagged: str | None
     candidate: str | None
     bucket: str
-    heard: str
+    text: str          # the transcription this row was actually scored on
     in_range: bool
 
 
@@ -223,7 +223,7 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
         rows.append(Scored(
             index=record["index"], timestamp=timestamp, label=label, tagged=tagged,
             candidate=candidate, bucket=classify(label, tagged, candidate, in_range),
-            heard=record.get("heard", ""),
+            text=record.get(text_source if replay else "machine", ""),
             in_range=bool(in_range and label in in_range)))
 
     counts = collections.Counter(r.bucket for r in rows if r.bucket != EXCLUDED)
@@ -328,7 +328,7 @@ def main() -> None:
             if row.bucket in (CORRECT, CORRECT_REJECTION):
                 continue
             print(f"  {row.index:04d} {row.bucket:18} label={row.label:10} "
-                  f"tag={str(row.tagged):10} cand={str(row.candidate):10} {row.heard[:60]}")
+                  f"tag={str(row.tagged):10} cand={str(row.candidate):10} {row.text[:60]}")
 
 
 if __name__ == "__main__":

@@ -263,13 +263,16 @@ class TestScore:
         assert replayed.counts == live.counts
 
     def test_replay_can_score_the_corrected_text_to_size_the_asr_headroom(self, corpus):
-        """Arm A's counterfactual: what the matcher would do if ASR had heard it right. The
-        TFL367 row is the case -- "Port Cremoros" extracts nothing, "Orange" still extracts
-        nothing because the telephony table has no entry, so this must NOT turn correct."""
+        """Arm A's counterfactual: what the matcher would do if ASR had heard it right. Row
+        0002 is the case -- "Port Cremoros three six seven" extracts nothing, while the
+        corrected "Orange three six seven" reaches TFL367, which was in range."""
         labels, snaps = corpus
-        result = bench.score(labels.read_text(encoding="utf-8"), snaps,
-                             replay=True, text_source="heard")
-        assert result.counts[bench.EXTRACTION_MISS] == 1
+        over_machine = bench.score(labels.read_text(encoding="utf-8"), snaps, replay=True)
+        over_heard = bench.score(labels.read_text(encoding="utf-8"), snaps,
+                                 replay=True, text_source="heard")
+        assert over_machine.counts[bench.EXTRACTION_MISS] == 1
+        assert bench.EXTRACTION_MISS not in over_heard.counts
+        assert over_heard.counts[bench.CORRECT] == over_machine.counts[bench.CORRECT] + 1
 
 
 class TestCorpusIntegrity:
@@ -293,3 +296,19 @@ class TestCorpusIntegrity:
         """`identified DAL73/A333` cannot be recomputed from the text -- it is the live
         record -- so those rows must be left alone rather than reported every run."""
         assert all("0000" not in w for w in bench.integrity_warnings(WORKSHEET))
+
+
+class TestRowsReportTheTextTheyWereScoredOn:
+    """--rows printed the `heard` line whatever --text said, so a replay over the machine text
+    listed misses beside a transcription that was never fed to the extractor."""
+
+    def test_the_live_record_is_scored_on_the_machine_text(self, corpus):
+        labels, snaps = corpus
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps).rows[2]
+        assert row.text.startswith("Port Cremoros")
+
+    def test_a_heard_replay_reports_the_heard_text(self, corpus):
+        labels, snaps = corpus
+        row = bench.score(labels.read_text(encoding="utf-8"), snaps,
+                          replay=True, text_source="heard").rows[2]
+        assert row.text.startswith("Orange")
