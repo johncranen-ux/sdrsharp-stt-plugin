@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import re
 import secrets
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import air_archive
 import conversation_archive
-from webapp import (clips, config_store, conversations_view, credentials,
+from webapp import (air_view, clips, config_store, conversations_view, credentials,
                     health as health_module, logs, registry, settings_api, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
 from webapp.proxy_data import ProxyData
@@ -42,6 +44,11 @@ class CommentIn(BaseModel):
     conversation_id: str
     truth: str = ""
     note: str = ""
+
+
+class AirMoveIn(BaseModel):
+    transmission_id: int
+    to_key: str
 
 
 def _is_secure(request: Request) -> bool:
@@ -278,6 +285,61 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
             raise HTTPException(status_code=404, detail="no audio for that turn")
         return FileResponse(path, media_type="audio/wav",
                             filename=f"{day}_{clip}.wav")
+
+    def _air_rows(start: float, end: float) -> list[dict]:
+        with air_archive.open_db(_archive_db()) as conn:
+            return air_archive.transmissions(conn, start, end)
+
+    @guarded.get("/api/air/flights")
+    def read_air_flights(from_: str | None = Query(None, alias="from"),
+                         to: str | None = None) -> dict:
+        now = time.time()
+        try:
+            start, end, live = air_view.parse_range(from_, to, now)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        proxy, _err = health_module.proxy_status(values())
+        body = {"live": live, "now": now, "strips": [], "error": None,
+                "echo_enabled": (values().get("AIR_ECHO_ENABLED") or "off") == "on",
+                "adsb": (proxy or {}).get("adsb")}
+        try:
+            body["strips"] = air_view.strips(_air_rows(start, end), now, live)
+        except Exception as exc:
+            body["error"] = f"the airband archive could not be read ({type(exc).__name__})"
+        return body
+
+    @guarded.get("/api/air/thread")
+    def read_air_thread(key: str, from_: str | None = Query(None, alias="from"),
+                        to: str | None = None) -> dict:
+        now = time.time()
+        try:
+            start, end, _live = air_view.parse_range(from_, to, now)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        # Wide enough that move targets near the edges of the range are still offered.
+        rows = _air_rows(start - air_view.MOVE_TARGET_WINDOW_S,
+                         end + air_view.MOVE_TARGET_WINDOW_S)
+        in_range = [r for r in rows if start <= r["epoch"] <= end]
+        root = _captures_root()
+        out = []
+        for item in air_view.thread(in_range, key):
+            clip = clips.annotate([{"time": item["t"]}], item["t"], root)[0]
+            item["clip"], item["clip_day"] = clip["clip"], clip["clip_day"]
+            item["time"] = item["t"]
+            item["targets"] = [t for t in air_view.move_targets(rows, item["epoch"])
+                               if t["key"] != key]
+            out.append(item)
+        return {"rows": out}
+
+    @mutating.post("/api/air/moves")
+    def write_air_move(body: AirMoveIn) -> dict:
+        if not air_archive.valid_key(body.to_key):
+            raise HTTPException(status_code=400, detail="not a flight key")
+        with air_archive.open_db(_archive_db()) as conn:
+            move = air_archive.add_move(conn, body.transmission_id, body.to_key)
+        if move is None:
+            raise HTTPException(status_code=404, detail="no such transmission")
+        return {"move": move}
 
     @guarded.get("/api/vessels")
     def read_vessels(text: str | None = None, limit: int = 50, offset: int = 0) -> dict:
