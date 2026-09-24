@@ -88,7 +88,8 @@ def _thousands(toks: list[str], i: int) -> tuple[int, int] | None:
     def unit(k):
         return _SMALL.get(toks[k]) if k < len(toks) else None
 
-    if toks[i] in _TENS and unit(i + 1) and unit(i + 1) < 10 and             i + 2 < len(toks) and toks[i + 2] in {"thousand", "hundred"}:
+    if (toks[i] in _TENS and unit(i + 1) and unit(i + 1) < 10
+            and i + 2 < len(toks) and toks[i + 2] in {"thousand", "hundred"}):
         n, j = _TENS[toks[i]] + unit(i + 1), i + 2
     elif unit(i) and i + 1 < len(toks) and toks[i + 1] in {"thousand", "hundred"}:
         n, j = unit(i), i + 1
@@ -130,7 +131,7 @@ def extract_numbers(text: str) -> list[Number]:
             while j < len(toks) and toks[j] in _FILLER:
                 j += 1
             run, end = _digit_run(toks, j)
-            if 2 <= len(run) <= 3 and end < len(toks) + 1 and (
+            if 2 <= len(run) <= 3 and (
                     end == len(toks) or toks[end] not in {"thousand", "hundred"}):
                 found.append(Number("altitude", int(run) * 100, " ".join(toks[i:end])))
                 i = end
