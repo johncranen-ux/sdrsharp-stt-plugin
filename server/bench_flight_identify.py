@@ -282,6 +282,11 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
                 else:
                     candidate = flight_identify.extract_callsign_candidate(text)
                     matched = flight_identify.match_flight(candidate)
+                    if candidate is None:
+                        # Same fallback callsign_clue runs live: a "QNH" that is really "KLM".
+                        repaired = flight_identify._qnh_repair(text)
+                        if repaired is not None:
+                            candidate, matched = repaired
                 if matched is None and arm is not None and (
                         candidate is None or arm.on_failed_candidate):
                     matched = match_by_tail(digit_runs(text), snapshot["aircraft"], arm)

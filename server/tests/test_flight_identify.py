@@ -444,3 +444,53 @@ def test_other_glued_designators_from_the_airline_table(text, expected):
 ])
 def test_letters_glued_to_digits_that_are_no_airline_stay_unextracted(text):
     assert flight_identify.extract_callsign_candidate(text) is None
+
+
+# -- "QNH" that is really "KLM" ------------------------------------------------------------
+#
+# The decoder writes QNH where KLM was spoken (2026-09-11 finding; the prompt contains "QNH").
+# Since 2026-09-20, 76 of 76 transcribed "QNH"s were followed by a number that cannot be a
+# pressure. Measured on the labelled 09-10 hour before building: the repair fires 6 times,
+# 4 on labelled KLM rows (0028, 0051, 0064, 0097), 1 on 0102 which the operator re-heard as
+# KLM, 1 on 0020 which the operator marked UNSURE -- 0 confirmed wrong. It only tags when
+# exactly one KLM flight with that number is in range, and only when nothing else was found.
+
+def test_qnh_followed_by_a_flight_number_is_read_as_klm():
+    _seed("484abc", "KLM604", t="E190")
+    clue = flight_identify.callsign_clue("Level four zero, QNH six zero four.")
+    assert clue["flight"] == "KLM604" and clue["hex"] == "484abc"
+    assert clue["candidate"] == "KLM604"
+    assert clue["repaired_from"] == "QNH"
+
+
+def test_the_repair_keeps_a_phonetic_suffix():
+    _seed("484161", "KLM12B")
+    clue = flight_identify.callsign_clue("Descend flight level seven zero, QNH one two bravo.")
+    assert clue["flight"] == "KLM12B"
+
+
+def test_a_real_pressure_is_never_repaired():
+    _seed("484aaa", "KLM1025")
+    clue = flight_identify.callsign_clue("Contact tower, QNH one zero two five.")
+    assert clue["candidate"] is None and clue["hex"] is None
+
+
+def test_no_matching_klm_in_range_means_no_candidate_at_all():
+    """Garbled digits too ("QNH one one" was really KLM 49 Romeo): the repair must stay silent
+    rather than invent KLM11, and must not report a heard-but-unmatched callsign either."""
+    _seed("484cc2", "KLM49R", t="E190")
+    clue = flight_identify.callsign_clue("Two three, double five, do it, QNH one one.")
+    assert clue == {"candidate": None, "hex": None, "flight": None, "type": None, "reg": None}
+
+
+def test_a_callsign_found_the_normal_way_is_not_repaired():
+    _seed("484443", "KLM281")
+    _seed("484abc", "KLM604")
+    clue = flight_identify.callsign_clue("KLM two eight one, QNH six zero four")
+    assert clue["flight"] == "KLM281" and "repaired_from" not in clue
+
+
+def test_identify_flight_tags_a_repaired_callsign():
+    _seed("484abc", "KLM604", t="E190")
+    assert flight_identify.identify_flight("Level four zero, QNH six zero four.") == \
+        "[KLM604/E190] Level four zero, QNH six zero four."

@@ -335,13 +335,52 @@ def callsign_clue(text: str) -> dict:
     """
     candidate = extract_callsign_candidate(text)
     result = match_flight(candidate) if candidate else None
-    return {
+    repaired = None
+    if candidate is None:
+        repaired = _qnh_repair(text)
+        if repaired is not None:
+            candidate, result = repaired
+    clue = {
         "candidate": candidate,
         "hex": result.get("hex") if result else None,
         "flight": result.get("flight") if result else None,
         "type": result.get("t") if result else None,
         "reg": result.get("r") if result else None,
     }
+    if repaired is not None:
+        clue["repaired_from"] = "QNH"
+    return clue
+
+
+_QNH_RE = re.compile(r"\bqnh\b")
+# hPa. Anything a controller really gives as QNH falls in here; "one one", "six zero four" or
+# "one two bravo" does not.
+_QNH_PRESSURE = range(950, 1051)
+
+
+def _qnh_repair(text: str) -> tuple[str, dict] | None:
+    """A "QNH" the decoder wrote where "KLM" was spoken, as (candidate, aircraft), or None.
+
+    The airband prompt contains "QNH", and the decoder writes it in the slot where KLM was
+    said (2026-09-11). Since 2026-09-20, 76 of 76 transcribed QNHs were followed by a number
+    that cannot be a pressure. The words after it are decoded exactly as if they followed
+    "KLM", and the result is accepted only when it names exactly one aircraft in range --
+    no fuzzy matching, because this path starts from a word that was NOT an airline. Measured
+    on the labelled 09-10 hour before shipping: 6 firings, 0 confirmed wrong.
+    """
+    lowered = (text or "").lower()
+    cache = adsb.current_aircraft()
+    for m in _QNH_RE.finditer(lowered):
+        candidate = extract_callsign_candidate("klm " + lowered[m.end():])
+        if not candidate or not candidate.startswith("KLM"):
+            continue
+        digits = "".join(c for c in candidate[3:] if c.isdigit())
+        if not digits or (len(digits) >= 3 and int(digits[:4]) in _QNH_PRESSURE):
+            continue
+        hits = [ac for ac in cache if ac.get("flight") == candidate]
+        if len(hits) == 1:
+            return candidate, hits[0]
+    return None
 
 
 def identify_flight(text: str) -> str:

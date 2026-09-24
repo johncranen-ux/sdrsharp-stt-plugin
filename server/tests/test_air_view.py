@@ -120,3 +120,9 @@ def test_parse_range():
         air_view.parse_range("yesterday", None, NOW)
     with pytest.raises(ValueError):
         air_view.parse_range("2026-09-24T12:00:00+02:00", "2026-09-24T11:00:00+02:00", NOW)
+
+
+def test_evidence_says_when_a_callsign_was_read_from_qnh():
+    r = row(1, NOW, "484abc", clue={"candidate": "KLM604", "hex": "484abc", "flight": "KLM604",
+                                    "type": "E190", "reg": None, "repaired_from": "QNH"})
+    assert 'KLM604 read from "QNH"' in air_view.evidence(r)

@@ -432,10 +432,10 @@ TAIL_WORKSHEET = """\
 --- 0000 ----------------------------------------------
 audio    : 0000_sent.wav   (raw: 0000_raw.wav)
 time     : 2026-09-10T11:00:05+02:00   channel: 121,205   2.5s
-machine  : Descend flight level seven zero, QNH one two bravo.
+machine  : One eight center with Fox, Roscoe, one two bravo.
 system   : not identified  (no callsign extracted)
 
-heard    : Descend flight level seven zero, KLM one two bravo.
+heard    : One eight center with Foxtrot, KL one two bravo.
 aircraft : KLM12B
 
 --- 0001 ----------------------------------------------

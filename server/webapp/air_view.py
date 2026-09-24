@@ -76,7 +76,11 @@ def evidence(row: dict) -> str:
         return "moved by hand"
     parts = []
     clue = row.get("callsign_clue") or {}
-    if clue.get("flight"):
+    if clue.get("flight") and clue.get("repaired_from"):
+        # Not heard as a callsign: the decoder wrote "QNH" where "KLM" was said, and the
+        # number after it named exactly one KLM flight in range. Say so -- the text shows QNH.
+        parts.append(f'callsign {clue["flight"]} read from "{clue["repaired_from"]}"')
+    elif clue.get("flight"):
         parts.append(f"callsign {clue['flight']} heard")
     elif clue.get("candidate"):
         parts.append(f"callsign {clue['candidate']} heard, not in ADS-B")
