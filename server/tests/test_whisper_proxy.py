@@ -4245,3 +4245,29 @@ def test_vessels_log_file_honours_its_environment_override(monkeypatch, tmp_path
     finally:
         monkeypatch.delenv("VESSELS_LOG_FILE")
         importlib.reload(vessel_log)
+
+
+def test_an_approach_4_transmission_is_recorded_before_tagging(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(proxy.flight_attribution, "record_transmission",
+                        lambda text, channel, **_k: recorded.append((text, channel)) or 1)
+    monkeypatch.setattr(proxy, "_maybe_identify_flight",
+                        lambda text, channel: f"[KLM12B/B738] {text}")
+    shown = proxy._postprocess_airband("KLM one two bravo, good morning", "121,200")
+    assert shown == "[KLM12B/B738] KLM one two bravo, good morning"
+    assert recorded == [("KLM one two bravo, good morning", "121,200")]
+
+
+def test_a_tower_transmission_is_not_recorded_for_attribution(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(proxy.flight_attribution, "record_transmission",
+                        lambda text, channel, **_k: recorded.append((text, channel)) or 1)
+    proxy._postprocess_airband("KLM one two bravo", "119.230")
+    assert recorded == []
+
+
+def test_a_failing_archive_still_returns_the_text(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(proxy.flight_attribution, "record_transmission", boom)
+    assert "one two bravo" in proxy._postprocess_airband("KLM one two bravo", "121.200")

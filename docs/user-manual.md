@@ -11,6 +11,7 @@ Everything needed to install, configure and run the SDR# speech-to-text plugin.
 - [Reading the Dashboard](#reading-the-dashboard)
 - [Using the plugin](#using-the-plugin)
 - [Conversations and Vessels](#conversations-and-vessels)
+- [The Airband tab](#the-airband-tab)
 - [Settings](#settings)
 - [Settings reference](#settings-reference)
 - [Optional: local GPU backend](#optional-local-gpu-backend)
@@ -576,6 +577,120 @@ conversation matched to that MMSI — matched by MMSI only, never by name, for t
 
 ---
 
+## The Airband tab
+
+Schiphol Approach 4 (121.200, tuned as 121.205 — both `.`/`,` spellings are recognised) is a
+string of numbers that could be a callsign, an altitude, a heading, a runway or a frequency,
+with several aircraft's conversations running at once. The **Airband** tab exists to make that
+followable: it groups every transmission on that channel **per flight**, live and for any past
+period, so the numbers sit next to the aircraft they belong to. It does not yet explain what a
+number means (that a "descend flight level seven zero" is a clearance to 7,000 ft) — only which
+aircraft said or was told it.
+
+This is a separate pipeline from [Conversations](#conversations-and-vessels): no gap-window
+journal, no LLM. A 2026-09-10 measurement found aircraft turns interleave and repeat their
+callsign far less than ships do, so the CH01 approach does not transfer — see
+`docs/superpowers/specs/2026-09-24-airband-conversations-design.md` for the full reasoning.
+
+### The time bar
+
+Across the top: **● Live** (polls every 15 s and drops a flight 15 minutes after its last
+transmission), **Last hour**, or a **day + hour** picker into the archive. On the right, the
+tab reports two independent health facts: the ADS-B feed's own state (`OK · N aircraft`,
+`failing (N)`, or `proxy not answering`) and whether the autopilot clue currently counts
+towards what you see (`autopilot clue: on` / `recording, not shown`).
+
+### Strips
+
+The left column lists one **strip** per flight, most recently heard first: callsign, airline,
+aircraft type, **altitude → selected altitude** (the autopilot's selected altitude, when ADS-B
+reports one — raw feet below 10,000 ft, e.g. `9725 → set 7008`, and a flight level at or above
+it, e.g. `FL120 → set FL100`), heading (`hdg 051`), and how many transmissions. In history
+mode a strip shows the values **as they were at that flight's last transmission** in the
+period, not live data. Below the flights sit three special groups, in this order: **Needs
+review** (the two clues disagree), **unknown callsigns** (a callsign was heard clearly enough
+to group by, but it doesn't match anything ADS-B is reporting — shown as `? "text heard"`), and
+**Unassigned** (no usable clue at all).
+
+Click a strip to open its conversation on the right.
+
+### Badges
+
+Every transmission in a flight's conversation carries a badge for how it was attributed. Hover
+it to see the evidence behind that particular row — for example "autopilot change only:
+DAL73 selected 6000 ft 8 s later", or "callsign DAL73 heard, not in ADS-B".
+
+| Badge | Meaning |
+|---|---|
+| ✔✔ | The callsign heard in the audio and an autopilot change agree on the same aircraft. |
+| ✔ | Only one clue fired — either the callsign was heard, or (once the autopilot clue is switched on) exactly one aircraft's selected altitude or heading changed to match, with no callsign heard. |
+| ⚠ | The two clues named **different** aircraft. Filed under Needs review rather than guessed at. |
+| ? | A callsign was heard but doesn't match any aircraft ADS-B currently reports. |
+| — | No clue at all. Filed under Unassigned. |
+| ✎ | Moved by hand — a manual move always overrides whatever the clues computed. |
+
+The autopilot side of a clue is an aircraft whose **selected** (not actual) altitude or heading
+changed to the spoken number within 10 s before to 60 s after the transmission, to within
+±100 ft / ±5°, and only if it had a *different* selected value immediately before — an aircraft
+already at that setting proves nothing. If two or more aircraft change to the same number, that
+counts as no clue at all, never a guess.
+
+### Moving a transmission
+
+If a row is in the wrong flight, its **move to…** dropdown lists every flight heard within
+±10 minutes of that transmission, plus **Unassigned**. Picking one records the move
+immediately and re-renders. Every move is **kept**, not just applied — it's appended to its own
+table rather than overwriting the computed outcome, so the record of what an operator actually
+corrected survives and feeds `bench_air_echo.py`'s "did the autopilot clue call it the same way
+the operator did" check. If a transmission is moved more than once, the most recent move wins;
+the underlying computed outcome is never lost, only overridden.
+
+### The autopilot clue: recorded now, shown later
+
+The autopilot clue (the ✔✔ / lone-✔ echo case above) is computed and stored for **every**
+transmission regardless of whether it's switched on — nothing about this tab waits for that
+decision. What the setting controls is only whether that clue counts towards the badge and
+grouping you see; with it off, a transmission's outcome is exactly what the callsign clue alone
+would give it, and an echo that was found is still there in the stored row for later scoring.
+
+The outcome is stored when the transmission is attributed, so the setting applies to
+transmissions attributed **after** it is switched on. Rows recorded while it was off keep their
+callsign-only grouping — their echo clue stays stored and visible in the hover evidence, but
+switching the setting on does not regroup them. Likewise, switching it off again does not undo
+echo-based groupings already stored.
+
+It stays off until `py bench_air_echo.py` (run from `server/`) prints **PASS** against 3–5
+days of recorded traffic — it checks that the echo clue agrees with the callsign clue on at
+least 50 transmissions where both fired, that it called at least as many hand-moved
+transmissions correctly as the callsign clue did, and that it recovers at least 10% of what is
+currently Unassigned. A FAIL is a normal outcome, not a bug — it means the clue isn't earning
+its keep yet and stays off, recorded with its numbers.
+
+Once it passes, switch it on from **Settings → Identification → `AIR_ECHO_ENABLED`** and
+restart the proxy from the Dashboard, the same as any other setting — see
+[Settings](#settings).
+
+### Where the data lives
+
+Both tables live in the same `conversations.db` the conversation archive uses (see
+[The conversation archive](#the-conversation-archive) above), so the same backup and WAL rules
+apply:
+
+- **`air_transmissions`** — one row per transmission: its full timestamp, text, the extracted
+  numbers, both clues, the outcome and badge, and the aircraft's state at that moment.
+- **`air_moves`** — one row per manual move, append-only; the latest move for a transmission is
+  the effective assignment.
+
+The ADS-B snapshots the echo clue is checked against are appended continuously to
+`logs/adsb-YYYY-MM-DD.jsonl`, one line per successful poll, independent of the database. At the
+default 15 s poll that is roughly **50–90 MB a day**, so the files are pruned: each time a new
+day's file opens, day files older than `ADSB_SNAPSHOT_KEEP_DAYS` (default **14**, minimum 1;
+**Settings → Identification**) are deleted. Only files named exactly `adsb-YYYY-MM-DD.jsonl` are
+ever deleted — the 09-10 measurement side-car `adsb-snapshots-2026-09-10.jsonl` and anything
+else in `logs/` is left alone.
+
+---
+
 ## Settings
 
 `server/config.json` is what the panel, the proxy and the counter actually read their
@@ -815,6 +930,9 @@ entirely (e.g. alongside `start-all.bat`) if you'd rather not rely on the name m
 
 On startup the proxy prints either `Flight identification: adsb.fi, ...` or
 `Flight identification: disabled (ADSB_SOURCE=off)`, mirroring the `AIS feed: ...` line above.
+With ADS-B off, the [Airband tab](#the-airband-tab) still groups transmissions, by the callsign
+clue only (the proxy says so with `Airband conversations: callsign clue only`); the autopilot
+check still runs and records "no ADS-B data for that moment" rather than leaving rows unchecked.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -823,8 +941,10 @@ On startup the proxy prints either `Flight identification: adsb.fi, ...` or
 | `ADSB_LON` | `4.3` | Poll centre longitude |
 | `ADSB_DIST_NM` | `40` | Poll radius, nautical miles |
 | `ADSB_POLL_SEC` | `15` | Seconds between polls; values under 5 are raised to 5 |
+| `ADSB_SNAPSHOT_KEEP_DAYS` | `14` | Days of `logs/adsb-YYYY-MM-DD.jsonl` snapshot log to keep (~50–90 MB/day); values under 1 are raised to 1 |
 
-A malformed value for `ADSB_LAT`, `ADSB_LON`, `ADSB_DIST_NM` or `ADSB_POLL_SEC` falls back to
+A malformed value for `ADSB_LAT`, `ADSB_LON`, `ADSB_DIST_NM`, `ADSB_POLL_SEC` or
+`ADSB_SNAPSHOT_KEEP_DAYS` falls back to
 its default rather than crashing the proxy at startup — the same guarantee `AISHUB_POLL_SEC`
 gives, since this module is imported unconditionally whether or not you use airband at all.
 

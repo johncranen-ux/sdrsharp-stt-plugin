@@ -286,3 +286,146 @@ def test_record_success_after_a_failure_streak_prints_recovered(capsys):
     adsb._record_success(3)
 
     assert "recovered after 2 failed poll(s)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Autopilot fields and snapshot recording (Task 1: flight_attribution's stage 2 evidence)
+# ---------------------------------------------------------------------------
+
+import datetime
+
+
+def _payload(*aircraft):
+    return lambda _url: json.dumps({"aircraft": list(aircraft)}).encode("utf-8")
+
+
+# A real 2026 instant: on Windows, astimezone() raises OSError for epochs near 1970.
+B = 1_790_000_000.0
+
+KLM12B = {"hex": "484161", "flight": "KLM12B  ", "t": "B738", "r": "PH-BXH",
+          "alt_baro": 9725, "nav_altitude_mcp": 7008, "nav_heading": 51.33,
+          "nav_qnh": 1013.6, "baro_rate": -1024}
+
+
+def test_map_aircraft_keeps_the_autopilot_selected_values():
+    mapped = adsb.map_aircraft(KLM12B)
+    assert mapped["nav_altitude_mcp"] == 7008
+    assert mapped["nav_heading"] == 51.33
+    assert mapped["nav_qnh"] == 1013.6
+    assert mapped["baro_rate"] == -1024
+
+
+def test_map_aircraft_leaves_absent_autopilot_values_as_none():
+    mapped = adsb.map_aircraft({"hex": "abc123", "flight": "PHVSY"})
+    assert mapped["nav_altitude_mcp"] is None and mapped["nav_heading"] is None
+
+
+def test_a_recorded_poll_is_appended_to_the_daily_log(tmp_path):
+    now = datetime.datetime(2026, 9, 24, 11, 14, 2).astimezone().timestamp()
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    path = adsb.snapshot_log_path("2026-09-24")
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["t"].startswith("2026-09-24T11:14:02")
+    assert rows[0]["aircraft"][0]["nav_altitude_mcp"] == 7008
+    assert "last_seen" not in rows[0]["aircraft"][0]
+
+
+def test_an_unrecorded_poll_writes_nothing_and_keeps_no_snapshot():
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), record=False, now=B)
+    assert not adsb.SNAPSHOT_LOG_DIR.exists() or not any(adsb.SNAPSHOT_LOG_DIR.iterdir())
+    assert adsb.snapshots_between(B - 100, B + 100) == []
+
+
+def test_snapshots_between_reads_the_ring_oldest_first():
+    for t in (B, B + 15, B + 30):
+        adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=t)
+    got = adsb.snapshots_between(B + 10, B + 30)
+    assert [s["t"] for s in got] == [B + 15, B + 30]
+
+
+def test_snapshots_between_falls_back_to_the_log_after_a_restart():
+    now = datetime.datetime(2026, 9, 24, 11, 0, 0).astimezone().timestamp()
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    adsb.reset_snapshot_ring()          # what a proxy restart does to memory
+    got = adsb.snapshots_between(now - 5, now + 5)
+    assert len(got) == 1 and got[0]["aircraft"][0]["hex"] == "484161"
+    assert abs(got[0]["t"] - now) < 1.0
+
+
+def test_a_log_write_failure_does_not_fail_the_poll(monkeypatch):
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+    monkeypatch.setattr(adsb, "_append_snapshot_log", boom)
+    assert adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=B) == 1
+
+
+def _day_epoch(day: int, hour: int = 11) -> float:
+    return datetime.datetime(2026, 9, day, hour, 0, 0).astimezone().timestamp()
+
+
+def test_the_log_fallback_parses_a_day_file_once_until_it_grows(monkeypatch):
+    now = _day_epoch(24)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    adsb.reset_snapshot_ring()
+    parses = []
+    real = adsb._parse_log_file
+    monkeypatch.setattr(adsb, "_parse_log_file", lambda p: parses.append(p) or real(p))
+    assert len(adsb.snapshots_between(now - 5, now + 5)) == 1
+    assert len(adsb.snapshots_between(now - 5, now + 5)) == 1
+    assert len(parses) == 1
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now + 15)
+    with adsb._ring_lock:
+        adsb._ring.clear()              # the ring only, so the parse cache survives
+    got = adsb.snapshots_between(now - 5, now + 20)
+    assert [round(s["t"] - now) for s in got] == [0, 15]
+    assert len(parses) == 2
+
+
+def test_resolve_keep_days(monkeypatch):
+    monkeypatch.delenv("ADSB_SNAPSHOT_KEEP_DAYS", raising=False)
+    assert adsb._resolve_keep_days() == 14
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "3")
+    assert adsb._resolve_keep_days() == 3
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "fourteen")
+    assert adsb._resolve_keep_days() == 14
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "0")
+    assert adsb._resolve_keep_days() == 1
+
+
+def test_opening_a_new_day_file_prunes_only_old_day_files(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 14)
+    logs = Path(adsb.SNAPSHOT_LOG_DIR)
+    logs.mkdir(parents=True)
+    old = logs / "adsb-2026-09-09.jsonl"          # 15 days before the 24th
+    edge = logs / "adsb-2026-09-10.jsonl"         # exactly 14 days: kept
+    recent = logs / "adsb-2026-09-20.jsonl"
+    sidecar = logs / "adsb-snapshots-2026-09-10.jsonl"
+    other = logs / "adsb-2026-09-01.jsonl.bak"
+    for f in (old, edge, recent, sidecar, other):
+        f.write_text("{}\n", encoding="utf-8")
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24))
+    assert not old.exists()
+    assert edge.exists() and recent.exists() and sidecar.exists() and other.exists()
+
+
+def test_appending_to_an_existing_day_file_does_not_prune(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 1)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24, 10))
+    old = Path(adsb.SNAPSHOT_LOG_DIR) / "adsb-2026-09-01.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24, 11))
+    assert old.exists()
+
+
+def test_a_prune_failure_does_not_fail_the_write(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 1)
+    logs = Path(adsb.SNAPSHOT_LOG_DIR)
+    logs.mkdir(parents=True)
+    (logs / "adsb-2026-09-01.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise OSError("locked")
+    monkeypatch.setattr(Path, "unlink", boom)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24))
+    assert adsb.snapshot_log_path("2026-09-24").exists()

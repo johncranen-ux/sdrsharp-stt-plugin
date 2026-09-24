@@ -539,3 +539,106 @@ def test_the_labels_export_rejects_invalid_day_format(client):
     assert client.get("/api/labels?day=not-a-date").status_code == 400
     # Valid format should not 400
     assert client.get("/api/labels?day=2026-08-20").status_code == 200
+
+
+def _seed_air(tmp_path, epoch, key="484161", text="Descend flight level seven zero"):
+    import datetime
+    import air_archive
+    t = datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
+    with air_archive.open_db(tmp_path / "conversations.db") as conn:
+        return air_archive.insert_transmission(conn, {
+            "t": t, "epoch": epoch, "channel": "121.200", "text": text, "numbers": [],
+            "callsign_clue": {"candidate": "KLM12B", "hex": key, "flight": "KLM12B",
+                              "type": "B738", "reg": "PH-BXH"},
+            "state": {"flight": "KLM12B", "t": "B738", "r": "PH-BXH", "airline": "KLM"},
+            "outcome_kind": "flight", "outcome_key": key, "badge": "callsign"})
+
+
+def test_air_flights_live_lists_recent_strips(client, tmp_path):
+    import time
+    _seed_air(tmp_path, time.time() - 30)
+    body = client.get("/api/air/flights").json()
+    assert body["live"] is True
+    assert [s["label"] for s in body["strips"]] == ["KLM12B"]
+    assert body["echo_enabled"] is False
+
+
+def test_air_flights_history_range(client, tmp_path):
+    _seed_air(tmp_path, 1_790_000_000.0)
+    body = client.get("/api/air/flights", params={
+        "from": "2026-09-21T00:00:00+00:00", "to": "2026-09-23T00:00:00+00:00"}).json()
+    assert body["live"] is False and len(body["strips"]) == 1
+
+
+def test_air_flights_rejects_a_bad_range(client):
+    assert client.get("/api/air/flights", params={"from": "nonsense"}).status_code == 400
+
+
+def test_air_thread_carries_targets_and_no_clip_without_captures(client, tmp_path):
+    import time
+    _seed_air(tmp_path, time.time() - 30)
+    rows = client.get("/api/air/thread", params={"key": "484161"}).json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["clip"] is None
+    assert {"key": "unassigned", "label": "Unassigned"} in rows[0]["targets"]
+
+
+def test_air_thread_says_when_all_is_well(client, tmp_path):
+    import time
+    _seed_air(tmp_path, time.time() - 30)
+    body = client.get("/api/air/thread", params={"key": "484161"}).json()
+    assert "error" in body and body["error"] is None
+
+
+def test_air_thread_degrades_when_the_archive_cannot_be_read(client, monkeypatch):
+    import air_archive
+
+    def _boom(*_a, **_k):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(air_archive, "transmissions", _boom)
+    response = client.get("/api/air/thread", params={"key": "484161"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rows"] == []
+    assert body["error"] == "the airband archive could not be read (OSError)"
+
+
+def test_moving_a_transmission_is_stored_and_shown(client, tmp_path):
+    import time
+    tid = _seed_air(tmp_path, time.time() - 30)
+    body = client.post("/api/air/moves", json={"transmission_id": tid,
+                                                "to_key": "unassigned"}).json()
+    assert body["move"]["from_key"] == "484161"
+    strips = client.get("/api/air/flights").json()["strips"]
+    assert [s["key"] for s in strips] == ["unassigned"]
+
+
+def test_moving_to_a_malformed_key_is_refused(client, tmp_path):
+    import time
+    tid = _seed_air(tmp_path, time.time() - 30)
+    assert client.post("/api/air/moves", json={"transmission_id": tid,
+                                                "to_key": "DROP TABLE"}).status_code == 400
+
+
+def test_moving_a_missing_transmission_is_404(client):
+    assert client.post("/api/air/moves", json={"transmission_id": 424242,
+                                                "to_key": "unassigned"}).status_code == 404
+
+
+def test_air_thread_looks_in_the_transmissions_own_capture_day(tmp_path):
+    """Review Focus 5: a transmission at 00:00:30 local belongs to that day's directory."""
+    import datetime
+    from webapp import clips
+    local = datetime.datetime(2026, 9, 24, 0, 0, 30).astimezone()
+    t = local.isoformat(timespec="seconds")
+    annotated = clips.annotate([{"time": t}], t, None)
+    assert annotated[0]["clip"] is None   # no captures root: no clip, and no crash
+    assert clips.turn_day(t, t) == "2026-09-24"
+
+
+def test_the_airband_tab_is_served(client):
+    html = client.get("/").text
+    assert 'data-tab="airband"' in html and 'id="airband"' in html
+    assert "/static/air.js" in html
+    assert client.get("/static/air.js").status_code == 200

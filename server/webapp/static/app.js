@@ -1768,6 +1768,7 @@ function showTab(name) {
   state.tab = name;
   $("dashboard").hidden = name !== "dashboard";
   $("conversations").hidden = name !== "conversations";
+  $("airband").hidden = name !== "airband";
   $("vessels").hidden = name !== "vessels";
   $("logs").hidden = name !== "logs";
   $("settings").hidden = name !== "settings";
@@ -1781,6 +1782,7 @@ function tick() {
   if (document.hidden) return;
   if (state.tab === "dashboard") refreshDashboard().catch(() => {});
   else if (state.tab === "conversations") refreshConversations().catch(() => {});
+  else if (state.tab === "airband") refreshAirband({ auto: true }).catch(() => {});
   else if (state.tab === "vessels") refreshVessels().catch(() => {});
   else if (state.tab === "logs") tabLog.pull().catch(() => {});
   // Settings is deliberately not polled -- see the module comment above refreshSettings --
@@ -1800,6 +1802,9 @@ function startPolling() {
   state.timers.push(setInterval(() => { if (state.tab === "conversations") tick(); }, 5000));
   state.timers.push(setInterval(() => { if (state.tab === "vessels") tick(); }, 20000));
   state.timers.push(setInterval(() => { if (state.tab === "logs") tick(); }, 2000));
+  // Airband: the proxy archives a transmission the moment it arrives, and stage 2 fills in
+  // the autopilot clue a minute later -- 15 s matches the ADS-B poll.
+  state.timers.push(setInterval(() => { if (state.tab === "airband") tick(); }, 15000));
 }
 
 function stopPolling() {

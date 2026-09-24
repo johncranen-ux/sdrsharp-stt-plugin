@@ -48,6 +48,7 @@ py -m webapp.set_password</pre>
     <nav class="tabs" role="tablist">
       <button class="tab" role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
       <button class="tab" role="tab" data-tab="conversations" aria-selected="false">Conversations</button>
+      <button class="tab" role="tab" data-tab="airband" aria-selected="false">Airband</button>
       <button class="tab" role="tab" data-tab="vessels" aria-selected="false">Vessels</button>
       <button class="tab" role="tab" data-tab="logs" aria-selected="false">Logs</button>
       <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
@@ -144,6 +145,24 @@ py -m webapp.set_password</pre>
       </div>
       <div id="conv-detail-body"></div>
     </section>
+  </main>
+
+  <main id="airband" class="view" hidden>
+    <div class="air-bar">
+      <button class="air-pill" type="button" data-range="live" aria-pressed="true">● Live</button>
+      <button class="air-pill" type="button" data-range="hour" aria-pressed="false">Last hour</button>
+      <label class="air-pick">Day/hour
+        <input id="air-day" type="date"> <input id="air-hour" type="number" min="0" max="23" step="1">
+      </label>
+      <span id="air-status" class="air-status"></span>
+    </div>
+    <p id="air-error" class="note note-port" hidden></p>
+    <div class="air-layout">
+      <ul id="air-strips" class="air-strips" aria-label="Flights"></ul>
+      <section id="air-thread" class="air-thread" aria-live="polite">
+        <p class="conv-empty">Pick a flight on the left.</p>
+      </section>
+    </div>
   </main>
 
   <main id="vessels" class="view" hidden>
@@ -262,5 +281,6 @@ py -m webapp.set_password</pre>
 </dialog>
 
 <script src="/static/app.js"></script>
+<script src="/static/air.js"></script>
 </body>
 </html>

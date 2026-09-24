@@ -384,3 +384,27 @@ class TestTheseAnchorsDoNotFireOnOrdinaryTraffic:
 
     def test_orange_does_not_swallow_a_runway_or_level(self):
         assert flight_identify.extract_callsign_candidate("Cleared to land, wind two seven zero.") is None
+
+
+def test_callsign_clue_names_the_matched_aircraft():
+    _seed("484161", "KLM12B")
+    clue = flight_identify.callsign_clue("Descend flight level seven zero, KLM one two bravo.")
+    assert clue == {"candidate": "KLM12B", "hex": "484161", "flight": "KLM12B",
+                    "type": "B738", "reg": None}
+
+
+def test_callsign_clue_keeps_a_heard_callsign_that_matched_nothing():
+    _seed("484161", "KLM12B")
+    clue = flight_identify.callsign_clue("KLM one four zero six, good day")
+    assert clue["candidate"] == "KLM1406" and clue["hex"] is None
+
+
+def test_callsign_clue_is_empty_for_chatter():
+    assert flight_identify.callsign_clue("ILS approach runway one eight center") == {
+        "candidate": None, "hex": None, "flight": None, "type": None, "reg": None}
+
+
+def test_identify_flight_output_is_unchanged():
+    _seed("484161", "KLM12B")
+    assert flight_identify.identify_flight("KLM one two bravo, good morning") == \
+        "[KLM12B/B738] KLM one two bravo, good morning"

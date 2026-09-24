@@ -242,6 +242,18 @@ SETTINGS: list[SettingSpec] = [
                             "arbitrarily. OFF: it could not be measured, because scoring "
                             "proximity needs each vessel's position AT THE TIME and a frozen "
                             "cache keeps only the latest fix."),
+    SettingSpec(key="AIR_ECHO_ENABLED", type=SettingType.BOOL, default="off",
+                group="Identification",
+                description="Let the autopilot clue (a selected altitude/heading changing to a "
+                            "spoken number) place Approach 4 transmissions under a flight. "
+                            "It is recorded either way; switch on only after bench_air_echo.py "
+                            "passes its three conditions."),
+    SettingSpec(key="ADSB_SNAPSHOT_KEEP_DAYS", type=SettingType.INT, default="14",
+                group="Identification", minimum=1,
+                description="Days of ADS-B snapshot log (logs/adsb-YYYY-MM-DD.jsonl, about "
+                            "50-90 MB a day) to keep. Older day files are deleted when a new "
+                            "day's file opens. The autopilot clue needs only the last few "
+                            "minutes; the rest is for re-measuring it."),
 
     # ---- Ports ---------------------------------------------------------------
     SettingSpec(key="PROXY_PORT", type=SettingType.INT, default="9000", group="Ports",

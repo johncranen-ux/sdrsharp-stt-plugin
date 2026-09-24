@@ -59,3 +59,10 @@ def test_conversations_keep_is_in_the_catalogue_and_cannot_be_set_to_zero():
     with pytest.raises(ValueError):
         validate_value(spec, "0")
     assert validate_value(spec, "150") == "150"
+
+
+def test_adsb_snapshot_keep_days_is_in_the_catalogue_and_cannot_be_set_to_zero():
+    spec = BY_KEY["ADSB_SNAPSHOT_KEEP_DAYS"]
+    assert spec.type is SettingType.INT and spec.default == "14" and spec.minimum == 1
+    with pytest.raises(ValueError):
+        validate_value(spec, "0")
