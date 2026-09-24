@@ -294,6 +294,25 @@ def _log_unmatched(candidate: str) -> None:
           f"same-airline nearby: {near or 'none'}", flush=True)
 
 
+def callsign_clue(text: str) -> dict:
+    """What the callsign path found, as data rather than a prefixed string.
+
+    flight_attribution stores this per transmission. `candidate` without `hex` is a callsign
+    that was heard but is not in ADS-B -- a different fact from "no callsign was heard".
+    Never logs: identify_flight owns the unmatched-candidate line, and the same transmission
+    goes through both.
+    """
+    candidate = extract_callsign_candidate(text)
+    result = match_flight(candidate) if candidate else None
+    return {
+        "candidate": candidate,
+        "hex": result.get("hex") if result else None,
+        "flight": result.get("flight") if result else None,
+        "type": result.get("t") if result else None,
+        "reg": result.get("r") if result else None,
+    }
+
+
 def identify_flight(text: str) -> str:
     """The one call site Task 3 needs: identify and prefix, or return text unchanged.
 
@@ -301,11 +320,10 @@ def identify_flight(text: str) -> str:
     yields a candidate at all and must not print anything, or the console would drown in
     noise the way over-eager logging elsewhere in this project has before.
     """
-    candidate = extract_callsign_candidate(text)
-    if candidate is None:
+    clue = callsign_clue(text)
+    if clue["candidate"] is None:
         return text
-    result = match_flight(candidate)
-    if result is None:
-        _log_unmatched(candidate)
+    if clue["hex"] is None:
+        _log_unmatched(clue["candidate"])
         return text
-    return format_flight_for_plugin(result, text)
+    return format_flight_for_plugin({"flight": clue["flight"], "t": clue["type"]}, text)
