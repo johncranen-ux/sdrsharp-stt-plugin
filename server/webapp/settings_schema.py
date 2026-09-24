@@ -287,7 +287,7 @@ SETTINGS: list[SettingSpec] = [
                             "STT_BACKEND=whisper_cpp. localhost reaches WSL2 from Windows."),
 
     # ---- The AIS station -----------------------------------------------------
-    SettingSpec(key="AIS_STATION_HOST", type=SettingType.TEXT, default="192.168.2.1",
+    SettingSpec(key="AIS_STATION_HOST", type=SettingType.TEXT, default="192.168.2.52",
                 group="AIS station", exported=False,
                 description="The PC running AIS-catcher. Its own box, on a DHCP reservation."),
     SettingSpec(key="AIS_STATION_HTTP_PORT", type=SettingType.INT, default="8100",
