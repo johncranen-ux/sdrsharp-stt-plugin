@@ -1,0 +1,188 @@
+/* The Airband tab: Approach 4 transmissions grouped per flight.
+ *
+ * Left: strips, one per flight (plus Needs review, unknown callsigns and Unassigned).
+ * Right: the selected strip's transmissions, each with its clue badge, audio and "move to".
+ * Uses api(), element(), $() and renderTurnAudio() from app.js.
+ */
+"use strict";
+
+const airState = { range: "live", day: "", hour: "", selected: null };
+
+const AIR_BADGES = {
+  confirmed: ["✔✔", "callsign and autopilot agree"],
+  callsign: ["✔", "callsign heard"],
+  echo: ["✔", "autopilot change only"],
+  conflict: ["⚠", "callsign and autopilot disagree"],
+  unknown: ["?", "callsign heard, not in ADS-B"],
+  none: ["—", "no clue"],
+  moved: ["✎", "moved by hand"],
+};
+
+function airRangeParams() {
+  if (airState.range === "live") return "";
+  const now = new Date();
+  let from;
+  let to;
+  if (airState.range === "hour") {
+    to = now;
+    from = new Date(now.getTime() - 3600 * 1000);
+  } else {
+    const [y, m, d] = airState.day.split("-").map(Number);
+    from = new Date(y, m - 1, d, Number(airState.hour) || 0, 0, 0);
+    to = new Date(from.getTime() + 3600 * 1000);
+  }
+  const iso = (dt) => {
+    const off = -dt.getTimezoneOffset();
+    const sign = off >= 0 ? "+" : "-";
+    const pad = (n) => String(Math.floor(Math.abs(n))).padStart(2, "0");
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T` +
+      `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` +
+      `${sign}${pad(off / 60)}:${pad(off % 60)}`;
+  };
+  return `from=${encodeURIComponent(iso(from))}&to=${encodeURIComponent(iso(to))}`;
+}
+
+function airFeet(value) {
+  if (value === null || value === undefined || value === "ground") return value || "—";
+  return value >= 10000 ? `FL${Math.round(value / 100)}` : `${Math.round(value)}`;
+}
+
+function airStateLine(s) {
+  if (!s) return "";
+  const parts = [];
+  if (s.alt_baro !== undefined && s.alt_baro !== null) {
+    parts.push(s.nav_altitude_mcp ? `${airFeet(s.alt_baro)} → set ${airFeet(s.nav_altitude_mcp)}`
+                                  : airFeet(s.alt_baro));
+  }
+  if (typeof s.nav_heading === "number") parts.push(`hdg ${String(Math.round(s.nav_heading)).padStart(3, "0")}`);
+  return parts.join(" · ");
+}
+
+function airAgo(nowEpoch, epoch) {
+  return elapsed(nowEpoch - epoch);
+}
+
+function renderAirStrips(body) {
+  const list = $("air-strips");
+  list.replaceChildren();
+  if (!body.strips.length) {
+    list.append(element("li", "conv-empty",
+      body.live ? "Nothing on Approach 4 in the last 15 minutes." : "Nothing in this period."));
+    return;
+  }
+  for (const strip of body.strips) {
+    const li = element("li", `air-strip air-${strip.kind}`);
+    li.tabIndex = 0;
+    li.setAttribute("aria-selected", String(strip.key === airState.selected));
+    const head = element("div", "air-strip-head");
+    head.append(element("b", "", strip.kind === "unknown" ? `? “${strip.label}”` : strip.label));
+    const meta = [strip.airline, strip.type].filter(Boolean).join(" · ");
+    if (meta) head.append(element("span", "air-meta", ` ${meta}`));
+    head.append(element("span", "air-ago", airAgo(body.now, strip.last_epoch)));
+    li.append(head);
+    const line = strip.kind === "unknown" ? `heard ${strip.count}× · not in ADS-B`
+      : [airStateLine(strip.state), `${strip.count} tx`].filter(Boolean).join(" · ");
+    li.append(element("div", "air-sub", line));
+    const pick = () => { airState.selected = strip.key; refreshAirband().catch(() => {}); };
+    li.addEventListener("click", pick);
+    li.addEventListener("keydown", (e) => { if (e.key === "Enter") pick(); });
+    list.append(li);
+  }
+}
+
+async function moveAirRow(row, toKey) {
+  await api("/api/air/moves", { method: "POST",
+    body: JSON.stringify({ transmission_id: row.id, to_key: toKey }) });
+  await refreshAirband();
+}
+
+function renderAirThread(strip, rows) {
+  const box = $("air-thread");
+  box.replaceChildren();
+  if (!strip) {
+    box.append(element("p", "conv-empty", "Pick a flight on the left."));
+    return;
+  }
+  const head = element("p", "air-thread-head");
+  head.append(element("b", "", strip.label));
+  const extra = [strip.airline, strip.type, strip.reg, airStateLine(strip.state)].filter(Boolean);
+  if (extra.length) head.append(element("span", "air-meta", ` · ${extra.join(" · ")}`));
+  box.append(head);
+
+  for (const row of rows) {
+    const [mark, word] = AIR_BADGES[row.badge] || AIR_BADGES.none;
+    const line = element("div", `air-row air-badge-${row.badge}`);
+    line.append(element("span", "air-time", row.t.slice(11, 19)));
+    const badge = element("span", "air-badge", mark);
+    badge.title = `${word}: ${row.evidence}`;
+    line.append(badge);
+    line.append(element("span", "air-text", row.text));
+    const controls = element("span", "air-controls");
+    const audio = renderTurnAudio(row);
+    if (audio) controls.append(audio);
+    const select = document.createElement("select");
+    select.className = "air-move";
+    select.setAttribute("aria-label", "Move this transmission to another flight");
+    select.append(new Option("move to…", ""));
+    for (const target of row.targets) select.append(new Option(target.label, target.key));
+    select.addEventListener("change", () => {
+      if (select.value) moveAirRow(row, select.value).catch((e) => showAirError(e.message));
+    });
+    controls.append(select);
+    line.append(controls);
+    box.append(line);
+  }
+}
+
+function showAirError(message) {
+  const note = $("air-error");
+  note.textContent = message || "";
+  note.hidden = !message;
+}
+
+function renderAirStatus(body) {
+  const feed = body.adsb;
+  const feedText = !feed ? "ADS-B: proxy not answering"
+    : feed.consecutive_failures ? `ADS-B: failing (${feed.consecutive_failures})`
+    : `ADS-B: OK · ${feed.last_count ?? "?"} aircraft`;
+  $("air-status").textContent =
+    `${feedText} · autopilot clue: ${body.echo_enabled ? "on" : "recording, not shown"}`;
+}
+
+async function refreshAirband() {
+  const params = airRangeParams();
+  const body = await api(`/api/air/flights${params ? `?${params}` : ""}`);
+  showAirError(body.error);
+  renderAirStatus(body);
+  if (airState.selected && !body.strips.some((s) => s.key === airState.selected)) {
+    airState.selected = null;
+  }
+  renderAirStrips(body);
+  const strip = body.strips.find((s) => s.key === airState.selected);
+  if (!strip) {
+    renderAirThread(null, []);
+    return;
+  }
+  const extra = params ? `&${params}` : "";
+  const thread = await api(`/api/air/thread?key=${encodeURIComponent(strip.key)}${extra}`);
+  renderAirThread(strip, thread.rows);
+}
+
+function setAirRange(range) {
+  airState.range = range;
+  for (const pill of document.querySelectorAll(".air-pill")) {
+    pill.setAttribute("aria-pressed", String(pill.dataset.range === range));
+  }
+  refreshAirband().catch((e) => showAirError(e.message));
+}
+
+for (const pill of document.querySelectorAll(".air-pill")) {
+  pill.addEventListener("click", () => setAirRange(pill.dataset.range));
+}
+for (const id of ["air-day", "air-hour"]) {
+  $(id).addEventListener("change", () => {
+    airState.day = $("air-day").value;
+    airState.hour = $("air-hour").value;
+    if (airState.day) setAirRange("pick");
+  });
+}

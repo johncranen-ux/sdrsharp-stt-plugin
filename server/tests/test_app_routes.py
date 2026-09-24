@@ -614,3 +614,10 @@ def test_air_thread_looks_in_the_transmissions_own_capture_day(tmp_path):
     annotated = clips.annotate([{"time": t}], t, None)
     assert annotated[0]["clip"] is None   # no captures root: no clip, and no crash
     assert clips.turn_day(t, t) == "2026-09-24"
+
+
+def test_the_airband_tab_is_served(client):
+    html = client.get("/").text
+    assert 'data-tab="airband"' in html and 'id="airband"' in html
+    assert "/static/air.js" in html
+    assert client.get("/static/air.js").status_code == 200
