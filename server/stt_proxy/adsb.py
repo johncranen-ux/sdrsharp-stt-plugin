@@ -196,6 +196,7 @@ def poll_once(lat: float, lon: float, dist_nm: float, fetch=None,
 SNAPSHOT_LOG_DIR = Path(os.environ.get("ADSB_SNAPSHOT_DIR", "").strip()
                         or Path(__file__).resolve().parent.parent / "logs")
 
+
 def _resolve_keep_days() -> int:
     """Days of snapshot log to keep, never below 1. A bad value falls back, never raises.
 
