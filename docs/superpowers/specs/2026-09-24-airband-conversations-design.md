@@ -1,7 +1,7 @@
 # Airband conversations (Schiphol Approach 4) — design
 
 **Date:** 2026-09-24
-**Status:** DESIGN AGREED in brainstorming 2026-09-24, awaiting spec review.
+**Status:** IMPLEMENTED 2026-09-24 on feat/airband-conversations, autopilot clue in shadow mode; deploy + live check pending; gate run due after 3-5 days of traffic.
 **Related:** `2026-09-08-airband-flight-identification-design.md` (the per-transmission
 `[FLIGHT/TYPE]` tag this builds on), `2026-09-10-airband-identification-measurement-design.md`
 (the labelled 09-10 hour and `bench_flight_identify.py`), `2026-09-11-airband-prompt-biasing-design.md`
@@ -225,11 +225,11 @@ If any fails, it stays off and the result is recorded as a measured negative wit
 ## Success criteria for this release
 
 - [ ] `adsb.py` keeps the autopilot fields and writes a daily snapshot log (deployed first).
-- [ ] Approach 4 transmissions are stored with a stable id, full timestamp, both clues and outcome.
-- [ ] The Airband tab shows strips and conversations, live and for a chosen past hour/day.
-- [ ] ▶ plays the captured clip where one exists.
-- [ ] Move-to works, is stored in `air_moves`, and survives reload and proxy restart.
-- [ ] 09-10 regression replay reproduces 43.8% recall / 7 wrong exactly with the echo clue off.
+- [x] Approach 4 transmissions are stored with a stable id, full timestamp, both clues and outcome.
+- [x] The Airband tab shows strips and conversations, live and for a chosen past hour/day.
+- [x] ▶ plays the captured clip where one exists.
+- [x] Move-to works, is stored in `air_moves`, and survives reload and proxy restart.
+- [x] 09-10 regression replay reproduces 43.8% recall / 7 wrong exactly with the echo clue off.
 - [ ] Full test suite green; CI green.
-- [ ] `bench_air_echo.py` exists and runs on the recorded days (the switch-on decision itself
+- [x] `bench_air_echo.py` exists and runs on the recorded days (the switch-on decision itself
       comes after 3–5 days and is not a release blocker).
