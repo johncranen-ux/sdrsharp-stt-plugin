@@ -519,3 +519,15 @@ def test_the_real_transmission_with_i_m_after_the_callsign():
 ])
 def test_an_apostrophe_word_is_never_read_as_a_letter(text, expected):
     assert flight_identify.extract_callsign_candidate(text) == expected
+
+
+def test_kelom_is_a_known_garbling_of_klm():
+    """Seen twice in real traffic, both KLM: 2026-09-08 "KELOM one eight eight, we are able for
+    the right turn." and 2026-09-24 17:46:11 "One three four three seven five, KELOM 1299."
+    (KLM1299 in range, identified 73 s earlier). Listed explicitly, like kalm/rklm/klmx --
+    "klm" is too short for the fuzzy path (kelom scores 75 against it, threshold 85)."""
+    _seed("485aaa", "KLM1299", t="B739")
+    assert flight_identify.identify_flight("One three four three seven five, KELOM 1299.") == \
+        "[KLM1299/B739] One three four three seven five, KELOM 1299."
+    assert flight_identify.extract_callsign_candidate(
+        "KELOM one eight eight, we are able for the right turn.") == "KLM188"

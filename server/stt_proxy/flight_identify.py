@@ -26,6 +26,7 @@ from stt_proxy.corrections import _decode_spoken_word
 AIRLINE_TELEPHONY: dict[str, str] = {
     "klm": "KLM", "kalm": "KLM", "rklm": "KLM", "klmx": "KLM",
     "llm": "KLM", "lem": "KLM",
+    "kelom": "KLM",   # 2026-09-08 and 2026-09-24, both KLM (see test_kelom_is_a_known_garbling_of_klm)
     "transavia": "TRA",
     "american": "AAL",
     "united": "UAL",
