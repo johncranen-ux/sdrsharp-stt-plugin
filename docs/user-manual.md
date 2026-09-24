@@ -675,7 +675,12 @@ apply:
   the effective assignment.
 
 The ADS-B snapshots the echo clue is checked against are appended continuously to
-`logs/adsb-YYYY-MM-DD.jsonl`, one line per successful poll, independent of the database.
+`logs/adsb-YYYY-MM-DD.jsonl`, one line per successful poll, independent of the database. At the
+default 15 s poll that is roughly **50–90 MB a day**, so the files are pruned: each time a new
+day's file opens, day files older than `ADSB_SNAPSHOT_KEEP_DAYS` (default **14**, minimum 1;
+**Settings → Identification**) are deleted. Only files named exactly `adsb-YYYY-MM-DD.jsonl` are
+ever deleted — the 09-10 measurement side-car `adsb-snapshots-2026-09-10.jsonl` and anything
+else in `logs/` is left alone.
 
 ---
 
@@ -926,8 +931,10 @@ On startup the proxy prints either `Flight identification: adsb.fi, ...` or
 | `ADSB_LON` | `4.3` | Poll centre longitude |
 | `ADSB_DIST_NM` | `40` | Poll radius, nautical miles |
 | `ADSB_POLL_SEC` | `15` | Seconds between polls; values under 5 are raised to 5 |
+| `ADSB_SNAPSHOT_KEEP_DAYS` | `14` | Days of `logs/adsb-YYYY-MM-DD.jsonl` snapshot log to keep (~50–90 MB/day); values under 1 are raised to 1 |
 
-A malformed value for `ADSB_LAT`, `ADSB_LON`, `ADSB_DIST_NM` or `ADSB_POLL_SEC` falls back to
+A malformed value for `ADSB_LAT`, `ADSB_LON`, `ADSB_DIST_NM`, `ADSB_POLL_SEC` or
+`ADSB_SNAPSHOT_KEEP_DAYS` falls back to
 its default rather than crashing the proxy at startup — the same guarantee `AISHUB_POLL_SEC`
 gives, since this module is imported unconditionally whether or not you use airband at all.
 

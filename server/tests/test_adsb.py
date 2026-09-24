@@ -358,3 +358,74 @@ def test_a_log_write_failure_does_not_fail_the_poll(monkeypatch):
         raise OSError("disk full")
     monkeypatch.setattr(adsb, "_append_snapshot_log", boom)
     assert adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=B) == 1
+
+
+def _day_epoch(day: int, hour: int = 11) -> float:
+    return datetime.datetime(2026, 9, day, hour, 0, 0).astimezone().timestamp()
+
+
+def test_the_log_fallback_parses_a_day_file_once_until_it_grows(monkeypatch):
+    now = _day_epoch(24)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    adsb.reset_snapshot_ring()
+    parses = []
+    real = adsb._parse_log_file
+    monkeypatch.setattr(adsb, "_parse_log_file", lambda p: parses.append(p) or real(p))
+    assert len(adsb.snapshots_between(now - 5, now + 5)) == 1
+    assert len(adsb.snapshots_between(now - 5, now + 5)) == 1
+    assert len(parses) == 1
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now + 15)
+    with adsb._ring_lock:
+        adsb._ring.clear()              # the ring only, so the parse cache survives
+    got = adsb.snapshots_between(now - 5, now + 20)
+    assert [round(s["t"] - now) for s in got] == [0, 15]
+    assert len(parses) == 2
+
+
+def test_resolve_keep_days(monkeypatch):
+    monkeypatch.delenv("ADSB_SNAPSHOT_KEEP_DAYS", raising=False)
+    assert adsb._resolve_keep_days() == 14
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "3")
+    assert adsb._resolve_keep_days() == 3
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "fourteen")
+    assert adsb._resolve_keep_days() == 14
+    monkeypatch.setenv("ADSB_SNAPSHOT_KEEP_DAYS", "0")
+    assert adsb._resolve_keep_days() == 1
+
+
+def test_opening_a_new_day_file_prunes_only_old_day_files(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 14)
+    logs = Path(adsb.SNAPSHOT_LOG_DIR)
+    logs.mkdir(parents=True)
+    old = logs / "adsb-2026-09-09.jsonl"          # 15 days before the 24th
+    edge = logs / "adsb-2026-09-10.jsonl"         # exactly 14 days: kept
+    recent = logs / "adsb-2026-09-20.jsonl"
+    sidecar = logs / "adsb-snapshots-2026-09-10.jsonl"
+    other = logs / "adsb-2026-09-01.jsonl.bak"
+    for f in (old, edge, recent, sidecar, other):
+        f.write_text("{}\n", encoding="utf-8")
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24))
+    assert not old.exists()
+    assert edge.exists() and recent.exists() and sidecar.exists() and other.exists()
+
+
+def test_appending_to_an_existing_day_file_does_not_prune(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 1)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24, 10))
+    old = Path(adsb.SNAPSHOT_LOG_DIR) / "adsb-2026-09-01.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24, 11))
+    assert old.exists()
+
+
+def test_a_prune_failure_does_not_fail_the_write(monkeypatch):
+    monkeypatch.setattr(adsb, "ADSB_SNAPSHOT_KEEP_DAYS", 1)
+    logs = Path(adsb.SNAPSHOT_LOG_DIR)
+    logs.mkdir(parents=True)
+    (logs / "adsb-2026-09-01.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise OSError("locked")
+    monkeypatch.setattr(Path, "unlink", boom)
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=_day_epoch(24))
+    assert adsb.snapshot_log_path("2026-09-24").exists()

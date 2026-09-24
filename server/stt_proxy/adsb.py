@@ -15,6 +15,7 @@ import collections
 import datetime
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -195,6 +196,21 @@ def poll_once(lat: float, lon: float, dist_nm: float, fetch=None,
 SNAPSHOT_LOG_DIR = Path(os.environ.get("ADSB_SNAPSHOT_DIR", "").strip()
                         or Path(__file__).resolve().parent.parent / "logs")
 
+def _resolve_keep_days() -> int:
+    """Days of snapshot log to keep, never below 1. A bad value falls back, never raises.
+
+    The "14" is a literal so test_catalogue_defaults can pin it against the settings catalogue.
+    """
+    try:
+        wanted = int(os.environ.get("ADSB_SNAPSHOT_KEEP_DAYS", "14"))
+    except (TypeError, ValueError):
+        wanted = 14
+    return max(wanted, 1)
+
+
+# ~50-90 MB a day at the 15 s default poll, so old day files are pruned when a new one opens.
+ADSB_SNAPSHOT_KEEP_DAYS = _resolve_keep_days()
+
 # 5 minutes at the 15 s default -- stage 2 needs t-10 s .. t+60 s, plus slack for a slow loop.
 _RING_LEN = 20
 _ring_lock = threading.Lock()
@@ -206,10 +222,37 @@ def reset_snapshot_ring() -> None:
     """Forget every in-memory snapshot. What a restart does; tests call it for isolation."""
     with _ring_lock:
         _ring.clear()
+    with _log_cache_lock:
+        _log_cache.clear()
 
 
 def snapshot_log_path(day: str) -> Path:
     return Path(SNAPSHOT_LOG_DIR) / f"adsb-{day}.jsonl"
+
+
+_DAY_LOG_NAME = re.compile(r"adsb-(\d{4}-\d{2}-\d{2})\.jsonl")
+
+
+def _prune_snapshot_logs(today: datetime.date) -> None:
+    """Delete adsb-YYYY-MM-DD.jsonl files more than ADSB_SNAPSHOT_KEEP_DAYS before `today`.
+
+    Only that exact name: the 09-10 side-car (adsb-snapshots-2026-09-10.jsonl) and anything
+    else in the logs directory is never touched. Every failure is swallowed.
+    """
+    cutoff = today - datetime.timedelta(days=ADSB_SNAPSHOT_KEEP_DAYS)
+    try:
+        entries = list(Path(SNAPSHOT_LOG_DIR).iterdir())
+    except OSError:
+        return
+    for path in entries:
+        match = _DAY_LOG_NAME.fullmatch(path.name)
+        if not match:
+            continue
+        try:
+            if datetime.date.fromisoformat(match.group(1)) < cutoff:
+                path.unlink()
+        except (ValueError, OSError):
+            continue
 
 
 def _append_snapshot_log(snapshot: dict) -> None:
@@ -217,10 +260,13 @@ def _append_snapshot_log(snapshot: dict) -> None:
     stamp = datetime.datetime.fromtimestamp(snapshot["t"]).astimezone()
     path = snapshot_log_path(stamp.date().isoformat())
     path.parent.mkdir(parents=True, exist_ok=True)
+    opening_new_day = not path.exists()
     line = json.dumps({"t": stamp.isoformat(), "aircraft": snapshot["aircraft"]},
                       ensure_ascii=False)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+    if opening_new_day:
+        _prune_snapshot_logs(stamp.date())
 
 
 def _record_snapshot(aircraft: list[dict], now: float) -> None:
@@ -237,24 +283,52 @@ def _record_snapshot(aircraft: list[dict], now: float) -> None:
             _log_warned = True
 
 
+# path -> ((size, mtime_ns), parsed snapshots). A stage-2 pass after a restart asks for the
+# same day once per pending row; this parses the file once and again only when it has grown.
+_LOG_CACHE_MAX = 4
+_log_cache_lock = threading.Lock()
+_log_cache: dict[Path, tuple[tuple[int, int], list[dict]]] = {}
+
+
+def _parse_log_file(path: Path) -> list[dict]:
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            t = datetime.datetime.fromisoformat(row["t"]).timestamp()
+        except (ValueError, KeyError, TypeError):
+            continue
+        out.append({"t": t, "aircraft": row.get("aircraft") or []})
+    return out
+
+
+def _log_day(path: Path) -> list[dict]:
+    """The parsed snapshots in one day file, from the cache while the file is unchanged."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    stamp = (stat.st_size, stat.st_mtime_ns)
+    with _log_cache_lock:
+        hit = _log_cache.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    parsed = _parse_log_file(path)
+    with _log_cache_lock:
+        if len(_log_cache) >= _LOG_CACHE_MAX and path not in _log_cache:
+            _log_cache.clear()
+        _log_cache[path] = (stamp, parsed)
+    return parsed
+
+
 def _snapshots_from_log(t0: float, t1: float) -> list[dict]:
     days = {datetime.datetime.fromtimestamp(t).astimezone().date().isoformat()
             for t in (t0, t1)}
     out = []
     for day in sorted(days):
-        path = snapshot_log_path(day)
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-                t = datetime.datetime.fromisoformat(row["t"]).timestamp()
-            except (ValueError, KeyError, TypeError):
-                continue
-            if t0 <= t <= t1:
-                out.append({"t": t, "aircraft": row.get("aircraft") or []})
+        out.extend(s for s in _log_day(snapshot_log_path(day)) if t0 <= s["t"] <= t1)
     return sorted(out, key=lambda s: s["t"])
 
 
