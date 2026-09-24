@@ -35,11 +35,21 @@ def _is_flight_key(key: str) -> bool:
     return key not in ("unassigned", "review") and not key.startswith("heard:")
 
 
+def _has_evidence(row: dict) -> bool:
+    """False when stage 2 never ran or had no ADS-B to look at -- an outage, not a negative."""
+    status = (row.get("echo_clue") or {}).get("status")
+    return status is not None and status != "no_snapshots"
+
+
 def gate(rows: list[dict]) -> dict:
     overlap = agree = 0
     moved = echo_right = cs_right = 0
     unassigned = recovers = 0
+    excluded = 0
     for row in rows:
+        if not _has_evidence(row):
+            excluded += 1
+            continue
         cs = row.get("callsign_clue") or {}
         echo_hex = _echo_hex(row)
         if cs.get("hex") and echo_hex:
@@ -68,7 +78,7 @@ def gate(rows: list[dict]) -> dict:
     return {"overlap": overlap, "agree": agree, "agreement": agreement, "moved": moved,
             "echo_right_on_moves": echo_right, "callsign_right_on_moves": cs_right,
             "unassigned": unassigned, "echo_recovers": recovers, "recovery": recovery,
-            "passes": not reasons, "reasons": reasons}
+            "excluded_no_evidence": excluded, "passes": not reasons, "reasons": reasons}
 
 
 def main(argv=None) -> int:
@@ -89,6 +99,7 @@ def main(argv=None) -> int:
     result = gate(checked)
     print(f"{len(rows)} transmissions, {len(checked)} with stage 2 done   db: {db}")
     print(f"echo status: {statuses}")
+    print(f"excluded (no ADS-B evidence): {result['excluded_no_evidence']}")
     print(f"1. agreement  {result['agree']}/{result['overlap']} = {result['agreement']}")
     print(f"2. moves      echo {result['echo_right_on_moves']} vs callsign "
           f"{result['callsign_right_on_moves']} of {result['moved']}")
