@@ -494,3 +494,28 @@ def test_identify_flight_tags_a_repaired_callsign():
     _seed("484abc", "KLM604", t="E190")
     assert flight_identify.identify_flight("Level four zero, QNH six zero four.") == \
         "[KLM604/E190] Level four zero, QNH six zero four."
+
+
+# -- an apostrophe word ends a callsign ---------------------------------------------------
+#
+# 2026-09-24 17:04:30: "1575, QNH three seven X, I'm back." -- KLM37X (485779) in range, the
+# QNH repair live, yet nothing was tagged: the tokenizer split "I'm" into "i" + "m" and the
+# suffix loop read "i" as the letter India, giving KLM37XI. Stopping at punctuation instead
+# was measured and rejected: Whisper puts commas INSIDE callsigns ("KLM, six six", "Orange 3,
+# Papa X-ray") and 29 of 2,155 logged candidates would have broken. Keeping an apostrophe word
+# whole changed 2 of 2,155, both for the better ("three o'clock" no longer gives KLM3O).
+
+def test_the_real_transmission_with_i_m_after_the_callsign():
+    _seed("485779", "KLM37X")
+    clue = flight_identify.callsign_clue("1575, QNH three seven X, I'm back.")
+    assert clue["flight"] == "KLM37X" and clue["repaired_from"] == "QNH"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("KLM three seven X, I'm back", "KLM37X"),
+    ("KLM three seven X, I'll call you back", "KLM37X"),
+    ("traffic is KLM three o'clock", "KLM3"),
+    ("KLM three seven X, I’m back", "KLM37X"),   # typographic apostrophe
+])
+def test_an_apostrophe_word_is_never_read_as_a_letter(text, expected):
+    assert flight_identify.extract_callsign_candidate(text) == expected

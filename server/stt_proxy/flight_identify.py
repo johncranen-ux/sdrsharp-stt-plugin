@@ -185,7 +185,9 @@ def extract_callsign_candidate(text: str) -> str | None:
     for phrase, joined in _TELEPHONY_PHRASES.items():
         lowered = lowered.replace(phrase, joined)
     lowered = _unglue_designators(lowered)
-    words = re.findall(r"[A-Za-z0-9]+", lowered)
+    # An apostrophe word stays whole ("i'm", "o'clock"): split, its first letter would be read
+    # as a phonetic suffix -- "three seven X, I'm back" gave KLM37XI (2026-09-24 17:04:30).
+    words = re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)*", lowered)
     for i, word in enumerate(words):
         code = _find_airline_anchor(word)
         if code is None:
