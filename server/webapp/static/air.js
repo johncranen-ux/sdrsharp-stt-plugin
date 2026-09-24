@@ -20,6 +20,28 @@ const AIR_BADGES = {
   moved: ["✎", "moved by hand"],
 };
 
+const ADSBFI_GLOBE_URL = "https://globe.adsb.fi/";
+
+/** The callsign linked to the aircraft on globe.adsb.fi, or null when there is no ICAO hex.
+ *
+ * The Airband counterpart of app.js's vesselFinderLink. `day` (YYYY-MM-DD, UTC) opens that day's
+ * recorded track rather than the aircraft's position now -- what a past hour is being
+ * reviewed for. Six hex digits only: a strip key can also be "review", "unassigned" or
+ * "heard:...", and none of those names an aircraft. */
+function adsbFiLink(hex, text, day) {
+  const id = String(hex || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{6}$/.test(id)) return null;
+  const link = element("a", "vf-link", text || id);
+  let url = `${ADSBFI_GLOBE_URL}?icao=${encodeURIComponent(id)}`;
+  if (day && /^\d{4}-\d{2}-\d{2}$/.test(day)) url += `&showTrace=${day}`;
+  link.href = url;
+  link.target = "_blank";
+  // Same as vesselFinderLink: no reason to tell the outside site which local page sent us.
+  link.rel = "noopener noreferrer";
+  link.title = `Open ${text || id} (${id}) on globe.adsb.fi` + (url.includes("showTrace") ? `, track of ${day}` : "");
+  return link;
+}
+
 function airRangeParams() {
   if (airState.range === "live") return "";
   const now = new Date();
@@ -106,7 +128,14 @@ function renderAirThread(strip, rows) {
     return;
   }
   const head = element("p", "air-thread-head");
-  head.append(element("b", "", strip.label));
+  // tar1090's showTrace takes a UTC date (README-query.md), so it comes from the epoch, not from
+  // last_t's local date -- 00:30 in Amsterdam is still the previous day's trace.
+  const traceDay = airState.range === "live" || !strip.last_epoch ? null
+    : new Date(strip.last_epoch * 1000).toISOString().slice(0, 10);
+  const link = strip.kind === "flight" ? adsbFiLink(strip.key, strip.label, traceDay) : null;
+  const name = element("b");
+  name.append(link || document.createTextNode(strip.label));
+  head.append(name);
   const extra = [strip.airline, strip.type, strip.reg, airStateLine(strip.state)].filter(Boolean);
   if (extra.length) head.append(element("span", "air-meta", ` · ${extra.join(" · ")}`));
   box.append(head);
