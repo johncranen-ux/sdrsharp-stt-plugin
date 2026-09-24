@@ -56,7 +56,8 @@ def strips(rows: list[dict], now: float, live: bool) -> list[dict]:
         g["count"] += 1
         g["last_epoch"] = r["epoch"]
         g["last_t"] = r["t"]
-        if r.get("state"):
+        if r.get("state") and not r.get("moved"):
+            # A moved row still carries the state of the aircraft it was moved away from.
             g["state"] = r["state"]
     out = []
     for g in groups.values():
@@ -109,8 +110,9 @@ def move_targets(rows: list[dict], epoch: float) -> list[dict]:
         key = r["effective_key"]
         if _kind_of(key) != "flight" or abs(r["epoch"] - epoch) > MOVE_TARGET_WINDOW_S:
             continue
-        if key not in labels or r.get("state"):
-            labels[key] = _label(key, r.get("state"))
+        state = None if r.get("moved") else r.get("state")
+        if key not in labels or state:
+            labels[key] = _label(key, state)
     out = [{"key": k, "label": v} for k, v in labels.items()]
     out.append({"key": "unassigned", "label": "Unassigned"})
     return out

@@ -44,6 +44,39 @@ def test_a_moved_row_counts_where_it_was_moved_to():
     assert got[0]["count"] == 2 and got[0]["label"] == "DAL73"
 
 
+def test_a_moved_row_never_lends_its_old_aircraft_to_its_new_strip():
+    # A KLM12B row moved to bbbbbb still carries KLM12B's stage-1 state.
+    rows = [row(1, NOW - 30, "bbbbbb", state=DAL),
+            row(2, NOW - 10, "bbbbbb", moved=True, state=KLM)]
+    got = air_view.strips(rows, NOW, live=True)
+    assert got[0]["label"] == "DAL73" and got[0]["airline"] == "Delta"
+    assert got[0]["type"] == "B763" and got[0]["state"] == DAL
+
+
+def test_a_strip_with_only_moved_rows_falls_back_to_its_key():
+    rows = [row(1, NOW - 10, "bbbbbb", moved=True, state=KLM)]
+    got = air_view.strips(rows, NOW, live=True)
+    assert got[0]["label"] == "BBBBBB" and got[0]["state"] is None
+    assert got[0]["airline"] is None and got[0]["type"] is None and got[0]["reg"] is None
+
+
+def test_a_row_moved_to_unassigned_lends_it_nothing():
+    rows = [row(1, NOW - 10, "unassigned", kind="unassigned", badge="none", moved=True,
+                state=KLM)]
+    got = air_view.strips(rows, NOW, live=True)
+    assert got[0]["label"] == "Unassigned" and got[0]["state"] is None
+    assert got[0]["airline"] is None and got[0]["type"] is None and got[0]["reg"] is None
+
+
+def test_move_targets_ignore_a_moved_rows_state():
+    rows = [row(1, NOW - 30, "bbbbbb", state=DAL),
+            row(2, NOW - 10, "bbbbbb", moved=True, state=KLM),
+            row(3, NOW - 5, "cccccc", moved=True, state=KLM)]
+    got = {t["key"]: t["label"] for t in air_view.move_targets(rows, NOW)}
+    assert got["bbbbbb"] == "DAL73"
+    assert got["cccccc"] == "CCCCCC"
+
+
 def test_live_drops_flights_silent_for_fifteen_minutes_history_keeps_them():
     rows = [row(1, NOW - 901, "484161", state=KLM), row(2, NOW - 10, "4bb299", state=DAL)]
     assert [s["key"] for s in air_view.strips(rows, NOW, live=True)] == ["4bb299"]
