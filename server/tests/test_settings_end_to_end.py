@@ -69,6 +69,13 @@ def test_a_proxy_started_from_the_built_environment_serves_requests(tmp_path):
         values[key] = ""
 
     env = build_env(values)
+    # Off the ADS-B feed too, and its snapshot log under tmp_path. The conftest guard that
+    # redirects adsb.SNAPSHOT_LOG_DIR only patches THIS process, never a child: on 2026-09-24
+    # this test's proxy polled adsb.fi and wrote a real snapshot into the operator's
+    # logs/adsb-<today>.jsonl -- the file the autopilot-clue measurement is scored from.
+    # Neither key is in the settings catalogue, so they are set on the env directly.
+    env["ADSB_SOURCE"] = "off"
+    env["ADSB_SNAPSHOT_DIR"] = str(tmp_path / "adsb-logs")
     # NOTE: CONVERSATIONS_FILE and VESSELS_LOG_FILE are hardcoded in the proxy with no env
     # override, so unlike AIS_CACHE_FILE (and now CONVERSATIONS_DB, above) this child cannot
     # be pointed away from the live files. It is safe only incidentally: a proxy that
