@@ -139,6 +139,36 @@ def _find_airline_anchor(word: str) -> str | None:
     return best_code if best_score >= _FUZZY_THRESHOLD else None
 
 
+def _glued_prefixes() -> dict[str, str]:
+    """Prefix Whisper may glue to a flight number -> the table word that anchors it.
+
+    Every telephony word anchors itself ("klm", "kl"); an ICAO code from the table maps to the
+    first telephony word for the same airline ("dal" -> "delta"), because the code alone is
+    not an anchor. Only these prefixes are ever split, so "FL70" or "A320" stay one word.
+    """
+    prefixes = {word: word for word in AIRLINE_TELEPHONY}
+    for word, code in AIRLINE_TELEPHONY.items():
+        prefixes.setdefault(code.lower(), word)
+    return prefixes
+
+
+_GLUED_PREFIX = _glued_prefixes()
+_GLUED_RE = re.compile(
+    r"\b(" + "|".join(sorted(map(re.escape, _GLUED_PREFIX), key=len, reverse=True))
+    + r")(\d[a-z0-9]*)\b")
+
+
+def _unglue_designators(lowered: str) -> str:
+    """"klm49r" -> "klm 49r", "dal162" -> "delta 162".
+
+    Whisper sometimes writes a designator as one token (2026-09-24 16:25:01: "KLM49R, passing
+    two thousand"); the word tokenizer below then sees no airline anchor and extracts nothing,
+    while "KLM 49R" and "KLM four nine romeo" always worked. A digit must follow the prefix
+    directly, so ordinary words that merely start with "kl" or "dal" are untouched.
+    """
+    return _GLUED_RE.sub(lambda m: f"{_GLUED_PREFIX[m.group(1)]} {m.group(2)}", lowered)
+
+
 def extract_callsign_candidate(text: str) -> str | None:
     """A candidate flight designator (e.g. "TRA6N") for match_flight, or None.
 
@@ -154,6 +184,7 @@ def extract_callsign_candidate(text: str) -> str | None:
     lowered = (text or "").lower()
     for phrase, joined in _TELEPHONY_PHRASES.items():
         lowered = lowered.replace(phrase, joined)
+    lowered = _unglue_designators(lowered)
     words = re.findall(r"[A-Za-z0-9]+", lowered)
     for i, word in enumerate(words):
         code = _find_airline_anchor(word)

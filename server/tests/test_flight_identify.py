@@ -408,3 +408,39 @@ def test_identify_flight_output_is_unchanged():
     _seed("484161", "KLM12B")
     assert flight_identify.identify_flight("KLM one two bravo, good morning") == \
         "[KLM12B/B738] KLM one two bravo, good morning"
+
+
+# -- a designator Whisper writes as one token ("KLM49R") ------------------------------------
+#
+# 2026-09-24 16:25:01, Approach 4: "Roger, good day, KLM49R, passing two thousand, cleared for
+# departure." KLM49R (E190 PH-EZR, 484cc2) was climbing through 2,475 ft in range, yet nothing
+# was extracted -- the tokenizer saw one word "klm49r", which is no airline anchor. "KLM 49R"
+# and "KLM four nine romeo" always worked; only the glued spelling failed.
+
+def test_a_glued_designator_is_extracted_from_the_real_transmission():
+    text = "Roger, good day, KLM49R, passing two thousand, cleared for departure."
+    assert flight_identify.extract_callsign_candidate(text) == "KLM49R"
+
+
+def test_a_glued_designator_is_identified_against_the_live_cache():
+    _seed("484cc2", "KLM49R", t="E190")
+    text = "Roger, good day, KLM49R, passing two thousand, cleared for departure."
+    assert flight_identify.identify_flight(text).startswith("[KLM49R/E190] ")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("KL1406, descend flight level seven zero", "KLM1406"),   # the two-letter telephony "KL"
+    ("DAL162, heading two seven zero", "DAL162"),             # an ICAO code from the table
+    ("contact tower, RYR37DV", "RYR37DV"),
+])
+def test_other_glued_designators_from_the_airline_table(text, expected):
+    assert flight_identify.extract_callsign_candidate(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "descend FL70, QNH 1025",        # FL is not an airline
+    "the A320 and the B738 behind",  # aircraft types are not airlines
+    "heading 270, runway 18R",
+])
+def test_letters_glued_to_digits_that_are_no_airline_stay_unextracted(text):
+    assert flight_identify.extract_callsign_candidate(text) is None
