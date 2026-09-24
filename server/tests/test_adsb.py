@@ -286,3 +286,75 @@ def test_record_success_after_a_failure_streak_prints_recovered(capsys):
     adsb._record_success(3)
 
     assert "recovered after 2 failed poll(s)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Autopilot fields and snapshot recording (Task 1: flight_attribution's stage 2 evidence)
+# ---------------------------------------------------------------------------
+
+import datetime
+
+
+def _payload(*aircraft):
+    return lambda _url: json.dumps({"aircraft": list(aircraft)}).encode("utf-8")
+
+
+# A real 2026 instant: on Windows, astimezone() raises OSError for epochs near 1970.
+B = 1_790_000_000.0
+
+KLM12B = {"hex": "484161", "flight": "KLM12B  ", "t": "B738", "r": "PH-BXH",
+          "alt_baro": 9725, "nav_altitude_mcp": 7008, "nav_heading": 51.33,
+          "nav_qnh": 1013.6, "baro_rate": -1024}
+
+
+def test_map_aircraft_keeps_the_autopilot_selected_values():
+    mapped = adsb.map_aircraft(KLM12B)
+    assert mapped["nav_altitude_mcp"] == 7008
+    assert mapped["nav_heading"] == 51.33
+    assert mapped["nav_qnh"] == 1013.6
+    assert mapped["baro_rate"] == -1024
+
+
+def test_map_aircraft_leaves_absent_autopilot_values_as_none():
+    mapped = adsb.map_aircraft({"hex": "abc123", "flight": "PHVSY"})
+    assert mapped["nav_altitude_mcp"] is None and mapped["nav_heading"] is None
+
+
+def test_a_recorded_poll_is_appended_to_the_daily_log(tmp_path):
+    now = datetime.datetime(2026, 9, 24, 11, 14, 2).astimezone().timestamp()
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    path = adsb.snapshot_log_path("2026-09-24")
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["t"].startswith("2026-09-24T11:14:02")
+    assert rows[0]["aircraft"][0]["nav_altitude_mcp"] == 7008
+    assert "last_seen" not in rows[0]["aircraft"][0]
+
+
+def test_an_unrecorded_poll_writes_nothing_and_keeps_no_snapshot():
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), record=False, now=B)
+    assert not adsb.SNAPSHOT_LOG_DIR.exists() or not any(adsb.SNAPSHOT_LOG_DIR.iterdir())
+    assert adsb.snapshots_between(B - 100, B + 100) == []
+
+
+def test_snapshots_between_reads_the_ring_oldest_first():
+    for t in (B, B + 15, B + 30):
+        adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=t)
+    got = adsb.snapshots_between(B + 10, B + 30)
+    assert [s["t"] for s in got] == [B + 15, B + 30]
+
+
+def test_snapshots_between_falls_back_to_the_log_after_a_restart():
+    now = datetime.datetime(2026, 9, 24, 11, 0, 0).astimezone().timestamp()
+    adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=now)
+    adsb.reset_snapshot_ring()          # what a proxy restart does to memory
+    got = adsb.snapshots_between(now - 5, now + 5)
+    assert len(got) == 1 and got[0]["aircraft"][0]["hex"] == "484161"
+    assert abs(got[0]["t"] - now) < 1.0
+
+
+def test_a_log_write_failure_does_not_fail_the_poll(monkeypatch):
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+    monkeypatch.setattr(adsb, "_append_snapshot_log", boom)
+    assert adsb.poll_once(0, 0, 0, fetch=_payload(KLM12B), now=B) == 1

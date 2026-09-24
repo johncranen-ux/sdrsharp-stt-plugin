@@ -11,12 +11,15 @@ adsb.one is behind a Cloudflare JS challenge a server-side poller cannot pass. a
 only one of four candidates that actually works.
 """
 
+import collections
+import datetime
 import json
 import os
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 API_HOST = "https://opendata.adsb.fi"
 
@@ -119,6 +122,14 @@ def map_aircraft(ac: dict) -> dict | None:
         "lat": ac.get("lat"),
         "lon": ac.get("lon"),
         "squawk": ac.get("squawk"),
+        # The autopilot's SELECTED values (adsb.fi carries them for roughly half the traffic,
+        # measured 2026-09-24: 39/81 had nav_altitude_mcp). A controller's "descend seven
+        # thousand" shows up here seconds later -- the evidence flight_attribution's echo clue
+        # is built on. Dropped until 2026-09-24, which is why the 09-10 log cannot replay it.
+        "nav_altitude_mcp": ac.get("nav_altitude_mcp"),
+        "nav_heading": ac.get("nav_heading"),
+        "nav_qnh": ac.get("nav_qnh"),
+        "baro_rate": ac.get("baro_rate"),
     }
 
 
@@ -147,7 +158,8 @@ def current_aircraft() -> list[dict]:
         return list(_aircraft_cache.values())
 
 
-def poll_once(lat: float, lon: float, dist_nm: float, fetch=None) -> int:
+def poll_once(lat: float, lon: float, dist_nm: float, fetch=None,
+              record: bool = True, now: float | None = None) -> int:
     """One poll. Returns aircraft cached, or raises AdsbError having changed nothing.
 
     Every aircraft is validated and mapped in a first pass, entirely before the cache is
@@ -163,14 +175,101 @@ def poll_once(lat: float, lon: float, dist_nm: float, fetch=None) -> int:
         fields = map_aircraft(ac)
         if fields is None:
             continue
-        fields["last_seen"] = time.time()
+        fields["last_seen"] = time.time() if now is None else now
         mapped[fields["hex"]] = fields
 
     with _cache_lock:
         _aircraft_cache.clear()
         _aircraft_cache.update(mapped)
 
+    if record:
+        stamp = time.time() if now is None else now
+        _record_snapshot([{k: v for k, v in f.items() if k != "last_seen"}
+                          for f in mapped.values()], stamp)
+
     return len(mapped)
+
+
+# -- snapshot history: what flight_attribution's stage 2 looks back over ---------------
+
+SNAPSHOT_LOG_DIR = Path(os.environ.get("ADSB_SNAPSHOT_DIR", "").strip()
+                        or Path(__file__).resolve().parent.parent / "logs")
+
+# 5 minutes at the 15 s default -- stage 2 needs t-10 s .. t+60 s, plus slack for a slow loop.
+_RING_LEN = 20
+_ring_lock = threading.Lock()
+_ring: collections.deque = collections.deque(maxlen=_RING_LEN)
+_log_warned = False
+
+
+def reset_snapshot_ring() -> None:
+    """Forget every in-memory snapshot. What a restart does; tests call it for isolation."""
+    with _ring_lock:
+        _ring.clear()
+
+
+def snapshot_log_path(day: str) -> Path:
+    return Path(SNAPSHOT_LOG_DIR) / f"adsb-{day}.jsonl"
+
+
+def _append_snapshot_log(snapshot: dict) -> None:
+    """One line per poll, the same shape as the 09-10 side-car bench_flight_identify reads."""
+    stamp = datetime.datetime.fromtimestamp(snapshot["t"]).astimezone()
+    path = snapshot_log_path(stamp.date().isoformat())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"t": stamp.isoformat(), "aircraft": snapshot["aircraft"]},
+                      ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def _record_snapshot(aircraft: list[dict], now: float) -> None:
+    """Ring first, log second; a log failure is reported once and never fails the poll."""
+    global _log_warned
+    snapshot = {"t": now, "aircraft": aircraft}
+    with _ring_lock:
+        _ring.append(snapshot)
+    try:
+        _append_snapshot_log(snapshot)
+    except Exception as exc:
+        if not _log_warned:
+            print(f"[adsb.fi] could not write the snapshot log: {exc}", flush=True)
+            _log_warned = True
+
+
+def _snapshots_from_log(t0: float, t1: float) -> list[dict]:
+    days = {datetime.datetime.fromtimestamp(t).astimezone().date().isoformat()
+            for t in (t0, t1)}
+    out = []
+    for day in sorted(days):
+        path = snapshot_log_path(day)
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                t = datetime.datetime.fromisoformat(row["t"]).timestamp()
+            except (ValueError, KeyError, TypeError):
+                continue
+            if t0 <= t <= t1:
+                out.append({"t": t, "aircraft": row.get("aircraft") or []})
+    return sorted(out, key=lambda s: s["t"])
+
+
+def snapshots_between(t0: float, t1: float) -> list[dict]:
+    """Every recorded snapshot with t0 <= t <= t1, oldest first.
+
+    The ring answers when it reaches back to t0; otherwise (a restart emptied it, or t0 is
+    older than five minutes) the daily log is read instead, so a restart between stage 1 and
+    stage 2 costs evidence only if the log is missing too.
+    """
+    with _ring_lock:
+        ring = list(_ring)
+    if ring and ring[0]["t"] <= t0:
+        return [s for s in ring if t0 <= s["t"] <= t1]
+    return _snapshots_from_log(t0, t1)
 
 
 # -- what the feed can be asked about itself, same shape as aishub.py's feed_status ----

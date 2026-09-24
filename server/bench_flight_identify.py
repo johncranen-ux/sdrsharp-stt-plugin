@@ -215,7 +215,7 @@ def _load_cache(snapshot: dict) -> None:
     already holds mapped records and map_aircraft is idempotent over its own output.
     """
     payload = json.dumps({"aircraft": snapshot["aircraft"]}).encode("utf-8")
-    adsb.poll_once(0.0, 0.0, 0.0, fetch=lambda _url: payload)
+    adsb.poll_once(0.0, 0.0, 0.0, fetch=lambda _url: payload, record=False)
 
 
 def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,

@@ -108,3 +108,17 @@ def _archive_resolved_conversations_under_tmp_path(monkeypatch, tmp_path):
     from stt_proxy import conversations as conversations_module
 
     monkeypatch.setattr(conversations_module, "CONVERSATIONS_DB", str(tmp_path / "conversations.db"))
+
+
+@pytest.fixture(autouse=True)
+def _adsb_snapshot_log_under_tmp_path(monkeypatch, tmp_path):
+    """Every adsb.poll_once in a test writes its snapshot log under tmp_path.
+
+    Once polling records a daily log, any test (or replay) that loads a cache through
+    poll_once would otherwise append made-up aircraft to the operator's real
+    logs/adsb-<today>.jsonl -- the very file the autopilot-clue measurement is scored from.
+    """
+    from stt_proxy import adsb as adsb_module
+
+    monkeypatch.setattr(adsb_module, "SNAPSHOT_LOG_DIR", tmp_path / "adsb-logs")
+    adsb_module.reset_snapshot_ring()
