@@ -604,7 +604,8 @@ towards what you see (`autopilot clue: on` / `recording, not shown`).
 
 The left column lists one **strip** per flight, most recently heard first: callsign, airline,
 aircraft type, **altitude → selected altitude** (the autopilot's selected altitude, when ADS-B
-reports one, shown as `9,700 → set FL070`), heading, and how many transmissions. In history
+reports one — raw feet below 10,000 ft, e.g. `9725 → set 7008`, and a flight level at or above
+it, e.g. `FL120 → set FL100`), heading (`hdg 051`), and how many transmissions. In history
 mode a strip shows the values **as they were at that flight's last transmission** in the
 period, not live data. Below the flights sit three special groups, in this order: **Needs
 review** (the two clues disagree), **unknown callsigns** (a callsign was heard clearly enough
