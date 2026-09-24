@@ -177,9 +177,11 @@ Agreed mockup: `.superpowers/brainstorm/1308-1790241294/content/page-detail.html
 - **ADS-B feed down:** stage 1 still stores the transmission (callsign clue will be none, as
   today); stage 2 records `echo_clue = {"status": "no_snapshots"}` rather than "no match", so a
   feed outage can never be scored as a measured negative. The time bar shows the feed state.
-- **Proxy restart between stage 1 and stage 2:** on startup, transmissions with `echo_clue` NULL
-  and a snapshot log covering t−10…t+60 s are re-checked from the log; otherwise marked
-  `{"status": "missed_restart"}`.
+- **Proxy restart between stage 1 and stage 2:** on startup nothing special is needed: stage 2
+  reads `adsb.snapshots_between`, which falls back to the daily log, and records
+  `{"status": "no_snapshots"}` when the log doesn't cover the window either. That merges the
+  spec's `missed_restart` into `no_snapshots`, since both mean "no evidence", which is the only
+  distinction the measurement needs.
 - **Move to a flight that has since left:** allowed; the target list is built from the archive,
   not the live cache.
 - **Database busy:** 5 s `busy_timeout` as in the archive; a failed insert is logged and the
