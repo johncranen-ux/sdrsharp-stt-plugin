@@ -122,6 +122,10 @@ webapp  ──▶ /api/air/flights?from&to   /api/air/flights/{key}   POST /api/
    - **Shadow mode.** The echo clue is computed and stored for every transmission regardless of
      `AIR_ECHO_ENABLED`. The setting (default **off**) only decides whether the echo clue counts
      towards the displayed outcome. With it off, the outcome is exactly the callsign clue.
+     The outcome is stored when stage 2 runs, so the setting applies to transmissions attributed
+     **after** it is switched on: rows recorded in shadow mode keep their callsign-only grouping
+     (their echo clue stays stored and visible in the hover evidence). Switching it off again
+     does not undo echo-based groupings already stored.
    - **A manual move always wins** and is shown with ✎.
 
 5. **Storage (new tables in `stt_proxy/conversations.db`).** Same database, same WAL and

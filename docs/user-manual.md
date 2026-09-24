@@ -652,6 +652,12 @@ decision. What the setting controls is only whether that clue counts towards the
 grouping you see; with it off, a transmission's outcome is exactly what the callsign clue alone
 would give it, and an echo that was found is still there in the stored row for later scoring.
 
+The outcome is stored when the transmission is attributed, so the setting applies to
+transmissions attributed **after** it is switched on. Rows recorded while it was off keep their
+callsign-only grouping — their echo clue stays stored and visible in the hover evidence, but
+switching the setting on does not regroup them. Likewise, switching it off again does not undo
+echo-based groupings already stored.
+
 It stays off until `py bench_air_echo.py` (run from `server/`) prints **PASS** against 3–5
 days of recorded traffic — it checks that the echo clue agrees with the callsign clue on at
 least 50 transmissions where both fired, that it called at least as many hand-moved
