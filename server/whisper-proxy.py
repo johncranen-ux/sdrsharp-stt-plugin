@@ -621,13 +621,18 @@ if __name__ == "__main__":
     else:
         print(f"AIS feed: disabled (AIS_SOURCE={ais_source})", flush=True)
 
+    # Stage 2 runs whatever ADSB_SOURCE says: stage 1 records airband rows either way, and
+    # without stage 2 they would read "autopilot: not checked yet" forever. With ADS-B off it
+    # finds no snapshots and records no_snapshots, which the gate excludes as no evidence.
+    flight_attribution.start()
     if adsb.ADSB_SOURCE == "off":
         print(f"Flight identification: disabled (ADSB_SOURCE={adsb.ADSB_SOURCE})", flush=True)
+        print("Airband conversations: callsign clue only (no ADS-B, so no autopilot clue)",
+              flush=True)
     else:
         adsb.start(adsb.POINT_LAT, adsb.POINT_LON, adsb.POINT_DIST_NM)
         print(f"Flight identification: adsb.fi, {adsb.POINT_DIST_NM}nm around "
               f"({adsb.POINT_LAT}, {adsb.POINT_LON}), every {adsb.POLL_SEC}s", flush=True)
-        flight_attribution.start()
         print(f"Airband conversations: {sorted(flight_attribution.AIR_CONVERSATION_CHANNELS)}, "
               f"autopilot clue {'ON' if flight_attribution.AIR_ECHO_ENABLED else 'recorded, not shown'}",
               flush=True)

@@ -929,6 +929,9 @@ entirely (e.g. alongside `start-all.bat`) if you'd rather not rely on the name m
 
 On startup the proxy prints either `Flight identification: adsb.fi, ...` or
 `Flight identification: disabled (ADSB_SOURCE=off)`, mirroring the `AIS feed: ...` line above.
+With ADS-B off, the [Airband tab](#the-airband-tab) still groups transmissions, by the callsign
+clue only (the proxy says so with `Airband conversations: callsign clue only`); the autopilot
+check still runs and records "no ADS-B data for that moment" rather than leaving rows unchecked.
 
 | Variable | Default | Meaning |
 |---|---|---|
