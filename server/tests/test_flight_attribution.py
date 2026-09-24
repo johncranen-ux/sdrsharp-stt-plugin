@@ -54,6 +54,13 @@ class TestEchoClue:
             (T - 12, []), (T + 8, [ac("484161", "KLM12B", mcp=7008)])))
         assert got["status"] == "none"
 
+    def test_a_missing_baseline_value_is_not_a_candidate(self):
+        # present at/before t-10, but with no known value to have "changed" from
+        got = fa.echo_clue(ALT7000, T, snaps(
+            (T - 12, [ac("484161", "KLM12B", mcp=None)]),
+            (T + 8, [ac("484161", "KLM12B", mcp=7008)])))
+        assert got["status"] == "none"
+
     def test_heading_within_five_degrees_matches_across_north(self):
         got = fa.echo_clue([Number("heading", 360, "heading three six zero")], T, snaps(
             (T - 12, [ac("a1", "UAL947", hdg=250.0)]),
@@ -155,7 +162,57 @@ class TestStages:
         with air_archive.open_db(db) as conn:
             row = air_archive.get_transmission(conn, tid)
         assert row["outcome_key"] == "484161" and row["badge"] == "echo"
-        assert row["state"]["nav_altitude_mcp"] == 7008
+        # Spec Section 5: state is the aircraft's state AT THAT MOMENT (t), not the end of the
+        # lookback window -- the value at T-12 (11008), not the post-clearance value at T+8.
+        assert row["state"]["nav_altitude_mcp"] == 11008
+
+    def test_stage_two_keeps_stage_one_state_when_the_outcome_key_is_unchanged(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fa.flight_identify, "callsign_clue", lambda _t: CS_X)
+        monkeypatch.setattr(fa.adsb, "current_aircraft",
+                            lambda: [ac("484161", "KLM12B", mcp=11008)])
+        db = tmp_path / "c.db"
+        tid = fa.record_transmission("descend flight level seven zero, KLM one two bravo",
+                                     "121.200", now=T, db_path=db)
+        history = snaps((T - 12, [ac("484161", "KLM12B", mcp=11008)]),
+                        (T + 8, [ac("484161", "KLM12B", mcp=7008)]))
+        fa.recheck_pending(now=T + 61, db_path=db,
+                           snapshots_between=lambda a, b: [s for s in history
+                                                           if a <= s["t"] <= b])
+        with air_archive.open_db(db) as conn:
+            row = air_archive.get_transmission(conn, tid)
+        # The callsign already resolved this row to 484161 at stage 1; stage 2 confirms the
+        # same key (with or without echo), so stage 1's state must be left untouched rather
+        # than overwritten with whatever aircraft state exists later in the window.
+        assert row["outcome_key"] == "484161"
+        assert row["state"]["nav_altitude_mcp"] == 11008
+
+    def test_stage_two_isolates_a_failing_row_and_still_completes_the_rest(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fa.flight_identify, "callsign_clue", lambda _t: CS_NONE)
+        monkeypatch.setattr(fa.adsb, "current_aircraft", lambda: [])
+        db = tmp_path / "c.db"
+        tid1 = fa.record_transmission("descend flight level seven zero", "121.200",
+                                      now=T, db_path=db)
+        tid2 = fa.record_transmission("descend flight level seven zero", "121.200",
+                                      now=T + 1, db_path=db)
+        history = snaps((T - 12, [ac("484161", "KLM12B", mcp=11008)]),
+                        (T + 8, [ac("484161", "KLM12B", mcp=7008)]))
+        calls = {"n": 0}
+
+        def flaky(a, b):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return [s for s in history if a <= s["t"] <= b]
+
+        done = fa.recheck_pending(now=T + 61, db_path=db, snapshots_between=flaky)
+        assert done == 1
+        with air_archive.open_db(db) as conn:
+            row1 = air_archive.get_transmission(conn, tid1)
+            row2 = air_archive.get_transmission(conn, tid2)
+        assert row1["echo_clue"] is None           # the row whose source call raised
+        assert row2["echo_clue"]["status"] == "match"   # later row still completed
 
     def test_a_restart_with_no_snapshot_evidence_is_no_snapshots_not_none(
             self, tmp_path, monkeypatch):

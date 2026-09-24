@@ -67,7 +67,10 @@ def echo_clue(numbers: list[Number], t: float, snapshots: list[dict]) -> dict:
                 hex_ = a.get("hex")
                 if hex_ in hits or hex_ not in baseline or a.get("alt_baro") == "ground":
                     continue
-                if _close(n, a.get(field)) and not _close(n, baseline[hex_].get(field)):
+                baseline_val = baseline[hex_].get(field)
+                if not isinstance(baseline_val, (int, float)):
+                    continue    # "already set" needs a known value to differ from
+                if _close(n, a.get(field)) and not _close(n, baseline_val):
                     hits[hex_] = {"hex": hex_, "flight": a.get("flight"),
                                   "number": to_dict(n), "delay_s": snap["t"] - t}
     if not hits:
@@ -151,21 +154,37 @@ def record_transmission(text: str, channel: str, now: float | None = None,
 
 
 def recheck_pending(now: float | None = None, db_path=None, snapshots_between=None) -> int:
-    """Stage 2 for every transmission older than 60 s that has no echo clue yet."""
+    """Stage 2 for every transmission older than 60 s that has no echo clue yet.
+
+    One row's failure (a bad log line, a locked DB, a malformed stored number) must not abort
+    the pass -- pending_echo orders by epoch, so an unhandled exception here would permanently
+    stall every later row behind the broken one.
+    """
     t_now = time.time() if now is None else now
     source = snapshots_between or adsb.snapshots_between
     done = 0
     with air_archive.open_db(db_path or _db_path()) as conn:
         for row in air_archive.pending_echo(conn, t_now - WINDOW_AFTER_S):
-            t = row["epoch"]
-            snaps = source(t - WINDOW_BEFORE_S - adsb.POLL_SEC * 2, t + WINDOW_AFTER_S)
-            echo = echo_clue([from_dict(n) for n in row["numbers"] or []], t, snaps)
-            outcome = combine(row["callsign_clue"], echo, echo_enabled=AIR_ECHO_ENABLED)
-            latest = snaps[-1]["aircraft"] if snaps else []
-            state = (_state_of(outcome["key"], latest)
-                     if outcome["kind"] == "flight" else None)
-            air_archive.set_echo(conn, row["id"], echo, outcome, state)
-            done += 1
+            try:
+                t = row["epoch"]
+                snaps = source(t - WINDOW_BEFORE_S - adsb.POLL_SEC * 2, t + WINDOW_AFTER_S)
+                echo = echo_clue([from_dict(n) for n in row["numbers"] or []], t, snaps)
+                outcome = combine(row["callsign_clue"], echo, echo_enabled=AIR_ECHO_ENABLED)
+                # Spec Section 5: each transmission stores the aircraft's state AT THAT MOMENT.
+                # Keep stage 1's state (state=None -> set_echo's COALESCE preserves it) unless
+                # stage 2 actually reassigns the outcome to a different flight, in which case
+                # the state must come from the snapshot at-or-before t, not the end of the
+                # lookback window (which is up to WINDOW_AFTER_S later than the transmission).
+                state = None
+                if outcome["kind"] == "flight" and outcome["key"] != row["outcome_key"]:
+                    at_or_before = [s for s in snaps if s["t"] <= t]
+                    aircraft = at_or_before[-1]["aircraft"] if at_or_before else []
+                    state = _state_of(outcome["key"], aircraft)
+                air_archive.set_echo(conn, row["id"], echo, outcome, state)
+                done += 1
+            except Exception as exc:
+                print(f"[air] stage-2 row {row['id']} failed: {type(exc).__name__}: {exc}",
+                      flush=True)
     return done
 
 
