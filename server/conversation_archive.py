@@ -2,7 +2,7 @@
 
 Top level rather than inside stt_proxy/ or webapp/ for the same reason ship_types.py is: two
 processes need it, and neither package may import the other. Every line of SQL in the project
-lives here.
+lives here or in air_archive.py, which opens the same file through connect() below.
 
 Why this exists at all: stt_proxy/conversations.py rewrites conversations.json whole on every
 resolve, keeping only the newest CONVERSATIONS_KEEP=300 records, and truncates again on load.
