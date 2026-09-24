@@ -6,7 +6,9 @@
  */
 "use strict";
 
-const airState = { range: "live", day: "", hour: "", selected: null };
+// gen: bumped by every refresh, so a slow older response never overwrites a newer one.
+// threadSig: what the thread showed last render, so an unchanged poll does not rebuild it.
+const airState = { range: "live", day: "", hour: "", selected: null, gen: 0, threadSig: null };
 
 const AIR_BADGES = {
   confirmed: ["✔✔", "callsign and autopilot agree"],
@@ -149,9 +151,33 @@ function renderAirStatus(body) {
     `${feedText} · autopilot clue: ${body.echo_enabled ? "on" : "recording, not shown"}`;
 }
 
-async function refreshAirband() {
+// True while the reader is using the thread: a clip is playing or a "move to" is open.
+// Rebuilding it then would stop the audio or snatch the dropdown away.
+function airThreadInUse() {
+  const playing = [...document.querySelectorAll("#air-thread audio")].some((a) => !a.paused);
+  const active = document.activeElement;
+  return playing || Boolean(active && active.classList && active.classList.contains("air-move"));
+}
+
+function airThreadSignature(strip, rows) {
+  return strip ? `${strip.key}|${rows.map((r) => `${r.id}:${r.badge}`).join(",")}` : "";
+}
+
+/* auto: true for the 15 s poll. It only refreshes Live (a past hour does not change), and it
+ * leaves the thread alone while the reader is using it or when nothing in it changed. A user
+ * action (a pill, a day, a strip, a move) passes nothing and always renders. */
+async function refreshAirband({ auto = false } = {}) {
+  if (auto && airState.range !== "live") return;
+  const gen = ++airState.gen;
   const params = airRangeParams();
-  const body = await api(`/api/air/flights${params ? `?${params}` : ""}`);
+  let body;
+  try {
+    body = await api(`/api/air/flights${params ? `?${params}` : ""}`);
+  } catch (error) {
+    if (gen !== airState.gen) return;   // a newer request has already landed
+    throw error;
+  }
+  if (gen !== airState.gen) return;
   showAirError(body.error);
   renderAirStatus(body);
   if (airState.selected && !body.strips.some((s) => s.key === airState.selected)) {
@@ -160,11 +186,23 @@ async function refreshAirband() {
   renderAirStrips(body);
   const strip = body.strips.find((s) => s.key === airState.selected);
   if (!strip) {
+    airState.threadSig = airThreadSignature(null, []);
     renderAirThread(null, []);
     return;
   }
   const extra = params ? `&${params}` : "";
-  const thread = await api(`/api/air/thread?key=${encodeURIComponent(strip.key)}${extra}`);
+  let thread;
+  try {
+    thread = await api(`/api/air/thread?key=${encodeURIComponent(strip.key)}${extra}`);
+  } catch (error) {
+    if (gen !== airState.gen) return;
+    throw error;
+  }
+  if (gen !== airState.gen) return;
+  if (thread.error) showAirError(thread.error);
+  const sig = airThreadSignature(strip, thread.rows);
+  if (auto && (airThreadInUse() || sig === airState.threadSig)) return;
+  airState.threadSig = sig;
   renderAirThread(strip, thread.rows);
 }
 

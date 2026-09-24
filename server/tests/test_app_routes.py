@@ -583,6 +583,27 @@ def test_air_thread_carries_targets_and_no_clip_without_captures(client, tmp_pat
     assert {"key": "unassigned", "label": "Unassigned"} in rows[0]["targets"]
 
 
+def test_air_thread_says_when_all_is_well(client, tmp_path):
+    import time
+    _seed_air(tmp_path, time.time() - 30)
+    body = client.get("/api/air/thread", params={"key": "484161"}).json()
+    assert "error" in body and body["error"] is None
+
+
+def test_air_thread_degrades_when_the_archive_cannot_be_read(client, monkeypatch):
+    import air_archive
+
+    def _boom(*_a, **_k):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(air_archive, "transmissions", _boom)
+    response = client.get("/api/air/thread", params={"key": "484161"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rows"] == []
+    assert body["error"] == "the airband archive could not be read (OSError)"
+
+
 def test_moving_a_transmission_is_stored_and_shown(client, tmp_path):
     import time
     tid = _seed_air(tmp_path, time.time() - 30)

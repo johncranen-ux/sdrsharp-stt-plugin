@@ -1782,7 +1782,7 @@ function tick() {
   if (document.hidden) return;
   if (state.tab === "dashboard") refreshDashboard().catch(() => {});
   else if (state.tab === "conversations") refreshConversations().catch(() => {});
-  else if (state.tab === "airband") refreshAirband().catch(() => {});
+  else if (state.tab === "airband") refreshAirband({ auto: true }).catch(() => {});
   else if (state.tab === "vessels") refreshVessels().catch(() => {});
   else if (state.tab === "logs") tabLog.pull().catch(() => {});
   // Settings is deliberately not polled -- see the module comment above refreshSettings --

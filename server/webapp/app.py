@@ -317,8 +317,12 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         # Wide enough that move targets near the edges of the range are still offered.
-        rows = _air_rows(start - air_view.MOVE_TARGET_WINDOW_S,
-                         end + air_view.MOVE_TARGET_WINDOW_S)
+        try:
+            rows = _air_rows(start - air_view.MOVE_TARGET_WINDOW_S,
+                             end + air_view.MOVE_TARGET_WINDOW_S)
+        except Exception as exc:
+            return {"rows": [],
+                    "error": f"the airband archive could not be read ({type(exc).__name__})"}
         in_range = [r for r in rows if start <= r["epoch"] <= end]
         root = _captures_root()
         out = []
@@ -329,7 +333,7 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
             item["targets"] = [t for t in air_view.move_targets(rows, item["epoch"])
                                if t["key"] != key]
             out.append(item)
-        return {"rows": out}
+        return {"rows": out, "error": None}
 
     @mutating.post("/api/air/moves")
     def write_air_move(body: AirMoveIn) -> dict:
