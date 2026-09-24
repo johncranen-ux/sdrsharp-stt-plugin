@@ -154,7 +154,7 @@ def record_transmission(text: str, channel: str, now: float | None = None,
 
 
 def recheck_pending(now: float | None = None, db_path=None, snapshots_between=None) -> int:
-    """Stage 2 for every transmission older than 60 s that has no echo clue yet.
+    """Stage 2 for every transmission older than 60 s plus one poll that has no echo clue yet.
 
     One row's failure (a bad log line, a locked DB, a malformed stored number) must not abort
     the pass -- pending_echo orders by epoch, so an unhandled exception here would permanently
@@ -164,7 +164,8 @@ def recheck_pending(now: float | None = None, db_path=None, snapshots_between=No
     source = snapshots_between or adsb.snapshots_between
     done = 0
     with air_archive.open_db(db_path or _db_path()) as conn:
-        for row in air_archive.pending_echo(conn, t_now - WINDOW_AFTER_S):
+        # One poll interval past the window, so the poll covering t+60 s has landed.
+        for row in air_archive.pending_echo(conn, t_now - WINDOW_AFTER_S - adsb.POLL_SEC):
             try:
                 t = row["epoch"]
                 snaps = source(t - WINDOW_BEFORE_S - adsb.POLL_SEC * 2, t + WINDOW_AFTER_S)

@@ -117,7 +117,8 @@ webapp  ──▶ /api/air/flights?from&to   /api/air/flights/{key}   POST /api/
      | none | none / ambiguous | unassigned | — |
 
    - **Two stages.** Stage 1 runs when the transmission arrives and stores the callsign clue.
-     Stage 2 runs once t+60 s has passed, computes the echo clue from the snapshot ring, and
+     Stage 2 runs once t+60 s plus one ADS-B poll interval has passed (so the poll covering
+     the window's end has landed), computes the echo clue from the snapshot ring, and
      stores it. A single background loop (same style as the existing reapers) drives stage 2.
    - **Shadow mode.** The echo clue is computed and stored for every transmission regardless of
      `AIR_ECHO_ENABLED`. The setting (default **off**) only decides whether the echo clue counts

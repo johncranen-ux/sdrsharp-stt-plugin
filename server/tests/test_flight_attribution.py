@@ -129,9 +129,11 @@ class TestStages:
         monkeypatch.setattr(fa.flight_identify, "callsign_clue", boom)
         assert fa.record_transmission("x", "121.200", now=T, db_path=tmp_path / "c.db") is None
 
-    def test_stage_two_waits_sixty_seconds_then_stores_the_echo(self, tmp_path, monkeypatch):
+    def test_stage_two_waits_for_the_window_plus_one_poll_then_stores_the_echo(
+            self, tmp_path, monkeypatch):
         monkeypatch.setattr(fa.flight_identify, "callsign_clue", lambda _t: CS_NONE)
         monkeypatch.setattr(fa.adsb, "current_aircraft", lambda: [])
+        monkeypatch.setattr(fa.adsb, "POLL_SEC", 15)
         monkeypatch.setattr(fa, "AIR_ECHO_ENABLED", False)
         db = tmp_path / "c.db"
         tid = fa.record_transmission("descend flight level seven zero", "121.200",
@@ -140,7 +142,10 @@ class TestStages:
                         (T + 8, [ac("484161", "KLM12B", mcp=7008)]))
         source = lambda t0, t1: [s for s in history if t0 <= s["t"] <= t1]   # noqa: E731
         assert fa.recheck_pending(now=T + 30, db_path=db, snapshots_between=source) == 0
-        assert fa.recheck_pending(now=T + 61, db_path=db, snapshots_between=source) == 1
+        # t+60 s has passed, but the poll that covers the window's end may not have landed yet.
+        assert fa.recheck_pending(now=T + 61, db_path=db, snapshots_between=source) == 0
+        assert fa.recheck_pending(now=T + 74, db_path=db, snapshots_between=source) == 0
+        assert fa.recheck_pending(now=T + 76, db_path=db, snapshots_between=source) == 1
         with air_archive.open_db(db) as conn:
             row = air_archive.get_transmission(conn, tid)
         assert row["echo_clue"]["status"] == "match"
@@ -156,7 +161,7 @@ class TestStages:
                                      now=T, db_path=db)
         history = snaps((T - 12, [ac("484161", "KLM12B", mcp=11008)]),
                         (T + 8, [ac("484161", "KLM12B", mcp=7008)]))
-        fa.recheck_pending(now=T + 61, db_path=db,
+        fa.recheck_pending(now=T + 61 + fa.adsb.POLL_SEC, db_path=db,
                            snapshots_between=lambda a, b: [s for s in history
                                                            if a <= s["t"] <= b])
         with air_archive.open_db(db) as conn:
@@ -176,7 +181,7 @@ class TestStages:
                                      "121.200", now=T, db_path=db)
         history = snaps((T - 12, [ac("484161", "KLM12B", mcp=11008)]),
                         (T + 8, [ac("484161", "KLM12B", mcp=7008)]))
-        fa.recheck_pending(now=T + 61, db_path=db,
+        fa.recheck_pending(now=T + 61 + fa.adsb.POLL_SEC, db_path=db,
                            snapshots_between=lambda a, b: [s for s in history
                                                            if a <= s["t"] <= b])
         with air_archive.open_db(db) as conn:
@@ -206,7 +211,8 @@ class TestStages:
                 raise RuntimeError("boom")
             return [s for s in history if a <= s["t"] <= b]
 
-        done = fa.recheck_pending(now=T + 61, db_path=db, snapshots_between=flaky)
+        done = fa.recheck_pending(now=T + 61 + fa.adsb.POLL_SEC, db_path=db,
+                                  snapshots_between=flaky)
         assert done == 1
         with air_archive.open_db(db) as conn:
             row1 = air_archive.get_transmission(conn, tid1)
