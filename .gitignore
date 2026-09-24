@@ -134,3 +134,7 @@ traffic/
 
 # Brainstorming visual companion mockups
 .superpowers/
+
+# Raw per-arm results of the 2026-09-11 airband prompt-biasing measurement (bench_stt output,
+# received-radio transcripts). The spec's RESULT table carries the numbers; the files stay local.
+/server/air_*.json
