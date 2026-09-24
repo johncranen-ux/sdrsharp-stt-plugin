@@ -111,7 +111,7 @@ APPROACH_TOWER_CHANNELS = frozenset({
 })
 
 
-from stt_proxy import adsb, flight_identify  # noqa: E402
+from stt_proxy import adsb, flight_attribution, flight_identify  # noqa: E402
 
 
 def _maybe_identify_flight(text: str, channel: str) -> str:
@@ -119,6 +119,22 @@ def _maybe_identify_flight(text: str, channel: str) -> str:
     if channel not in APPROACH_TOWER_CHANNELS:
         return text
     return flight_identify.identify_flight(text)
+
+
+def _postprocess_airband(raw_text: str, channel: str) -> str:
+    """Corrections, the Approach 4 archive, then the [FLIGHT/TYPE] tag -- in that order.
+
+    Archived before tagging: the archive stores what was said, and the tag is a display
+    decision the Airband tab makes for itself. Wrapped so a broken archive can never cost the
+    plugin its transcription.
+    """
+    corrected = _apply_sttt_corrections(raw_text, mode="airband")
+    if channel in flight_attribution.AIR_CONVERSATION_CHANNELS:
+        try:
+            flight_attribution.record_transmission(corrected, channel)
+        except Exception as exc:
+            print(f"[air] archive call failed: {type(exc).__name__}: {exc}", flush=True)
+    return _maybe_identify_flight(corrected, channel)
 
 # ---------------------------------------------------------------------------
 # Recent-traffic memory and retrospective conversation resolution
@@ -482,8 +498,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     resp_body = json.dumps(data).encode("utf-8")
 
                 elif mode == "airband":
-                    corrected = _apply_sttt_corrections(raw_text, mode="airband")
-                    corrected = _maybe_identify_flight(corrected, channel)
+                    corrected = _postprocess_airband(raw_text, channel)
                     channel_label = f"[{channel} MHz]" if channel else "[airband]"
                     print(f"[{ts}] {channel_label} {corrected}", flush=True)
                     data["text"] = corrected
@@ -612,6 +627,10 @@ if __name__ == "__main__":
         adsb.start(adsb.POINT_LAT, adsb.POINT_LON, adsb.POINT_DIST_NM)
         print(f"Flight identification: adsb.fi, {adsb.POINT_DIST_NM}nm around "
               f"({adsb.POINT_LAT}, {adsb.POINT_LON}), every {adsb.POLL_SEC}s", flush=True)
+        flight_attribution.start()
+        print(f"Airband conversations: {sorted(flight_attribution.AIR_CONVERSATION_CHANNELS)}, "
+              f"autopilot clue {'ON' if flight_attribution.AIR_ECHO_ENABLED else 'recorded, not shown'}",
+              flush=True)
 
     # The watchdog exists solely to kill and restart the local whisper-server when the
     # AMD driver wedges mid-inference. Under Groq there is no such process, and an armed

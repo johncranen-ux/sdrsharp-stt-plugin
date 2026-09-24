@@ -274,6 +274,21 @@ class TestScore:
         assert bench.EXTRACTION_MISS not in over_heard.counts
         assert over_heard.counts[bench.CORRECT] == over_machine.counts[bench.CORRECT] + 1
 
+    def test_attribution_with_the_echo_off_reproduces_the_replay_exactly(self, corpus):
+        """The spec's regression criterion: the new attribution path changes how traffic is
+        grouped, never what gets identified."""
+        labels, snaps = corpus
+        text = labels.read_text(encoding="utf-8")
+        plain = bench.score(text, snaps, replay=True)
+        via = bench.score(text, snaps, replay=True, via_attribution=True)
+        assert via.counts == plain.counts
+        assert [r.tagged for r in via.rows] == [r.tagged for r in plain.rows]
+
+    def test_via_attribution_requires_replay(self, corpus):
+        labels, snaps = corpus
+        with pytest.raises(ValueError):
+            bench.score(labels.read_text(encoding="utf-8"), snaps, via_attribution=True)
+
 
 class TestCorpusIntegrity:
     """The `system` line was generated from the capture text, so it is a checksum over the

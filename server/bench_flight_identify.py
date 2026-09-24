@@ -176,7 +176,7 @@ import dataclasses
 import re
 
 import make_flight_labels
-from stt_proxy import adsb, flight_identify
+from stt_proxy import adsb, flight_attribution, flight_identify
 
 
 @dataclasses.dataclass
@@ -221,7 +221,8 @@ def _load_cache(snapshot: dict) -> None:
 def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
           replay: bool = False, text_source: str = "machine",
           arm: "TailFirst | None" = None,
-          transcripts: dict[str, str] | None = None) -> Result:
+          transcripts: dict[str, str] | None = None,
+          via_attribution: bool = False) -> Result:
     """Every labelled transmission in a worksheet, bucketed.
 
     `replay` re-runs extraction and matching against the aircraft that were actually in range
@@ -239,6 +240,8 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
         raise ValueError("an arm is a counterfactual and needs --replay")
     if transcripts is not None and not replay:
         raise ValueError("scoring an arm's transcripts is a counterfactual and needs --replay")
+    if via_attribution and not replay:
+        raise ValueError("--via-attribution replays through the new code and needs --replay")
     rows: list[Scored] = []
     missing: list[int] = []
     for record in make_flight_labels.parse_worksheet(worksheet):
@@ -270,8 +273,15 @@ def score(worksheet: str, snapshots: list[dict], blank_means: str = LABEL_NONE,
                         tagged=None, candidate=None, bucket=EXCLUDED, text="",
                         in_range=False))
                     continue
-                candidate = flight_identify.extract_callsign_candidate(text)
-                matched = flight_identify.match_flight(candidate)
+                if via_attribution:
+                    clue = flight_identify.callsign_clue(text)
+                    outcome = flight_attribution.combine(clue, None, echo_enabled=False)
+                    candidate = clue["candidate"]
+                    matched = ({"flight": clue["flight"]} if outcome["kind"] == "flight"
+                               else None)
+                else:
+                    candidate = flight_identify.extract_callsign_candidate(text)
+                    matched = flight_identify.match_flight(candidate)
                 if matched is None and arm is not None and (
                         candidate is None or arm.on_failed_candidate):
                     matched = match_by_tail(digit_runs(text), snapshot["aircraft"], arm)
@@ -472,6 +482,9 @@ def main() -> None:
     ap.add_argument("--transcripts", help="a bench-results JSON to score instead of the "
                                           "worksheet's own machine text (implies --replay)")
     ap.add_argument("--config", help="which arm inside --transcripts to read")
+    ap.add_argument("--via-attribution", action="store_true",
+                    help="replay through flight_attribution with the echo clue off "
+                         "(regression check)")
     args = ap.parse_args()
 
     if args.transcripts and args.text:
@@ -506,7 +519,7 @@ def main() -> None:
 
     result = score(worksheet, snapshots, blank_means=blank_means,
                    replay=args.replay or transcripts is not None, text_source=text_source,
-                   transcripts=transcripts)
+                   transcripts=transcripts, via_attribution=args.via_attribution)
 
     # The header is how a saved console log is identified months later, so it has to name the
     # source that was actually scored. Keying it off --replay alone printed "live record" for
@@ -519,6 +532,8 @@ def main() -> None:
         mode = f"replay over the {text_source} text"
     else:
         mode = "live record"
+    if args.via_attribution:
+        mode += " via attribution"
     print(f"{len(result.rows)} transmissions   {mode}   snapshots: {snap_path.name}")
     print(f"blank aircraft line read as {blank_means}\n")
 
