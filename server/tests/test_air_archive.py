@@ -86,3 +86,51 @@ def test_the_real_archive_is_unreachable_from_tests():
     with pytest.raises(AssertionError):
         with air_archive.open_db(real):
             pass
+
+
+def test_a_move_can_carry_the_aircraft_it_was_moved_to(tmp_path):
+    """A hand-made flight has no row of its own to lend it a callsign, so the move carries it."""
+    with air_archive.open_db(tmp_path / "c.db") as conn:
+        tid = air_archive.insert_transmission(conn, _row(100, key="unassigned",
+                                                         kind="unassigned", badge="none"))
+        move = air_archive.add_move(conn, tid, "4864eb", state={"flight": "KLM67F"})
+        assert move["state"] == {"flight": "KLM67F"}
+        row = air_archive.get_transmission(conn, tid)
+        assert row["moved_state"] == {"flight": "KLM67F"}
+        assert row["state"] == {"flight": "KLM12B"}      # the row's own state is untouched
+
+
+def test_a_move_without_an_aircraft_has_no_moved_state(tmp_path):
+    with air_archive.open_db(tmp_path / "c.db") as conn:
+        tid = air_archive.insert_transmission(conn, _row(100))
+        air_archive.add_move(conn, tid, "unassigned")
+        assert air_archive.get_transmission(conn, tid)["moved_state"] is None
+        untouched = air_archive.insert_transmission(conn, _row(200))
+        assert air_archive.get_transmission(conn, untouched)["moved_state"] is None
+
+
+def test_an_existing_archive_gains_the_state_column_and_keeps_its_moves(tmp_path):
+    import sqlite3
+    path = tmp_path / "c.db"
+    with air_archive.open_db(path) as conn:
+        tid = air_archive.insert_transmission(conn, _row(100))
+        air_archive.add_move(conn, tid, "unassigned")
+        # Back to the 2026-09-24 shape: air_moves without the state column.
+        conn.executescript("""
+            CREATE TABLE old_moves (
+              id              INTEGER PRIMARY KEY AUTOINCREMENT,
+              transmission_id INTEGER NOT NULL,
+              from_key        TEXT NOT NULL,
+              to_key          TEXT NOT NULL,
+              t_moved         TEXT NOT NULL);
+            INSERT INTO old_moves SELECT id, transmission_id, from_key, to_key, t_moved
+              FROM air_moves;
+            DROP TABLE air_moves;
+            ALTER TABLE old_moves RENAME TO air_moves;""")
+    cols = [r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(air_moves)")]
+    assert "state" not in cols
+    with air_archive.open_db(path) as conn:
+        row = air_archive.get_transmission(conn, tid)
+        assert row["effective_key"] == "unassigned" and row["moved_state"] is None
+        air_archive.add_move(conn, tid, "4864eb", state={"flight": "KLM67F"})
+        assert air_archive.get_transmission(conn, tid)["moved_state"] == {"flight": "KLM67F"}

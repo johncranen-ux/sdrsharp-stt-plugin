@@ -23,6 +23,11 @@ def _kind_of(key: str) -> str:
     return "flight"
 
 
+def is_flight_key(key: str) -> bool:
+    """An aircraft's ICAO hex, as opposed to Unassigned, Needs review or a heard callsign."""
+    return _kind_of(key) == "flight"
+
+
 def _label(key: str, state: dict | None) -> str:
     kind = _kind_of(key)
     if kind == "review":
@@ -32,6 +37,17 @@ def _label(key: str, state: dict | None) -> str:
     if kind == "unknown":
         return key.split(":", 1)[1]
     return (state or {}).get("flight") or key.upper()
+
+
+def _state_for_strip(row: dict) -> dict | None:
+    """The aircraft this row can name its strip after.
+
+    A moved row still carries the state of the aircraft it was moved AWAY from, so it lends
+    only what the move itself recorded -- the ADS-B aircraft a "New flight..." move picked.
+    """
+    if row.get("moved"):
+        return row.get("moved_state")
+    return row.get("state")
 
 
 def parse_range(frm: str | None, to: str | None, now: float) -> tuple[float, float, bool]:
@@ -56,9 +72,9 @@ def strips(rows: list[dict], now: float, live: bool) -> list[dict]:
         g["count"] += 1
         g["last_epoch"] = r["epoch"]
         g["last_t"] = r["t"]
-        if r.get("state") and not r.get("moved"):
-            # A moved row still carries the state of the aircraft it was moved away from.
-            g["state"] = r["state"]
+        state = _state_for_strip(r)
+        if state:
+            g["state"] = state
     out = []
     for g in groups.values():
         if live and g["last_epoch"] < now - LIVE_WINDOW_S:
@@ -114,7 +130,7 @@ def move_targets(rows: list[dict], epoch: float) -> list[dict]:
         key = r["effective_key"]
         if _kind_of(key) != "flight" or abs(r["epoch"] - epoch) > MOVE_TARGET_WINDOW_S:
             continue
-        state = None if r.get("moved") else r.get("state")
+        state = _state_for_strip(r)
         if key not in labels or state:
             labels[key] = _label(key, state)
     out = [{"key": k, "label": v} for k, v in labels.items()]

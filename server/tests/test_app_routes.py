@@ -1,4 +1,5 @@
 """The routes, over a supervisor that records calls instead of starting anything."""
+import json
 import sys
 from pathlib import Path
 
@@ -633,6 +634,72 @@ def test_moving_to_a_malformed_key_is_refused(client, tmp_path):
 def test_moving_a_missing_transmission_is_404(client):
     assert client.post("/api/air/moves", json={"transmission_id": 424242,
                                                 "to_key": "unassigned"}).status_code == 404
+
+
+def _seed_adsb(tmp_path, epoch, *aircraft):
+    """One snapshot in the proxy's day log under the test's LOG_DIR."""
+    import datetime
+    when = datetime.datetime.fromtimestamp(epoch).astimezone()
+    path = tmp_path / "logs" / f"adsb-{when.date().isoformat()}.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"t": when.isoformat(), "aircraft": list(aircraft)}) + "\n")
+
+
+_KLM67F = {"hex": "4864eb", "flight": "KLM67F", "r": "PH-NXN", "t": "E295", "alt_baro": 10150,
+           "lat": 52.287689, "lon": 4.490738}
+
+
+def test_air_aircraft_lists_what_was_in_range_at_that_moment(client, tmp_path):
+    import datetime
+    import time
+    epoch = time.time() - 30
+    _seed_adsb(tmp_path, epoch + 4, _KLM67F)
+    at = datetime.datetime.fromtimestamp(epoch).astimezone().isoformat()
+    body = client.get("/api/air/aircraft", params={"at": at}).json()
+    assert body["error"] is None
+    assert [a["flight"] for a in body["aircraft"]] == ["KLM67F"]
+
+
+def test_air_aircraft_says_when_there_is_no_adsb_for_that_moment(client):
+    body = client.get("/api/air/aircraft",
+                      params={"at": "2026-09-25T09:56:02+02:00"}).json()
+    assert body["aircraft"] == []
+    assert body["error"] == "no ADS-B data within 30 s of that moment"
+
+
+def test_air_aircraft_rejects_a_bad_time(client):
+    assert client.get("/api/air/aircraft", params={"at": "nonsense"}).status_code == 400
+
+
+def test_moving_to_a_new_flight_makes_a_strip_named_from_adsb(client, tmp_path):
+    import time
+    epoch = time.time() - 30
+    tid = _seed_air(tmp_path, epoch, key="unassigned")
+    _seed_adsb(tmp_path, epoch - 5, _KLM67F)
+    body = client.post("/api/air/moves", json={"transmission_id": tid,
+                                                "to_key": "4864eb"}).json()
+    assert body["move"]["state"]["flight"] == "KLM67F"
+    strips = client.get("/api/air/flights").json()["strips"]
+    assert [(s["key"], s["label"], s["type"]) for s in strips] == [("4864eb", "KLM67F", "E295")]
+
+
+def test_moving_to_an_aircraft_not_in_range_is_refused(client, tmp_path):
+    import time
+    epoch = time.time() - 30
+    tid = _seed_air(tmp_path, epoch, key="unassigned")
+    _seed_adsb(tmp_path, epoch, _KLM67F)
+    response = client.post("/api/air/moves", json={"transmission_id": tid, "to_key": "abcdef"})
+    assert response.status_code == 400
+    assert "not in ADS-B range" in response.json()["detail"]
+
+
+def test_moving_to_a_flight_already_heard_needs_no_snapshot(client, tmp_path):
+    import time
+    epoch = time.time() - 30
+    _seed_air(tmp_path, epoch - 60, key="4bb299")
+    tid = _seed_air(tmp_path, epoch)
+    assert client.post("/api/air/moves", json={"transmission_id": tid,
+                                                "to_key": "4bb299"}).status_code == 200
 
 
 def test_air_thread_looks_in_the_transmissions_own_capture_day(tmp_path):

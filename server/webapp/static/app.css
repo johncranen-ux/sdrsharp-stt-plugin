@@ -976,4 +976,19 @@ input[type="number"].settings-input { min-width: 100px; flex: 0 1 140px; }
 .air-badge-conflict .air-badge { color: var(--port); }
 .air-text { flex: 1; }
 .air-controls { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.air-pick { margin: 0 0 8px 24px; padding: 8px; border: 1px solid var(--sea-600);
+            border-radius: var(--radius); background: var(--sea-850); }
+.air-pick-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+                 color: var(--fog); font-size: 0.85em; }
+.air-pick-close { margin-left: auto; background: none; border: 0; color: var(--fog);
+                  cursor: pointer; font: inherit; }
+.air-pick-input { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+.air-pick-list { list-style: none; margin: 0; padding: 0; max-height: 16em; overflow-y: auto; }
+.air-pick-item { display: flex; width: 100%; gap: 6px; align-items: baseline; padding: 4px 6px;
+                 background: none; border: 0; border-radius: var(--radius); color: inherit;
+                 font: inherit; text-align: left; cursor: pointer; }
+.air-pick-item:hover, .air-pick-item:focus { background: var(--sea-700); }
+.air-pick-alt { margin-left: auto; font-family: var(--mono); font-size: 0.85em;
+                color: var(--fog); white-space: nowrap; }
+.air-pick-note { padding: 4px 6px; color: var(--fog); font-size: 0.85em; }
 .comment-status { font-size: .85rem; opacity: .75; }

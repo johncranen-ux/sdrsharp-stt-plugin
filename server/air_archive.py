@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS air_moves (
   transmission_id INTEGER NOT NULL,
   from_key        TEXT NOT NULL,
   to_key          TEXT NOT NULL,
-  t_moved         TEXT NOT NULL
+  t_moved         TEXT NOT NULL,
+  state           TEXT
 );
 CREATE INDEX IF NOT EXISTS air_moves_tid ON air_moves(transmission_id);
 """
@@ -50,7 +51,7 @@ _JSON_COLS = ("numbers", "callsign_clue", "echo_clue", "state")
 # The latest move per transmission, or NULL. MAX(id) rather than MAX(t_moved): two moves in
 # the same second must still have a defined winner.
 _SELECT = """
-SELECT a.*, m.to_key AS moved_to
+SELECT a.*, m.to_key AS moved_to, m.state AS moved_state
 FROM air_transmissions a
 LEFT JOIN air_moves m ON m.id = (
   SELECT MAX(id) FROM air_moves WHERE transmission_id = a.id)
@@ -66,10 +67,19 @@ def open_db(path):
     conn = conversation_archive.connect(path)
     try:
         conn.executescript(_SCHEMA)
+        _add_missing_columns(conn)
         conn.commit()
         yield conn
     finally:
         conn.close()
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """air_moves.state arrived 2026-09-25: the aircraft a hand-made flight was named from.
+    Archives created before that have the table without it; old moves read as NULL."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(air_moves)")}
+    if "state" not in cols:
+        conn.execute("ALTER TABLE air_moves ADD COLUMN state TEXT")
 
 
 def _decode(row: sqlite3.Row) -> dict:
@@ -77,6 +87,8 @@ def _decode(row: sqlite3.Row) -> dict:
     for col in _JSON_COLS:
         out[col] = json.loads(out[col]) if out.get(col) else None
     moved_to = out.pop("moved_to", None)
+    moved_state = out.pop("moved_state", None)
+    out["moved_state"] = json.loads(moved_state) if moved_state else None
     out["effective_key"] = moved_to or out["outcome_key"]
     out["moved"] = moved_to is not None
     return out
@@ -123,13 +135,16 @@ def get_transmission(conn: sqlite3.Connection, tid: int) -> dict | None:
 
 
 def add_move(conn: sqlite3.Connection, tid: int, to_key: str,
-             now: str | None = None) -> dict | None:
+             now: str | None = None, state: dict | None = None) -> dict | None:
+    """`state` is the aircraft moved to, when the move names one from ADS-B: a flight made by
+    hand has no attributed row of its own to take its callsign and type from."""
     current = get_transmission(conn, tid)
     if current is None:
         return None
     stamp = now or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    conn.execute("INSERT INTO air_moves (transmission_id, from_key, to_key, t_moved) "
-                 "VALUES (?, ?, ?, ?)", (tid, current["effective_key"], to_key, stamp))
+    conn.execute("INSERT INTO air_moves (transmission_id, from_key, to_key, t_moved, state) "
+                 "VALUES (?, ?, ?, ?, ?)", (tid, current["effective_key"], to_key, stamp,
+                                            json.dumps(state) if state is not None else None))
     conn.commit()
     return {"transmission_id": tid, "from_key": current["effective_key"],
-            "to_key": to_key, "t_moved": stamp}
+            "to_key": to_key, "t_moved": stamp, "state": state}

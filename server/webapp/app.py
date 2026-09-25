@@ -9,6 +9,7 @@ this app's own routes and asserts both -- that is what keeps it true as routes a
 """
 from __future__ import annotations
 
+import datetime
 import re
 import secrets
 import time
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 
 import air_archive
 import conversation_archive
-from webapp import (air_view, clips, config_store, conversations_view, credentials,
+from webapp import (air_aircraft, air_view, clips, config_store, conversations_view, credentials,
                     health as health_module, logs, registry, settings_api, vessels_view)
 from webapp.auth import COOKIE_NAME, CSRF_HEADER, LoginThrottle, SessionStore, TooManyAttempts
 from webapp.proxy_data import ProxyData
@@ -335,14 +336,50 @@ def create_app(*, server_dir: Path, config_path: Path, credentials_path: Path,
             out.append(item)
         return {"rows": out, "error": None}
 
+    def _adsb_log_dir() -> Path:
+        """Where the proxy's adsb-YYYY-MM-DD.jsonl lives: server/logs, which is also LOG_DIR's
+        default. Per request, like _archive_db, because LOG_DIR is a setting."""
+        return registry.resolve_paths(values(), server_dir).log_dir
+
+    @guarded.get("/api/air/aircraft")
+    def read_air_aircraft(at: str) -> dict:
+        """Every aircraft in ADS-B range at one transmission's time, for "New flight..."."""
+        try:
+            epoch = datetime.datetime.fromisoformat(at).timestamp()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"not an ISO-8601 time: {exc}") from None
+        snap = air_aircraft.nearest_snapshot(_adsb_log_dir(), epoch)
+        if snap is None:
+            return {"aircraft": [], "snapshot_t": None,
+                    "error": f"no ADS-B data within {air_aircraft.MAX_GAP_S} s of that moment"}
+        return {"aircraft": air_aircraft.listing(snap), "snapshot_t": snap.get("t"),
+                "error": None}
+
     @mutating.post("/api/air/moves")
     def write_air_move(body: AirMoveIn) -> dict:
+        """A move to an aircraft hex needs that aircraft to be real at that moment: either it
+        was in the ADS-B snapshot (a "New flight..." -- its state is stored with the move so
+        the strip has a name), or it is a flight already heard within the move-target window,
+        which is all the plain dropdown ever offers."""
         if not air_archive.valid_key(body.to_key):
             raise HTTPException(status_code=400, detail="not a flight key")
         with air_archive.open_db(_archive_db()) as conn:
-            move = air_archive.add_move(conn, body.transmission_id, body.to_key)
-        if move is None:
-            raise HTTPException(status_code=404, detail="no such transmission")
+            current = air_archive.get_transmission(conn, body.transmission_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail="no such transmission")
+            to_key, state = body.to_key, None
+            if air_view.is_flight_key(to_key):
+                to_key = to_key.lower()          # ADS-B hexes, and so strip keys, are lower case
+                snap = air_aircraft.nearest_snapshot(_adsb_log_dir(), current["epoch"])
+                state = air_aircraft.state_of(snap, to_key) if snap else None
+                window = air_view.MOVE_TARGET_WINDOW_S
+                heard = {t["key"] for t in air_view.move_targets(
+                    air_archive.transmissions(conn, current["epoch"] - window,
+                                              current["epoch"] + window), current["epoch"])}
+                if state is None and to_key not in heard:
+                    raise HTTPException(status_code=400,
+                                        detail="that aircraft was not in ADS-B range then")
+            move = air_archive.add_move(conn, body.transmission_id, to_key, state=state)
         return {"move": move}
 
     @guarded.get("/api/vessels")

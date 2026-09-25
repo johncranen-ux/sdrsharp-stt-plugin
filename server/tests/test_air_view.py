@@ -126,3 +126,21 @@ def test_evidence_says_when_a_callsign_was_read_from_qnh():
     r = row(1, NOW, "484abc", clue={"candidate": "KLM604", "hex": "484abc", "flight": "KLM604",
                                     "type": "E190", "reg": None, "repaired_from": "QNH"})
     assert 'KLM604 read from "QNH"' in air_view.evidence(r)
+
+
+KLM67F = {"flight": "KLM67F", "t": "E295", "r": "PH-NXN", "airline": "KLM", "alt_baro": 10150}
+
+
+def test_a_hand_made_flight_takes_its_name_from_the_move():
+    moved = row(1, NOW - 10, "4864eb", moved=True, state=KLM)
+    moved["moved_state"] = KLM67F
+    got = air_view.strips([moved], NOW, live=True)
+    assert got[0]["label"] == "KLM67F" and got[0]["type"] == "E295"
+    assert got[0]["reg"] == "PH-NXN" and got[0]["airline"] == "KLM"
+
+
+def test_a_hand_made_flight_is_offered_by_name_as_a_move_target():
+    moved = row(1, NOW - 10, "4864eb", moved=True, state=KLM)
+    moved["moved_state"] = KLM67F
+    got = {t["key"]: t["label"] for t in air_view.move_targets([moved], NOW)}
+    assert got["4864eb"] == "KLM67F"

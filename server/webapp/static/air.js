@@ -114,6 +114,64 @@ function renderAirStrips(body) {
   }
 }
 
+const AIR_NEW_FLIGHT = "__new__";
+
+/* "New flight…": every aircraft in ADS-B range at this transmission's time, nearest first,
+ * filtered as you type. Picking one moves the row there; the server re-checks that the
+ * aircraft was really in range and names the new strip from it. */
+async function openAirPicker(row, line) {
+  for (const open of document.querySelectorAll("#air-thread .air-pick")) open.remove();
+  const panel = element("div", "air-pick");
+  const head = element("div", "air-pick-head", `New flight at ${row.t.slice(11, 19)}`);
+  const close = element("button", "air-pick-close", "✕");
+  close.type = "button";
+  close.title = "Close";
+  close.addEventListener("click", () => panel.remove());
+  head.append(close);
+  const input = element("input", "air-pick-input");
+  input.type = "search";
+  input.placeholder = "callsign, type or registration";
+  input.setAttribute("aria-label", "Filter the aircraft in range");
+  const list = element("ul", "air-pick-list");
+  panel.append(head, input, list);
+  panel.addEventListener("keydown", (e) => { if (e.key === "Escape") panel.remove(); });
+  line.after(panel);
+  list.append(element("li", "air-pick-note", "Loading aircraft in range…"));
+  input.focus();
+
+  const body = await api(`/api/air/aircraft?at=${encodeURIComponent(row.t)}`);
+  const render = () => {
+    list.replaceChildren();
+    if (body.error) {
+      list.append(element("li", "air-pick-note", body.error));
+      return;
+    }
+    const want = input.value.trim().toUpperCase();
+    const hits = body.aircraft.filter((a) => !want ||
+      [a.flight, a.type, a.reg].some((v) => String(v || "").toUpperCase().includes(want)));
+    if (!hits.length) {
+      list.append(element("li", "air-pick-note", "No aircraft in range matches."));
+      return;
+    }
+    for (const a of hits) {
+      const item = element("li");
+      const pick = element("button", "air-pick-item");
+      pick.type = "button";
+      pick.append(element("b", "", a.flight),
+        element("span", "air-meta", ` ${[a.type, a.reg].filter(Boolean).join(" · ")}`),
+        element("span", "air-pick-alt", `${airFeet(a.alt)}${a.km !== null ? ` · ${a.km} km` : ""}`));
+      pick.addEventListener("click", () => {
+        panel.remove();
+        moveAirRow(row, a.hex).catch((e) => showAirError(e.message));
+      });
+      item.append(pick);
+      list.append(item);
+    }
+  };
+  input.addEventListener("input", render);
+  render();
+}
+
 async function moveAirRow(row, toKey) {
   await api("/api/air/moves", { method: "POST",
     body: JSON.stringify({ transmission_id: row.id, to_key: toKey }) });
@@ -156,8 +214,16 @@ function renderAirThread(strip, rows) {
     select.setAttribute("aria-label", "Move this transmission to another flight");
     select.append(new Option("move to…", ""));
     for (const target of row.targets) select.append(new Option(target.label, target.key));
+    const rule = new Option("──────────", "");
+    rule.disabled = true;
+    select.append(rule, new Option("New flight…", AIR_NEW_FLIGHT));
     select.addEventListener("change", () => {
-      if (select.value) moveAirRow(row, select.value).catch((e) => showAirError(e.message));
+      if (select.value === AIR_NEW_FLIGHT) {
+        select.value = "";
+        openAirPicker(row, line).catch((e) => showAirError(e.message));
+      } else if (select.value) {
+        moveAirRow(row, select.value).catch((e) => showAirError(e.message));
+      }
     });
     controls.append(select);
     line.append(controls);
@@ -180,12 +246,13 @@ function renderAirStatus(body) {
     `${feedText} · autopilot clue: ${body.echo_enabled ? "on" : "recording, not shown"}`;
 }
 
-// True while the reader is using the thread: a clip is playing or a "move to" is open.
-// Rebuilding it then would stop the audio or snatch the dropdown away.
+// True while the reader is using the thread: a clip is playing, a "move to" is open or the
+// "New flight…" picker is showing. Rebuilding it then would stop the audio or snatch it away.
 function airThreadInUse() {
   const playing = [...document.querySelectorAll("#air-thread audio")].some((a) => !a.paused);
   const active = document.activeElement;
-  return playing || Boolean(active && active.classList && active.classList.contains("air-move"));
+  return playing || Boolean(document.querySelector("#air-thread .air-pick"))
+    || Boolean(active && active.classList && active.classList.contains("air-move"));
 }
 
 function airThreadSignature(strip, rows) {
