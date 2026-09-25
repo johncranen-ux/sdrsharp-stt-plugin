@@ -17,24 +17,35 @@ import datetime
 import fnmatch
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
 LOGS = Path(r"D:\Claudecode\projects\SDRSharp-Plugin\server\logs")
 # The poll centre, so "how far out" is answerable. Mirrors adsb.py's defaults.
 ORIGIN_LAT, ORIGIN_LON = 52.15, 4.3
+_DAY_NAME = re.compile(r"adsb-(?:snapshots-)?(\d{4}-\d{2}-\d{2})\.jsonl")
+
+
+def _day_path(day: str) -> Path | None:
+    """The proxy's own log (adsb-<day>.jsonl) first, then the hand-made 09-10 side-car name."""
+    for name in (f"adsb-{day}.jsonl", f"adsb-snapshots-{day}.jsonl"):
+        if (LOGS / name).exists():
+            return LOGS / name
+    return None
 
 
 def _resolve_day(day: str | None) -> str:
     """An explicit --day must exist; otherwise today, else the newest capture on disk."""
     if day:
-        if not (LOGS / f"adsb-snapshots-{day}.jsonl").exists():
-            raise SystemExit(f"no snapshots for {day} ({LOGS / f'adsb-snapshots-{day}.jsonl'})")
+        if not _day_path(day):
+            raise SystemExit(f"no snapshots for {day} in {LOGS}")
         return day
     today = datetime.date.today().isoformat()
-    if (LOGS / f"adsb-snapshots-{today}.jsonl").exists():
+    if _day_path(today):
         return today
-    days = sorted(p.stem.removeprefix("adsb-snapshots-") for p in LOGS.glob("adsb-snapshots-*.jsonl"))
+    days = sorted({m.group(1) for p in LOGS.glob("adsb-*.jsonl")
+                   if (m := _DAY_NAME.fullmatch(p.name))})
     if not days:
         raise SystemExit(f"no snapshot files at all in {LOGS}")
     print(f"no snapshots for {today}; using {days[-1]}")
@@ -42,7 +53,7 @@ def _resolve_day(day: str | None) -> str:
 
 
 def _load(day: str) -> list[dict]:
-    path = LOGS / f"adsb-snapshots-{day}.jsonl"
+    path = _day_path(day)
     return [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
 
 
@@ -97,7 +108,7 @@ def main() -> None:
         row = _nearest(rows, args.at)
         hits = [a for a in row["aircraft"]
                 if a["flight"] and fnmatch.fnmatch(a["flight"].upper(), glob)]
-        print(f"snapshot {_hhmmss(row)}  ({row['n']} aircraft in range)  pattern {glob}")
+        print(f"snapshot {_hhmmss(row)}  ({row.get('n', len(row['aircraft']))} aircraft in range)  pattern {glob}")
         if not hits:
             print("  no match")
             return

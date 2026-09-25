@@ -623,3 +623,20 @@ class TestRunHeader:
         with pytest.raises(SystemExit) as excinfo:
             self._run(monkeypatch, corpus, "--transcripts", str(path), "--text", "heard")
         assert "--text" in str(excinfo.value) and "--transcripts" in str(excinfo.value)
+
+
+class TestDefaultSnapshotPath:
+    """The proxy logs adsb-<day>.jsonl; only 09-10 was captured under the side-car name."""
+
+    def test_prefers_the_proxys_own_day_log(self, tmp_path):
+        (tmp_path / "adsb-2026-09-25.jsonl").write_text("", encoding="utf-8")
+        assert bench.default_snapshot_path("2026-09-25", tmp_path) == tmp_path / "adsb-2026-09-25.jsonl"
+
+    def test_falls_back_to_the_09_10_side_car_name(self, tmp_path):
+        (tmp_path / "adsb-snapshots-2026-09-10.jsonl").write_text("", encoding="utf-8")
+        assert (bench.default_snapshot_path("2026-09-10", tmp_path)
+                == tmp_path / "adsb-snapshots-2026-09-10.jsonl")
+
+    def test_neither_present_names_the_proxy_log(self, tmp_path):
+        """So the 'no aircraft snapshots in ...' error points at the file that should exist."""
+        assert bench.default_snapshot_path("2026-09-25", tmp_path) == tmp_path / "adsb-2026-09-25.jsonl"

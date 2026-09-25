@@ -39,6 +39,17 @@ def load_snapshots(path: Path) -> list[dict]:
     return sorted(rows, key=lambda r: r["t"])
 
 
+def default_snapshot_path(day: str, logs: Path) -> Path:
+    """The proxy's own day log, else the hand-made 09-10 side-car name.
+
+    With neither on disk it returns the proxy's name, so the caller's error points at the file
+    that should have been written.
+    """
+    proxy_log = Path(logs) / f"adsb-{day}.jsonl"
+    side_car = Path(logs) / f"adsb-snapshots-{day}.jsonl"
+    return side_car if side_car.exists() and not proxy_log.exists() else proxy_log
+
+
 def load_transcripts(path: Path, config: str | None = None) -> dict[str, str]:
     """One arm's transcriptions from a bench-results JSON, keyed by clip id.
 
@@ -472,7 +483,7 @@ def _sweep(worksheet: str, snapshots: list[dict], blank_means: str, text_source:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", required=True)
-    ap.add_argument("--snapshots", help="default: logs/adsb-snapshots-<the worksheet's date>.jsonl")
+    ap.add_argument("--snapshots", help="default: logs/adsb-<the worksheet's date>.jsonl (adsb-snapshots-... for 09-10)")
     ap.add_argument("--replay", action="store_true",
                     help="re-run extraction and matching against the aircraft in range")
     # No argparse default: "not given" has to stay distinguishable from "given as machine",
@@ -505,7 +516,7 @@ def main() -> None:
         day = _timestamp_of(
             next(r["time"] for r in make_flight_labels.parse_worksheet(worksheet) if r.get("time"))
         )[:10]
-        snap_path = _LOGS / f"adsb-snapshots-{day}.jsonl"
+        snap_path = default_snapshot_path(day, _LOGS)
     snapshots = load_snapshots(snap_path)
     if not snapshots:
         raise SystemExit(f"no aircraft snapshots in {snap_path} -- nothing can be bucketed")
