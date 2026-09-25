@@ -113,9 +113,18 @@ def _build_app(tmp_path):
     # config_store.save merges over whatever a caller already wrote (e.g. CAPTURES_DIR in
     # _client_with_captures) rather than replacing the file -- a plain write here would
     # silently drop those keys for every test that configures something before calling us.
+    # CAPTURES_DIR's default is the operator's real capture directory: left unset, the thread
+    # route matched live Approach 4 clips recorded seconds before a test's "now - 30 s" row,
+    # and the capture guard failed the test -- only while SDR# was capturing. A path that does
+    # not exist means "capture is off"; a caller's own CAPTURES_DIR is kept.
+    stored = config_store.load(tmp_path / "config.json")
+    captures = stored["CAPTURES_DIR"] if (tmp_path / "config.json").exists() else ""
+    if not captures or captures == config_store.BY_KEY["CAPTURES_DIR"].default:
+        captures = str(tmp_path / "no-captures")
     config_store.save(tmp_path / "config.json", {
         "CONVERSATIONS_DB": str(tmp_path / "conversations.db"),
-        "LOG_DIR": str(tmp_path / "logs")})
+        "LOG_DIR": str(tmp_path / "logs"),
+        "CAPTURES_DIR": captures})
     fake = _FakeSupervisor(tmp_path / "logs")
     proxy_data = _fake_proxy_data(_CONVERSATIONS, _VESSELS)
     app = create_app(server_dir=_SERVER_DIR, config_path=tmp_path / "config.json",
