@@ -531,3 +531,62 @@ def test_kelom_is_a_known_garbling_of_klm():
         "[KLM1299/B739] One three four three seven five, KELOM 1299."
     assert flight_identify.extract_callsign_candidate(
         "KELOM one eight eight, we are able for the right turn.") == "KLM188"
+
+
+# 2026-09-25: the official telephony of every airline flying below FL150 through the ADS-B
+# area often enough to matter (two days of snapshots; OpenFlights, corrected where it is out
+# of date -- THY is TURKISH, not TURKAIR). KLC alone had 130 flights and no entry.
+@pytest.mark.parametrize("word, code", [
+    ("city", "KLC"), ("easy", "EZY"), ("alpine", "EJU"), ("scandinavian", "SAS"),
+    ("vueling", "VLG"), ("flyer", "CFE"), ("airbaltic", "BTI"), ("emirates", "UAE"),
+    ("airfrans", "AFR"), ("turkish", "THY"), ("fraction", "NJE"), ("sunexpress", "SXS"),
+    ("sunturk", "PGT"), ("austrian", "AUA"), ("itarrow", "ITY"), ("anatolia", "TKJ"),
+    ("anatolian", "TKJ"), ("swiss", "SWR"), ("singapore", "SIA"), ("iberia", "IBE"),
+    ("etihad", "ETD"), ("pollot", "LOT"), ("aegean", "AEE"), ("saudia", "SVA"),
+    ("iceair", "ICE"), ("finnair", "FIN"), ("tarom", "ROT"), ("transat", "TSC"),
+    ("surinam", "SLM"), ("cathay", "CPA"), ("hainan", "CHH"), ("egyptair", "MSR"),
+])
+def test_telephony_of_airlines_flying_through_the_area(word, code):
+    assert flight_identify.extract_callsign_candidate(
+        f"Descend four thousand feet, {word} one two three.") == f"{code}123"
+
+
+@pytest.mark.parametrize("phrase, code", [
+    ("Air Baltic", "BTI"), ("Air France", "AFR"), ("Air Frans", "AFR"),
+    ("Sun Express", "SXS"), ("Air Portugal", "TAP"), ("China Southern", "CSN"),
+    ("Ice Air", "ICE"), ("Egypt Air", "MSR"),
+])
+def test_two_word_telephony_of_airlines_flying_through_the_area(phrase, code):
+    assert flight_identify.extract_callsign_candidate(
+        f"{phrase} four five six, contact Schiphol.") == f"{code}456"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # 2026-09-25, all three with the aircraft in range at the time (replay of the day).
+    ("Two three seven zero five, city one zero five seven.", "KLC1057"),
+    ("Good day, city three four, tango.", "KLC34T"),
+    ("Approach, City Five Six Hotel.", "KLC56H"),
+    ("One two five seven five, easy, eight six seven one, bye bye.", "EZY8671"),
+    # 2026-09-24: "Delta" is a phonetic letter here, not the airline -- alpine still wins.
+    ("That's copied, descend flight level five zero, and we'll be checking Delta Alpine five "
+     "nine, go for a shot.", "EJU59"),
+    ("Right heading two seven zero, Alpine twenty nine, Romia Zulu.", "EJU29"),
+    ("Departure, this is flyer two two nine, can we have that frequency again please?",
+     "CFE229"),
+])
+def test_real_transmissions_with_newly_listed_telephony(text, expected):
+    assert flight_identify.extract_callsign_candidate(text) == expected
+
+
+def test_city_names_the_cityhopper_flight_in_range():
+    _seed("484d1a", "KLC1057", t="E75L")
+    assert flight_identify.identify_flight(
+        "Two three seven zero five, city one zero five seven.") == \
+        "[KLC1057/E75L] Two three seven zero five, city one zero five seven."
+
+
+def test_a_city_that_is_not_a_callsign_names_nothing():
+    _seed("484d1a", "KLC1057", t="E75L")
+    assert flight_identify.callsign_clue(
+        "One one eight four zero five, and new heading zero two five, you're linked to "
+        "San Francisco City Bank.")["hex"] is None

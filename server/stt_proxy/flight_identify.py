@@ -50,6 +50,23 @@ AIRLINE_TELEPHONY: dict[str, str] = {
     # "KL one two bravo" for KLM12B. Two letters, so it never reaches the fuzzy path below and
     # must match exactly, which is what makes an anchor this short safe.
     "kl": "KLM",
+    # 2026-09-25: the official telephony of every airline flying below FL150 through the ADS-B
+    # area often enough to matter (two days of snapshots). KLM Cityhopper alone had 130 flights
+    # and no entry, and "alpine" had been said 25 times without one identification. Sources:
+    # OpenFlights airlines.dat, corrected where out of date (THY is TURKISH, not TURKAIR; AJet
+    # is heard as both ANATOLIA and ANATOLIAN). Checked against every word of six days of
+    # Approach 4 transcripts: the only ordinary words these fuzzy-match are action, traction
+    # and friction -> "fraction", and those still need a NetJets flight with those digits in
+    # range. Replay of 2026-09-25 before shipping: see the commit message.
+    "city": "KLC", "easy": "EZY", "alpine": "EJU", "scandinavian": "SAS",
+    "vueling": "VLG", "flyer": "CFE", "airbaltic": "BTI", "emirates": "UAE",
+    "airfrans": "AFR", "airfrance": "AFR", "turkish": "THY", "fraction": "NJE",
+    "sunexpress": "SXS", "sunturk": "PGT", "austrian": "AUA", "itarrow": "ITY",
+    "airportugal": "TAP", "anatolia": "TKJ", "anatolian": "TKJ", "swiss": "SWR",
+    "singapore": "SIA", "iberia": "IBE", "etihad": "ETD", "pollot": "LOT", "aegean": "AEE",
+    "saudia": "SVA", "iceair": "ICE", "finnair": "FIN", "tarom": "ROT",
+    "chinasouthern": "CSN", "transat": "TSC", "surinam": "SLM", "cathay": "CPA",
+    "hainan": "CHH", "egyptair": "MSR",
 }
 
 # Telephony designators that are two spoken words. The tokenizer is single-word, and the
@@ -58,6 +75,9 @@ AIRLINE_TELEPHONY: dict[str, str] = {
 # This is the general form of the workaround "canada" uses for Air Canada.
 _TELEPHONY_PHRASES: dict[str, str] = {
     "jet blue": "jetblue",
+    "air baltic": "airbaltic", "air france": "airfrance", "air frans": "airfrans",
+    "sun express": "sunexpress", "air portugal": "airportugal",
+    "china southern": "chinasouthern", "ice air": "iceair", "egypt air": "egyptair",
 }
 
 # Spoken forms close enough to an ordinary word that fuzzy anchoring on them does more harm
